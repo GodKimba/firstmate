@@ -285,6 +285,7 @@ Complexity alone is not expansion: a difficult correction genuinely required by 
 Before deciding any ask-user finding, load `ask-user-authority`; the implementation worker never answers its own finding.
 Never merge a red PR.
 Use `bin/fm-pr-merge.sh` for every task PR merge so merge metadata is recorded, and use `bin/fm-merge-local.sh` for approved local-only landing; never call a lower-level merge command around their guards.
+Treat only its verified `merged` result as landing confirmation; `auto-merge enabled` means the PR is still open and ordinary merge monitoring and task work stay in place.
 After an autonomous merge, give the captain a one-line full-URL or local-main outcome.
 
 ### Validate

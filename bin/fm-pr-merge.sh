@@ -7,6 +7,10 @@
 # Merge method defaults to --squash when the caller passes none of --squash,
 # --merge, --rebase, or --method after the optional -- separator. Extra args
 # must not include --repo or -R because the repository comes only from the URL.
+# After gh-axi returns, the helper reads the current GitHub REST state. Exit 0
+# means GitHub verifies the PR is merged; exit 3 means auto-merge is enabled on
+# an open PR and the existing merge poll must keep watching; every unreadable or
+# contradictory result exits 1 and preserves the task work.
 # Usage: fm-pr-merge.sh <task-id> <pr-url> [-- <extra gh-axi pr merge args>]
 set -eu
 
@@ -49,6 +53,21 @@ caller_has_merge_method() {
   return 1
 }
 
+caller_requested_auto_merge() {
+  local arg
+  for arg in "$@"; do
+    [ "$arg" != --auto ] || return 0
+  done
+  return 1
+}
+
+state_field() {
+  local output=$1 key=$2 count
+  count=$(printf '%s\n' "$output" | awk -F': ' -v key="$key" '$1 == key { count++ } END { print count + 0 }')
+  [ "$count" -eq 1 ] || return 1
+  printf '%s\n' "$output" | awk -F': ' -v key="$key" '$1 == key { sub(/^[^:]*: /, ""); print }'
+}
+
 reject_repo_overrides() {
   local arg
   for arg in "$@"; do
@@ -80,5 +99,44 @@ merge_args=()
 if ! caller_has_merge_method "$@"; then
   merge_args=(--squash)
 fi
+if caller_requested_auto_merge "$@"; then
+  REQUESTED_AUTO=1
+else
+  REQUESTED_AUTO=0
+fi
 
-gh-axi pr merge "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" "${merge_args[@]+"${merge_args[@]}"}" "$@"
+# gh-axi 0.1.28 labels every successful `gh pr merge` invocation as `merged`,
+# including one that only enables auto-merge. Suppress that human-oriented label
+# and establish the result from a fresh authoritative GitHub read instead.
+if ! gh-axi pr merge "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" \
+  "${merge_args[@]+"${merge_args[@]}"}" "$@" >/dev/null; then
+  echo "error: GitHub did not accept the PR merge request; task work is preserved" >&2
+  exit 1
+fi
+
+if ! PR_STATE_OUTPUT=$(gh-axi api "/repos/$PR_OWNER/$PR_REPO/pulls/$PR_NUMBER" --jq \
+  '{state: .state, merged: .merged, merged_at: .merged_at, auto_merge_enabled: (.auto_merge != null)}'); then
+  echo "error: GitHub PR state could not be verified after the merge request; task work is preserved" >&2
+  exit 1
+fi
+PR_STATE=$(state_field "$PR_STATE_OUTPUT" state) || PR_STATE=
+PR_MERGED=$(state_field "$PR_STATE_OUTPUT" merged) || PR_MERGED=
+PR_MERGED_AT=$(state_field "$PR_STATE_OUTPUT" merged_at) || PR_MERGED_AT=
+PR_AUTO_MERGE=$(state_field "$PR_STATE_OUTPUT" auto_merge_enabled) || PR_AUTO_MERGE=
+
+case "$PR_STATE:$PR_MERGED:$PR_MERGED_AT" in
+  closed:true:\"????-??-??T??:??:??Z\")
+    printf 'merged: %s\n' "$URL"
+    exit 0
+    ;;
+esac
+
+if [ "$REQUESTED_AUTO" -eq 1 ] && [ "$PR_STATE" = open ] \
+  && [ "$PR_MERGED" = false ] && [ "$PR_MERGED_AT" = null ] \
+  && [ "$PR_AUTO_MERGE" = true ]; then
+  printf 'auto-merge enabled: %s; waiting on checks\n' "$URL"
+  exit 3
+fi
+
+echo "error: GitHub PR state was unreadable or contradicted the requested merge outcome; task work is preserved" >&2
+exit 1
