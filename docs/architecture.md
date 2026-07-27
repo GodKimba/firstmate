@@ -85,6 +85,14 @@ Stalled escalation delivery writes `state/.subsuper-inject-wedged` and attempts 
 On an unmarked return, `bin/fm-afk-return.sh` owns ordered shutdown, durable catch-up evidence, and the fail-closed gate that keeps ordinary work behind every live firstmate-actionable blocker.
 `fm-send.sh` selects a pre-Enter popup-settle for slash commands and for codex `$...` skill invocations using metadata-routed target `harness=` values, then adds its own `FM_SEND_SETTLE` pause after successful text sends so immediate peeks catch the receiving turn starting; the sub-supervisor uses only the shared submit core and does not pay that post-submit pause.
 
+## Pi primary tool-result image boundary
+
+Pi and pi-signed share the tracked `.pi/extensions/fm-primary-turnend-guard.ts` primary extension, so its `tool_result` adapter is the single Firstmate-owned boundary before either executable passes tool results into provider request construction.
+At that boundary, a base64 image in the source-shaped `{type: "image", source: {type: "base64", mediaType, data}}` form becomes Pi's canonical `{type: "image", mimeType, data}` form.
+Valid canonical image blocks and non-image content pass through unchanged, while the returned patch changes only content and error status so Pi retains the tool-result metadata.
+The adapter accepts GIF, JPEG, PNG, and WebP base64 images; malformed data, unsupported MIME types, and non-base64 sources become explicit text errors and mark the tool result as failed before they can enter conversation history.
+`tests/fm-pi-tool-result-images.test.sh` reproduces the Gaia attachment shape without a live Gaia call and passes the normalized result through Pi's installed OpenAI Codex request converter, while also covering canonical images, text-only results, malformed images, and terminal independence.
+
 ## Runtime session backends
 
 The runtime backend is the session-provider layer below firstmate's scripts.

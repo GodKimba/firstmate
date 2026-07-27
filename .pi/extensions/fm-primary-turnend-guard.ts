@@ -5,6 +5,7 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { encodeFirstmateOperationalInput } from "./lib/fm-operational-input.ts";
+import { normalizePiToolResultImages } from "./lib/fm-pi-tool-result-images.ts";
 
 let guardFollowupActive = false;
 
@@ -106,6 +107,15 @@ function runCdCheck(command: string): Promise<{ code: number; stderr: string }> 
 }
 
 export default function (pi: ExtensionAPI) {
+  pi.on?.("tool_result", (event) => {
+    const normalization = normalizePiToolResultImages(event.content);
+    if (!normalization.changed) return;
+    return {
+      content: normalization.content as unknown as typeof event.content,
+      isError: event.isError || normalization.malformed,
+    };
+  });
+
   pi.on?.("session_start", (event) => {
     const reason = String((event as { reason?: unknown }).reason ?? "");
     const nudge = ["startup", "new", "resume"].includes(reason) ? runSessionstartNudge() : "";
