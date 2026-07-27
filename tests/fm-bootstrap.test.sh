@@ -4,12 +4,13 @@
 # Bootstrap prints one block or line per actionable problem, optional verbose
 # BOOTSTRAP_INFO fact, or completed bootstrap no-action fact and is silent when
 # all is well. firstmate consumes the exact 'MISSING: treehouse (install: ...)',
-# 'MISSING: tasks-axi (install: ...)', 'MISSING: quota-axi (install: ...)', and
-# 'BOOTSTRAP_INFO: ...' lines, so those contracts are pinned verbatim. The cases
-# are table-driven over the inputs that vary: whether `treehouse get --help`
-# advertises --lease, which (if any) tasks-axi version is on PATH, whether
-# tasks-axi update advertises --archive-body, whether its mv help advertises
-# multi-ID moves, whether quota-axi is on PATH,
+# 'MISSING: gh-axi (install: ...)', 'MISSING: tasks-axi (install: ...)',
+# 'MISSING: quota-axi (install: ...)', and 'BOOTSTRAP_INFO: ...' lines, so those
+# contracts are pinned verbatim. The cases are table-driven over the inputs that
+# vary: whether `treehouse get --help` advertises --lease, which gh-axi version
+# and api --jq capability is on PATH, which (if any) tasks-axi version is on
+# PATH, whether tasks-axi update advertises --archive-body, whether its mv help
+# advertises multi-ID moves, whether quota-axi is on PATH,
 # whether the local backend config opts out of tasks-axi backlog mutations, and
 # which no-mistakes version is on PATH.
 # Dedicated fleet-sync cases pin the computed bootstrap timeout, explicit
@@ -320,6 +321,43 @@ older no-mistakes patch reports an upgrade^no-mistakes version v1.31.1 (fake)^mi
 unparseable no-mistakes version reports an upgrade^no-mistakes development build^missing
 ROWS
   pass "bootstrap enforces no-mistakes minimum version"
+}
+
+test_gh_axi_min_version_and_api_jq() {
+  local label version api_jq mode case_dir fakebin out missing npm_log n
+  missing='MISSING: gh-axi (install: npm install -g gh-axi && gh-axi setup hooks)'
+  n=0
+  while IFS='^' read -r label version api_jq mode; do
+    [ -n "$label" ] || continue
+    n=$((n + 1))
+    case_dir="$TMP_ROOT/gh-axi-$n"
+    mkdir -p "$case_dir/home/config"
+    printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+    fakebin=$(make_fake_toolchain "$case_dir")
+    npm_log="$case_dir/npm-called"
+    cat > "$fakebin/npm" <<'SH'
+#!/usr/bin/env bash
+: > "${FM_FAKE_NPM_LOG:?}"
+SH
+    chmod +x "$fakebin/npm"
+    out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+      FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_FAKE_GH_AXI_VERSION="$version" \
+      FM_FAKE_GH_AXI_API_JQ="$api_jq" FM_FAKE_NPM_LOG="$npm_log" "$ROOT/bin/fm-bootstrap.sh")
+    case "$mode" in
+      empty)
+        [ -z "$out" ] || fail "$label: expected silence, got: $out" ;;
+      missing)
+        [ "$out" = "$missing" ] || fail "$label: expected '$missing', got: $out" ;;
+    esac
+    [ ! -e "$npm_log" ] || fail "$label: bootstrap updated gh-axi without approval"
+  done <<'ROWS'
+minimum gh-axi version with api jq is accepted^gh-axi 0.1.28^1^empty
+newer gh-axi version with api jq is accepted^gh-axi 0.2.0^1^empty
+older gh-axi reports an update even if api jq is advertised^gh-axi 0.1.27^1^missing
+minimum gh-axi without api jq reports an update^gh-axi 0.1.28^0^missing
+unparseable gh-axi version reports an update^gh-axi development build^1^missing
+ROWS
+  pass "bootstrap enforces gh-axi version and api jq support without auto-updating"
 }
 
 test_git_is_required_with_supported_install_instruction() {
@@ -805,6 +843,7 @@ ROWS
 
 test_bootstrap_reporting
 test_no_mistakes_min_version
+test_gh_axi_min_version_and_api_jq
 test_git_is_required_with_supported_install_instruction
 test_orca_backend_gates_orca_tool_only_when_selected
 test_session_provider_backends_do_not_require_tmux

@@ -79,8 +79,9 @@ fm_test_tmproot() {
 # --- fakebin / PATH shims ---------------------------------------------------
 #
 # fm_fakebin <dir> creates <dir>/fakebin and echoes it; prepend it to PATH to
-# shadow real tools with stubs. fm_fake_exit0 drops trivial exit-0 stubs for the
-# named tools into a fakebin dir.
+# shadow real tools with stubs. fm_fake_exit0 drops deterministic success stubs
+# for the named tools into a fakebin dir; the gh-axi stub exposes the minimum
+# version and api --jq help contract required by bootstrap.
 
 fm_fakebin() {
   local dir=$1 fakebin="$1/fakebin"
@@ -92,6 +93,30 @@ fm_fake_exit0() {
   local fakebin=$1 tool
   shift
   for tool in "$@"; do
+    if [ "$tool" = gh-axi ]; then
+      cat > "$fakebin/$tool" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --version ]; then
+  printf '%s\n' "${FM_FAKE_GH_AXI_VERSION:-gh-axi 0.1.28}"
+  exit 0
+fi
+if [ "${1:-}" = api ] && [ "${2:-}" = --help ]; then
+  if [ "${FM_FAKE_GH_AXI_API_JQ:-1}" = 1 ]; then
+    printf '%s\n' 'usage: gh-axi api [<method>] <path> [flags]' \
+      'flags[5]:' \
+      '  --field <key=value>, --header <key:value>, --paginate, --jq <expression>, --template <format>'
+  else
+    printf '%s\n' 'usage: gh-axi api [<method>] <path> [flags]' \
+      'flags[3]:' \
+      '  --field <key=value>, --header <key:value>, --paginate'
+  fi
+  exit 0
+fi
+exit 0
+SH
+      chmod +x "$fakebin/$tool"
+      continue
+    fi
     cat > "$fakebin/$tool" <<'SH'
 #!/usr/bin/env bash
 exit 0

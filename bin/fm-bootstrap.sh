@@ -48,6 +48,8 @@
 #          "treehouse get --lease" support.
 #          no-mistakes is also MISSING when its installed version is older than
 #          1.31.2.
+#          gh-axi is also MISSING when its installed version is older than
+#          0.1.28 or its api command does not advertise --jq support.
 #          tasks-axi and quota-axi are required bootstrap tools (same class as
 #          lavish-axi). tasks-axi is also version and feature gated (0.1.1+
 #          with update --archive-body and mv [<id>...]); an installed but
@@ -524,6 +526,9 @@ TOOLS="$BACKEND_TOOLS $COMMON_TOOLS"
 NO_MISTAKES_MIN_MAJOR=1
 NO_MISTAKES_MIN_MINOR=31
 NO_MISTAKES_MIN_PATCH=2
+GH_AXI_MIN_MAJOR=0
+GH_AXI_MIN_MINOR=1
+GH_AXI_MIN_PATCH=28
 
 treehouse_supports_lease() {
   treehouse get --help 2>&1 | grep -Eq '(^|[^[:alnum:]_-])--lease([^[:alnum:]_-]|$)'
@@ -546,6 +551,38 @@ no_mistakes_compatible() {
   [ "$minor" -gt "$NO_MISTAKES_MIN_MINOR" ] && return 0
   [ "$minor" -eq "$NO_MISTAKES_MIN_MINOR" ] || return 1
   [ "$patch" -ge "$NO_MISTAKES_MIN_PATCH" ]
+}
+
+gh_axi_version_parts() {
+  local output
+  command -v gh-axi >/dev/null 2>&1 || return 1
+  output=$(gh-axi --version 2>/dev/null) || return 1
+  printf '%s\n' "$output" | sed -nE 's/.*[vV]?([0-9]+)\.([0-9]+)\.([0-9]+).*/\1 \2 \3/p' | head -n 1
+}
+
+gh_axi_api_supports_jq() {
+  local output
+  output=$(gh-axi api --help 2>&1) || return 1
+  printf '%s\n' "$output" | grep -Eq '(^|[^[:alnum:]_-])--jq([^[:alnum:]_-]|$)'
+}
+
+gh_axi_compatible() {
+  local parts major minor patch extra
+  parts=$(gh_axi_version_parts) || return 1
+  IFS=' ' read -r major minor patch extra <<< "$parts"
+  [ -n "$major" ] && [ -n "$minor" ] && [ -n "$patch" ] && [ -z "$extra" ] || return 1
+  if [ "$major" -gt "$GH_AXI_MIN_MAJOR" ]; then
+    :
+  elif [ "$major" -lt "$GH_AXI_MIN_MAJOR" ]; then
+    return 1
+  elif [ "$minor" -gt "$GH_AXI_MIN_MINOR" ]; then
+    :
+  elif [ "$minor" -lt "$GH_AXI_MIN_MINOR" ]; then
+    return 1
+  elif [ "$patch" -lt "$GH_AXI_MIN_PATCH" ]; then
+    return 1
+  fi
+  gh_axi_api_supports_jq
 }
 
 x_mode_write_if_changed() {
@@ -840,6 +877,9 @@ if fm_backend_list_contains "$TOOLS" treehouse \
 fi
 if command -v no-mistakes >/dev/null 2>&1 && ! no_mistakes_compatible; then
   echo "MISSING: no-mistakes (install: $(install_cmd no-mistakes))"
+fi
+if command -v gh-axi >/dev/null 2>&1 && ! gh_axi_compatible; then
+  echo "MISSING: gh-axi (install: $(install_cmd gh-axi))"
 fi
 if command -v tasks-axi >/dev/null 2>&1 && ! fm_tasks_axi_compatible; then
   echo "MISSING: tasks-axi (install: $(install_cmd tasks-axi))"
