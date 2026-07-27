@@ -71,6 +71,7 @@ const retryMaxMs = positiveInteger("FM_WATCH_REARM_RETRY_MAX_MS", 4000);
 const retryLimit = positiveInteger("FM_WATCH_REARM_RETRY_LIMIT", 5);
 const armReadyTimeoutMs = positiveInteger("FM_PI_ARM_READY_TIMEOUT_MS", 12000);
 const armRetireTimeoutMs = positiveInteger("FM_WATCH_ARM_RETIRE_TIMEOUT_MS", 1000);
+const armExitDrainMs = positiveInteger("FM_PI_ARM_EXIT_DRAIN_MS", 50);
 const repairOnlyHint = "call fm_watch_arm_pi again only after a later notification says the cycle is missing, failed, or unhealthy";
 
 let child: ChildProcess | null = null;
@@ -101,6 +102,12 @@ function pidAlive(pid: string): boolean {
   } catch {
     return false;
   }
+}
+
+function armChildAlive(armChild: ChildProcess): boolean {
+  if (armChild.exitCode !== null || armChild.signalCode !== null) return false;
+  if (!armChild.pid) return false;
+  return pidAlive(String(armChild.pid));
 }
 
 function lockOwnership(): LockOwnership {
@@ -303,6 +310,7 @@ export default function (pi: ExtensionAPI) {
       };
     }
     markLoaded();
+    if (child && !armChildAlive(child)) child = null;
     if (child) {
       return {
         ok: true,
@@ -333,6 +341,7 @@ export default function (pi: ExtensionAPI) {
     let stdout = "";
     let stderr = "";
     let settled = false;
+    let exitDrainTimer: ReturnType<typeof setTimeout> | null = null;
     let readinessSettled = false;
     let resolveReadiness: (ready: boolean) => void = () => {};
     let resolveClosed: () => void = () => {};
@@ -357,18 +366,11 @@ export default function (pi: ExtensionAPI) {
     const releaseChild = (): void => {
       if (child === armChild) child = null;
     };
-    armChild.stdout.on("data", (chunk: Buffer) => {
-      stdout += chunk.toString();
-      observeEstablishedArm();
-    });
-    armChild.stderr.on("data", (chunk: Buffer) => {
-      stderr += chunk.toString();
-      observeEstablishedArm();
-    });
-    armChild.on("close", (code: number | null, signal: NodeJS.Signals | null) => {
+    const settleArm = (code: number | null, signal: NodeJS.Signals | null): void => {
       if (settled) return;
       settled = true;
-      resolveClosed();
+      if (exitDrainTimer) clearTimeout(exitDrainTimer);
+      exitDrainTimer = null;
       settleReadiness(false);
       releaseChild();
       if (stopping) return;
@@ -389,10 +391,28 @@ export default function (pi: ExtensionAPI) {
       }
       if (restoring) return;
       scheduleRetry(classification.message, predecessor);
+    };
+    armChild.stdout.on("data", (chunk: Buffer) => {
+      stdout += chunk.toString();
+      observeEstablishedArm();
+    });
+    armChild.stderr.on("data", (chunk: Buffer) => {
+      stderr += chunk.toString();
+      observeEstablishedArm();
+    });
+    armChild.on("exit", (code: number | null, signal: NodeJS.Signals | null) => {
+      if (settled) return;
+      exitDrainTimer = setTimeout(() => settleArm(code, signal), armExitDrainMs);
+    });
+    armChild.on("close", (code: number | null, signal: NodeJS.Signals | null) => {
+      resolveClosed();
+      settleArm(code, signal);
     });
     armChild.on("error", (error: Error) => {
       if (settled) return;
       settled = true;
+      if (exitDrainTimer) clearTimeout(exitDrainTimer);
+      exitDrainTimer = null;
       resolveClosed();
       settleReadiness(false);
       releaseChild();
