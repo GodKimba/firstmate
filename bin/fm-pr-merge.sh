@@ -95,11 +95,9 @@ fi
 # gh-axi 0.1.28 labels every successful `gh pr merge` invocation as `merged`,
 # including one that only enables auto-merge. Suppress that human-oriented label
 # and establish the result from a fresh authoritative GitHub read instead.
-if ! gh-axi pr merge "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" \
-  "${merge_args[@]+"${merge_args[@]}"}" "$@" >/dev/null; then
-  echo "error: GitHub did not accept the PR merge request; task work is preserved" >&2
-  exit 1
-fi
+MERGE_STATUS=0
+gh-axi pr merge "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" \
+  "${merge_args[@]+"${merge_args[@]}"}" "$@" >/dev/null || MERGE_STATUS=$?
 
 if ! PR_STATE_OUTPUT=$(gh-axi api "/repos/$PR_OWNER/$PR_REPO/pulls/$PR_NUMBER" --jq \
   '{state: .state, merged: .merged, merged_at: .merged_at, auto_merge_enabled: (.auto_merge != null)}'); then
@@ -117,6 +115,11 @@ case "$PR_STATE:$PR_MERGED:$PR_MERGED_AT" in
     exit 0
     ;;
 esac
+
+if [ "$MERGE_STATUS" -ne 0 ]; then
+  echo "error: GitHub merge command failed and the PR was not verified as merged; task work is preserved" >&2
+  exit 1
+fi
 
 if [ "$PR_STATE" = open ] && [ "$PR_MERGED" = false ] \
   && [ "$PR_MERGED_AT" = null ] \

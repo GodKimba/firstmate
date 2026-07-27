@@ -7,7 +7,7 @@
 #
 # Matrix:
 #   (a) merge records pr= and pr_head= before merging, and verifies the merge
-#   (b) merge is refused when gh-axi pr merge itself fails (no silent success)
+#   (b) merge command failures are verified and only confirmed merges succeed
 #   (c) extra gh-axi pr merge args are forwarded after number and --repo
 #   (d) merge is refused before gh-axi when task meta is missing
 #   (e) PR URL is parsed to number + --repo for gh-axi (defaults to --squash)
@@ -101,20 +101,20 @@ SH
 # gh-axi mock that fails the merge call but succeeds everything else, so a
 # real merge failure is distinguishable from the recording step.
 add_gh_mocks_merge_fails() {
-  local case_dir=$1
+  local case_dir=$1 state=${2:-open} merged=${3:-false}
+  local merged_at=${4:-null} auto_merge=${5:-false}
+  add_gh_mocks "$case_dir" aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+    "$state" "$merged" "$merged_at" "$auto_merge"
   cat > "$case_dir/fakebin/gh-axi" <<'SH'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$FM_TEST_GH_AXI_LOG"
 case "${1:-} ${2:-}" in
   "pr merge") echo "error: pr merge failed" >&2 ; exit 1 ;;
+  "api /repos/"*) cat "$FM_TEST_PR_STATE_FILE" ; exit 0 ;;
 esac
 exit 0
 SH
-  cat > "$case_dir/fakebin/gh" <<'SH'
-#!/usr/bin/env bash
-exit 0
-SH
-  chmod +x "$case_dir/fakebin/gh-axi" "$case_dir/fakebin/gh"
+  chmod +x "$case_dir/fakebin/gh-axi"
 }
 
 run_pr_merge() {
@@ -166,7 +166,7 @@ test_merge_failure_propagates_after_recording() {
   local case_dir rc
   case_dir=$(make_case merge-fails)
   mkdir -p "$case_dir/wt"
-  add_gh_mocks_merge_fails "$case_dir"
+  add_gh_mocks_merge_fails "$case_dir" open false null true
   : > "$case_dir/gh-axi.log"
 
   set +e
@@ -178,7 +178,33 @@ test_merge_failure_propagates_after_recording() {
   expect_code 1 "$rc" "merge-fails: fm-pr-merge should propagate the gh-axi merge failure"
   assert_grep 'pr=https://github.com/example/repo/pull/13' "$case_dir/state/task-x1.meta" \
     "merge-fails: pr= should already be recorded even though the merge itself failed"
-  pass "fm-pr-merge propagates a real merge failure without silently succeeding"
+  grep -qxF "api /repos/example/repo/pulls/13 --jq {state: .state, merged: .merged, merged_at: .merged_at, auto_merge_enabled: (.auto_merge != null)}" "$case_dir/gh-axi.log" \
+    || fail "merge-fails: current GitHub state was not read after the failed merge command"
+  assert_grep 'merge command failed and the PR was not verified as merged' "$case_dir/stderr" \
+    "merge-fails: unconfirmed command failure was not preserved"
+  assert_no_grep 'auto-merge enabled:' "$case_dir/stdout" \
+    "merge-fails: open auto-merge state overrode the command failure"
+  pass "fm-pr-merge verifies and preserves an unconfirmed merge command failure"
+}
+
+test_post_merge_command_failure_uses_confirmed_state() {
+  local case_dir
+  case_dir=$(make_case post-merge-command-failure)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks_merge_fails "$case_dir" closed true '"2026-07-27T21:58:23Z"' false
+  : > "$case_dir/gh-axi.log"
+
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/14 -- --delete-branch \
+    > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "post-merge-command-failure: confirmed merge did not override the command failure"
+
+  grep -qxF 'pr merge 14 --repo example/repo --squash --delete-branch' "$case_dir/gh-axi.log" \
+    || fail "post-merge-command-failure: delete-branch argument was not forwarded"
+  grep -qxF "api /repos/example/repo/pulls/14 --jq {state: .state, merged: .merged, merged_at: .merged_at, auto_merge_enabled: (.auto_merge != null)}" "$case_dir/gh-axi.log" \
+    || fail "post-merge-command-failure: current GitHub state was not read after the failed command"
+  assert_grep 'merged: https://github.com/example/repo/pull/14' "$case_dir/stdout" \
+    "post-merge-command-failure: authoritative merged state was not reported"
+  pass "confirmed merged state overrides a post-merge command failure"
 }
 
 test_extra_merge_args_forwarded() {
@@ -473,6 +499,7 @@ test_contradictory_state_refuses_after_merge_command() {
 
 test_records_pr_and_head_before_merging
 test_merge_failure_propagates_after_recording
+test_post_merge_command_failure_uses_confirmed_state
 test_extra_merge_args_forwarded
 test_missing_meta_refuses_before_merge
 test_malformed_url_refuses_before_merge
