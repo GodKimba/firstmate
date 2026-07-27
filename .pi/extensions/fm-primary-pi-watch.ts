@@ -81,7 +81,8 @@ let stopping = false;
 let seq = 0;
 let restoring = false;
 const armReadiness = new WeakMap<ChildProcess, Promise<boolean>>();
-const armClose = new WeakMap<ChildProcess, Promise<void>>();
+const armExit = new WeakMap<ChildProcess, Promise<void>>();
+const restorationRetiredArms = new WeakSet<ChildProcess>();
 
 function positiveInteger(name: string, fallback: number): number {
   const value = Number(process.env[name]);
@@ -239,14 +240,21 @@ export default function (pi: ExtensionAPI) {
 
   async function retireArm(armChild: ChildProcess | null): Promise<boolean> {
     if (!armChild) return true;
+    const exited = armExit.get(armChild);
+    if (!exited) return false;
     armChild.kill("SIGTERM");
-    const closed = armClose.get(armChild);
-    if (!closed) return false;
     return new Promise((resolveRetired) => {
-      const timer = setTimeout(() => resolveRetired(false), armRetireTimeoutMs);
+      let retirementSettled = false;
+      const timer = setTimeout(() => {
+        retirementSettled = true;
+        resolveRetired(false);
+      }, armRetireTimeoutMs);
       timer.unref();
-      void closed.then(() => {
+      void exited.then(() => {
+        if (retirementSettled) return;
+        retirementSettled = true;
         clearTimeout(timer);
+        restorationRetiredArms.add(armChild);
         resolveRetired(true);
       });
     });
@@ -344,15 +352,15 @@ export default function (pi: ExtensionAPI) {
     let exitDrainTimer: ReturnType<typeof setTimeout> | null = null;
     let readinessSettled = false;
     let resolveReadiness: (ready: boolean) => void = () => {};
-    let resolveClosed: () => void = () => {};
+    let resolveExited: () => void = () => {};
     const readiness = new Promise<boolean>((resolveReady) => {
       resolveReadiness = resolveReady;
     });
     armReadiness.set(armChild, readiness);
-    const closed = new Promise<void>((resolveClosedChild) => {
-      resolveClosed = resolveClosedChild;
+    const exited = new Promise<void>((resolveExitedChild) => {
+      resolveExited = resolveExitedChild;
     });
-    armClose.set(armChild, closed);
+    armExit.set(armChild, exited);
     const settleReadiness = (ready: boolean): void => {
       if (readinessSettled) return;
       readinessSettled = true;
@@ -389,7 +397,7 @@ export default function (pi: ExtensionAPI) {
         });
         return;
       }
-      if (restoring) return;
+      if (restorationRetiredArms.has(armChild) || restoring) return;
       scheduleRetry(classification.message, predecessor);
     };
     armChild.stdout.on("data", (chunk: Buffer) => {
@@ -401,19 +409,20 @@ export default function (pi: ExtensionAPI) {
       observeEstablishedArm();
     });
     armChild.on("exit", (code: number | null, signal: NodeJS.Signals | null) => {
+      resolveExited();
       if (settled) return;
       exitDrainTimer = setTimeout(() => settleArm(code, signal), armExitDrainMs);
     });
     armChild.on("close", (code: number | null, signal: NodeJS.Signals | null) => {
-      resolveClosed();
       settleArm(code, signal);
     });
     armChild.on("error", (error: Error) => {
+      if (armChildAlive(armChild)) return;
+      resolveExited();
       if (settled) return;
       settled = true;
       if (exitDrainTimer) clearTimeout(exitDrainTimer);
       exitDrainTimer = null;
-      resolveClosed();
       settleReadiness(false);
       releaseChild();
       if (stopping) return;

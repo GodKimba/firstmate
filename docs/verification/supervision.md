@@ -132,6 +132,7 @@ Observed output included:
 ```text
 ok - Pi stale child reference permits a real repair attempt
 ok - Pi arm exit with inherited stderr re-arms and notifies exactly once
+ok - Pi retirement accepts process exit before inherited stderr closes
 ok - Pi redundant tool call returns ownership guidance and spawns no second child
 ```
 
