@@ -120,6 +120,21 @@ grok 0.2.103 (89c3d36fb6f1) [stable]
 | Grok | `FM_GROK_LIVE_E2E=1 tests/fm-grok-continuity-live-e2e.test.sh` | Native task completion surfaced the actionable close and the cycle ledger recorded `reason=actionable-signal`. |
 
 Pi 0.81.1 repeated the continuity and clean-exit lifecycle on 2026-07-23 after the Calm presentation changes.
+On 2026-07-27, deterministic Pi process-lifecycle coverage reproduced an exited arm whose descendant retained stderr, then verified that the successor and wake completed before the descendant exited and that late `close` caused no duplicate delivery.
+The same run verified that a stale child reference permits a real repair while an ordinary live-child call remains unchanged.
+
+```sh
+bash tests/fm-pi-watch-extension.test.sh
+```
+
+Observed output included:
+
+```text
+ok - Pi stale child reference permits a real repair attempt
+ok - Pi arm exit with inherited stderr re-arms and notifies exactly once
+ok - Pi retirement accepts process exit before inherited stderr closes
+ok - Pi redundant tool call returns ownership guidance and spawns no second child
+```
 
 Deterministic entry points:
 

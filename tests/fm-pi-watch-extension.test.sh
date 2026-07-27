@@ -347,6 +347,7 @@ writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
 mod.default(pi);
 await tool.execute("tool-call-first", {}, undefined, undefined, {});
+await new Promise((resolve) => setTimeout(resolve, 100));
 let redundant = null;
 for (let i = 0; i < 100; i += 1) {
   await new Promise((resolve) => setTimeout(resolve, 10));
@@ -371,6 +372,251 @@ EOF
   expect_code 0 "$status" "Pi scheduled-retry call must not duplicate the extension-owned retry"
   [ -z "$out" ] || fail "Pi scheduled-retry test printed output: $out"
   pass "Pi scheduled retry remains extension-owned after another tool call"
+}
+
+test_pi_stale_child_reference_allows_repair() {
+  local repo home plugin log stop out status
+  repo="$TMP_ROOT/pi-stale-child-root"
+  home="$TMP_ROOT/pi-stale-child-home"
+  log="$TMP_ROOT/pi-stale-child.log"
+  stop="$TMP_ROOT/pi-stale-child.stop"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_pi_watch_extension_fixture "$repo"
+  plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'arm=%s\n' "$$" >> "${FM_ARM_LOG:?}"
+count=$(wc -l < "$FM_ARM_LOG" | tr -d '[:space:]')
+if [ "$count" -eq 1 ]; then
+  printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+  node -e 'setTimeout(() => {}, 800)' >/dev/null &
+  exit 0
+fi
+printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+trap 'exit 0' TERM INT
+while [ ! -e "$FM_STOP_FILE" ]; do sleep 0.02; done
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_STOP_FILE="$stop" FM_PI_ARM_EXIT_DRAIN_MS=500 node --input-type=module 2>&1 <<'EOF'
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+let tool = null;
+const pi = {
+  on() {},
+  registerCommand() {},
+  registerTool(candidate) {
+    if (candidate.name === "fm_watch_arm_pi") tool = candidate;
+  },
+  sendUserMessage: async () => {},
+};
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+await tool.execute("tool-call-stale-first", {}, undefined, undefined, {});
+for (let i = 0; i < 250 && !existsSync(process.env.FM_ARM_LOG); i += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 10));
+}
+const firstPid = Number(readFileSync(process.env.FM_ARM_LOG, "utf8").match(/arm=([0-9]+)/)?.[1]);
+if (!firstPid) throw new Error("first arm pid was not recorded");
+for (let i = 0; i < 250; i += 1) {
+  try {
+    process.kill(firstPid, 0);
+  } catch {
+    break;
+  }
+  await new Promise((resolve) => setTimeout(resolve, 10));
+}
+try {
+  process.kill(firstPid, 0);
+  throw new Error(`first arm ${firstPid} was still alive before repair`);
+} catch (error) {
+  if (error?.message?.includes("still alive")) throw error;
+}
+const repair = await tool.execute("tool-call-stale-repair", {}, undefined, undefined, {});
+if (repair.content[0]?.text.includes("watcher: unchanged")) {
+  throw new Error(`stale child reference suppressed repair: ${repair.content[0]?.text}`);
+}
+if (!repair.content[0]?.text.includes("started Pi extension arm child")) {
+  throw new Error(`stale child repair did not start a replacement: ${repair.content[0]?.text}`);
+}
+for (let i = 0; i < 250; i += 1) {
+  const rows = readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n");
+  if (rows.length >= 2) break;
+  await new Promise((resolve) => setTimeout(resolve, 10));
+}
+const rows = readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n");
+if (rows.length !== 2) throw new Error(`stale repair launched ${rows.length} arm children: ${rows.join(" | ")}`);
+writeFileSync(process.env.FM_STOP_FILE, "stop\n");
+process.exit(0);
+EOF
+  )
+  status=$?
+  expect_code 0 "$status" "Pi repair tool must replace a stale child reference instead of claiming unchanged"
+  [ -z "$out" ] || fail "Pi stale-child repair test printed output: $out"
+  pass "Pi stale child reference permits a real repair attempt"
+}
+
+test_pi_exit_with_open_stderr_rearms_and_notifies_once() {
+  local repo home plugin log stop descendant_done out status
+  repo="$TMP_ROOT/pi-open-stderr-root"
+  home="$TMP_ROOT/pi-open-stderr-home"
+  log="$TMP_ROOT/pi-open-stderr.log"
+  stop="$TMP_ROOT/pi-open-stderr.stop"
+  descendant_done="$TMP_ROOT/pi-open-stderr-descendant.done"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_pi_watch_extension_fixture "$repo"
+  plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'arm=%s predecessor=%s\n' "$$" "${FM_WATCH_PREDECESSOR_ARM_PID:-none}" >> "${FM_ARM_LOG:?}"
+count=$(wc -l < "$FM_ARM_LOG" | tr -d '[:space:]')
+printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+if [ "$count" -eq 1 ]; then
+  printf 'signal: actionable exit with inherited stderr\n'
+  FM_DESCENDANT_DONE="$FM_DESCENDANT_DONE" node -e 'setTimeout(() => require("node:fs").writeFileSync(process.env.FM_DESCENDANT_DONE, "done\n"), 900)' >/dev/null &
+  exit 0
+fi
+trap 'exit 0' TERM INT
+while [ ! -e "$FM_STOP_FILE" ]; do sleep 0.02; done
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_STOP_FILE="$stop" FM_DESCENDANT_DONE="$descendant_done" FM_PI_ARM_EXIT_DRAIN_MS=20 node --input-type=module 2>&1 <<'EOF'
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+let tool = null;
+const prompts = [];
+const pi = {
+  on() {},
+  registerCommand() {},
+  registerTool(candidate) {
+    if (candidate.name === "fm_watch_arm_pi") tool = candidate;
+  },
+  sendUserMessage: async (message) => {
+    prompts.push(message);
+  },
+};
+const rows = () => existsSync(process.env.FM_ARM_LOG)
+  ? readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n")
+  : [];
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+await tool.execute("tool-call-open-stderr", {}, undefined, undefined, {});
+for (let i = 0; i < 70; i += 1) {
+  if (rows().length >= 2 && prompts.length >= 1) break;
+  await new Promise((resolve) => setTimeout(resolve, 10));
+}
+if (existsSync(process.env.FM_DESCENDANT_DONE)) {
+  throw new Error("successor and wake waited for the inherited stderr holder to exit");
+}
+if (rows().length !== 2) throw new Error(`expected one successor before descendant exit, got ${rows().join(" | ")}`);
+if (prompts.length !== 1 || !prompts[0].includes("actionable exit with inherited stderr")) {
+  throw new Error(`actionable exit was not delivered exactly once: ${prompts.join(" | ")}`);
+}
+if (!/predecessor=[0-9]+/.test(rows()[1])) throw new Error(`successor omitted predecessor identity: ${rows()[1]}`);
+for (let i = 0; i < 250 && !existsSync(process.env.FM_DESCENDANT_DONE); i += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 10));
+}
+if (!existsSync(process.env.FM_DESCENDANT_DONE)) throw new Error("stderr-holding descendant did not exit");
+await new Promise((resolve) => setTimeout(resolve, 100));
+if (rows().length !== 2) throw new Error(`late close launched another successor: ${rows().join(" | ")}`);
+if (prompts.length !== 1) throw new Error(`late close delivered ${prompts.length} wakes`);
+writeFileSync(process.env.FM_STOP_FILE, "stop\n");
+process.exit(0);
+EOF
+  )
+  status=$?
+  expect_code 0 "$status" "Pi arm exit must rearm and notify before inherited stderr closes, exactly once"
+  [ -z "$out" ] || fail "Pi open-stderr exit test printed output: $out"
+  pass "Pi arm exit with inherited stderr re-arms and notifies exactly once"
+}
+
+test_pi_retirement_uses_exit_before_inherited_stderr_close() {
+  local repo home plugin log stop descendant_done out status
+  repo="$TMP_ROOT/pi-retire-open-stderr-root"
+  home="$TMP_ROOT/pi-retire-open-stderr-home"
+  log="$TMP_ROOT/pi-retire-open-stderr.log"
+  stop="$TMP_ROOT/pi-retire-open-stderr.stop"
+  descendant_done="$TMP_ROOT/pi-retire-open-stderr-descendant.done"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_pi_watch_extension_fixture "$repo"
+  plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'arm=%s predecessor=%s\n' "$$" "${FM_WATCH_PREDECESSOR_ARM_PID:-none}" >> "${FM_ARM_LOG:?}"
+count=$(wc -l < "$FM_ARM_LOG" | tr -d '[:space:]')
+if [ "$count" -eq 1 ]; then
+  printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+  printf 'signal: original retirement wake\n'
+  exit 0
+fi
+if [ "$count" -eq 2 ]; then
+  retire() {
+    FM_DESCENDANT_DONE="$FM_DESCENDANT_DONE" node -e 'setTimeout(() => require("node:fs").writeFileSync(process.env.FM_DESCENDANT_DONE, "done\n"), 900)' >/dev/null &
+    exit 0
+  }
+  trap retire TERM INT
+  while :; do sleep 0.02; done
+fi
+printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+trap 'exit 0' TERM INT
+while [ ! -e "$FM_STOP_FILE" ]; do sleep 0.02; done
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_STOP_FILE="$stop" FM_DESCENDANT_DONE="$descendant_done" FM_PI_ARM_EXIT_DRAIN_MS=20 FM_PI_ARM_READY_TIMEOUT_MS=80 FM_WATCH_ARM_RETIRE_TIMEOUT_MS=500 FM_WATCH_REARM_RETRY_BASE_MS=5 FM_WATCH_REARM_RETRY_MAX_MS=10 FM_WATCH_REARM_RETRY_LIMIT=2 node --input-type=module 2>&1 <<'EOF'
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+let tool = null;
+const prompts = [];
+const pi = {
+  on() {},
+  registerCommand() {},
+  registerTool(candidate) {
+    if (candidate.name === "fm_watch_arm_pi") tool = candidate;
+  },
+  sendUserMessage: async (message) => {
+    prompts.push(message);
+  },
+};
+const rows = () => existsSync(process.env.FM_ARM_LOG)
+  ? readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n")
+  : [];
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+await tool.execute("tool-call-retire-open-stderr", {}, undefined, undefined, {});
+for (let i = 0; i < 250; i += 1) {
+  if (rows().length >= 3 && prompts.length >= 1) break;
+  await new Promise((resolve) => setTimeout(resolve, 10));
+}
+if (existsSync(process.env.FM_DESCENDANT_DONE)) {
+  throw new Error("restoration waited for the retired arm descendant to close stderr");
+}
+if (rows().length !== 3) throw new Error(`retired process exit did not permit one retry: ${rows().join(" | ")}`);
+if (prompts.length !== 1 || !prompts[0].includes("original retirement wake")) {
+  throw new Error(`original wake was not delivered exactly once after restoration: ${prompts.join(" | ")}`);
+}
+if (prompts[0].includes("could not restore watcher continuity")) {
+  throw new Error(`process exit was misclassified as failed retirement: ${prompts[0]}`);
+}
+for (let i = 0; i < 250 && !existsSync(process.env.FM_DESCENDANT_DONE); i += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 10));
+}
+if (!existsSync(process.env.FM_DESCENDANT_DONE)) throw new Error("stderr-holding retirement descendant did not exit");
+await new Promise((resolve) => setTimeout(resolve, 100));
+if (rows().length !== 3) throw new Error(`late close launched another retry: ${rows().join(" | ")}`);
+if (prompts.length !== 1) throw new Error(`late close delivered ${prompts.length} wakes`);
+writeFileSync(process.env.FM_STOP_FILE, "stop\n");
+process.exit(0);
+EOF
+  )
+  status=$?
+  expect_code 0 "$status" "Pi retirement must use process exit while inherited stderr remains open"
+  [ -z "$out" ] || fail "Pi retirement exit-proof test printed output: $out"
+  pass "Pi retirement accepts process exit before inherited stderr closes"
 }
 
 test_pi_actionable_close_starts_single_successor_before_delivery() {
@@ -2004,6 +2250,9 @@ test_pi_extension_reports_external_healthy_watcher
 test_pi_tool_returns_agent_tool_result
 test_pi_redundant_tool_call_is_owned_noop
 test_pi_scheduled_retry_call_is_owned_noop
+test_pi_stale_child_reference_allows_repair
+test_pi_exit_with_open_stderr_rearms_and_notifies_once
+test_pi_retirement_uses_exit_before_inherited_stderr_close
 test_pi_actionable_close_starts_single_successor_before_delivery
 test_pi_hung_successor_falls_back_to_typed_wake
 test_pi_unretired_successor_falls_back_without_retry
