@@ -387,6 +387,27 @@ test_already_queued_auto_merge_waits() {
   pass "already queued auto-merge remains a waiting outcome"
 }
 
+test_implicit_merge_queue_auto_merge_waits() {
+  local case_dir rc
+  case_dir=$(make_case auto-merge-implicit-queue)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" 5555555555555555555555555555555555555555 open false null true
+  : > "$case_dir/gh-axi.log"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/36 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 3 "$rc" "auto-merge-implicit-queue: implicit queued auto-merge should be waiting"
+  assert_grep 'auto-merge enabled: https://github.com/example/repo/pull/36; waiting on checks' "$case_dir/stdout" \
+    "auto-merge-implicit-queue: authoritative queued state was not reported truthfully"
+  [ -f "$case_dir/state/task-x1.check.sh" ] \
+    || fail "auto-merge-implicit-queue: merge monitoring disappeared"
+  pass "implicit merge-queue auto-merge remains a waiting outcome"
+}
+
 test_auto_merge_that_completes_immediately_is_merged() {
   local case_dir
   case_dir=$(make_case auto-merge-immediate)
@@ -462,6 +483,7 @@ test_method_equals_merge_method_not_overridden
 test_parses_pr_url_for_gh_axi
 test_auto_merge_enabled_waits_and_preserves_monitoring
 test_already_queued_auto_merge_waits
+test_implicit_merge_queue_auto_merge_waits
 test_auto_merge_that_completes_immediately_is_merged
 test_unreadable_state_refuses_after_merge_command
 test_contradictory_state_refuses_after_merge_command

@@ -53,14 +53,6 @@ caller_has_merge_method() {
   return 1
 }
 
-caller_requested_auto_merge() {
-  local arg
-  for arg in "$@"; do
-    [ "$arg" != --auto ] || return 0
-  done
-  return 1
-}
-
 state_field() {
   local output=$1 key=$2 count
   count=$(printf '%s\n' "$output" | awk -F': ' -v key="$key" '$1 == key { count++ } END { print count + 0 }')
@@ -99,11 +91,6 @@ merge_args=()
 if ! caller_has_merge_method "$@"; then
   merge_args=(--squash)
 fi
-if caller_requested_auto_merge "$@"; then
-  REQUESTED_AUTO=1
-else
-  REQUESTED_AUTO=0
-fi
 
 # gh-axi 0.1.28 labels every successful `gh pr merge` invocation as `merged`,
 # including one that only enables auto-merge. Suppress that human-oriented label
@@ -131,8 +118,8 @@ case "$PR_STATE:$PR_MERGED:$PR_MERGED_AT" in
     ;;
 esac
 
-if [ "$REQUESTED_AUTO" -eq 1 ] && [ "$PR_STATE" = open ] \
-  && [ "$PR_MERGED" = false ] && [ "$PR_MERGED_AT" = null ] \
+if [ "$PR_STATE" = open ] && [ "$PR_MERGED" = false ] \
+  && [ "$PR_MERGED_AT" = null ] \
   && [ "$PR_AUTO_MERGE" = true ]; then
   printf 'auto-merge enabled: %s; waiting on checks\n' "$URL"
   exit 3
