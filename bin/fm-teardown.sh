@@ -86,6 +86,15 @@
 # is present; teardown clears only a provably stale lock, then re-runs the safety
 # checks before any destructive return. Teardown output notes every wait, retry, and
 # removal so the operator can see what happened.
+#
+# For treehouse-backed ordinary tasks, teardown first checks work while the worker is
+# still available, then closes only the recorded runtime endpoint and proves it is
+# gone before a final dirty/landed check. Provider return runs only after that final
+# check, so a worker cannot add dirty or unlanded work in the validation-to-return
+# gap. A failed close, final check, or provider return preserves task records.
+# `FM_TREEHOUSE_RETURN_AUTHORIZED=1` marks calls that passed the owning lifecycle's
+# checks; local provider shims may require it but must still enforce their own exact
+# target, cleanliness, and postcondition checks.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -594,7 +603,7 @@ teardown_treehouse_return() {
 
   # Capture stdout+stderr so non-lock failures stay visible and lock failures can
   # be matched by signature even when the lock file is already gone mid-check.
-  if out=$( ( cd "$cd_dir" && treehouse return --force "$dir" ) 2>&1 ); then
+  if out=$( ( cd "$cd_dir" && FM_TREEHOUSE_RETURN_AUTHORIZED=1 FM_TREEHOUSE_RETURN_PROJECT="$cd_dir" treehouse return --force "$dir" ) 2>&1 ); then
     [ -n "$out" ] && printf '%s\n' "$out"
     return 0
   fi
@@ -619,7 +628,7 @@ teardown_treehouse_return() {
     echo "teardown: $label return failed with transient git lock ($lock_desc); waiting ${TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS}s and retrying ($attempt/${max_retries})" >&2
     sleep "$TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS"
 
-    if out=$( ( cd "$cd_dir" && treehouse return --force "$dir" ) 2>&1 ); then
+    if out=$( ( cd "$cd_dir" && FM_TREEHOUSE_RETURN_AUTHORIZED=1 FM_TREEHOUSE_RETURN_PROJECT="$cd_dir" treehouse return --force "$dir" ) 2>&1 ); then
       [ -n "$out" ] && printf '%s\n' "$out"
       echo "teardown: $label return succeeded on retry; lock cleared on its own" >&2
       return 0
@@ -646,7 +655,7 @@ teardown_treehouse_return() {
           return 1
         fi
       fi
-      if out=$( ( cd "$cd_dir" && treehouse return --force "$dir" ) 2>&1 ); then
+      if out=$( ( cd "$cd_dir" && FM_TREEHOUSE_RETURN_AUTHORIZED=1 FM_TREEHOUSE_RETURN_PROJECT="$cd_dir" treehouse return --force "$dir" ) 2>&1 ); then
         [ -n "$out" ] && printf '%s\n' "$out"
         echo "teardown: $label return succeeded after stale-lock cleanup" >&2
         return 0
@@ -1100,17 +1109,107 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != scout ] && [ "$KIND" != secondmate ] &&
   ORCA_PATH_MATCH_VERIFIED=1
 fi
 
-if [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
+validate_worktree_teardown_safety_with_lock_recovery() {
+  local safety_rc
   if validate_worktree_teardown_safety; then
-    :
+    return 0
   else
     safety_rc=$?
-    if [ "$safety_rc" -eq "$TEARDOWN_WORKTREE_SAFETY_LOCK_BLOCKED" ]; then
-      cleanup_stale_lock_for_safety_check "$WT" || exit 1
-      validate_worktree_teardown_safety || exit 1
-    else
-      exit 1
+  fi
+  if [ "$safety_rc" -eq "$TEARDOWN_WORKTREE_SAFETY_LOCK_BLOCKED" ]; then
+    cleanup_stale_lock_for_safety_check "$WT" || return 1
+    validate_worktree_teardown_safety
+    return $?
+  fi
+  return "$safety_rc"
+}
+
+HERDR_PRESENTATION_JOURNAL="$STATE/$ID.herdr-presentation"
+HERDR_PRESENTATION_RETIRE_CANDIDATE=0
+HERDR_PRESENTATION_SESSION=
+HERDR_PRESENTATION_WORKSPACE=
+HERDR_PRESENTATION_PANE=
+if [ "$BACKEND" = herdr ] \
+   && { [ -e "$HERDR_PRESENTATION_JOURNAL" ] || [ -L "$HERDR_PRESENTATION_JOURNAL" ]; }; then
+  fm_backend_source herdr || true
+  HERDR_PRESENTATION_SESSION=$(meta_value "$META" herdr_session)
+  HERDR_PRESENTATION_WORKSPACE=$(meta_value "$META" herdr_workspace_id)
+  HERDR_PRESENTATION_PANE=$(meta_value "$META" herdr_pane_id)
+  if [ -n "$HERDR_PRESENTATION_SESSION" ] \
+     && [ -n "$HERDR_PRESENTATION_WORKSPACE" ] \
+     && [ -n "$HERDR_PRESENTATION_PANE" ] \
+     && [ "$T" = "$HERDR_PRESENTATION_SESSION:$HERDR_PRESENTATION_PANE" ] \
+     && fm_backend_herdr_projection_endpoint_matches_journal \
+       "$HERDR_PRESENTATION_SESSION" "$HERDR_PRESENTATION_WORKSPACE" \
+       "$HERDR_PRESENTATION_JOURNAL" "$ID"; then
+    HERDR_PRESENTATION_RETIRE_CANDIDATE=1
+  fi
+fi
+
+ENDPOINT_QUIESCE_RETRIES=${FM_ENDPOINT_QUIESCE_RETRIES:-20}
+case "$ENDPOINT_QUIESCE_RETRIES" in
+  ''|*[!0-9]*) ENDPOINT_QUIESCE_RETRIES=20 ;;
+esac
+ENDPOINT_QUIESCE_WAIT_SECS=${FM_ENDPOINT_QUIESCE_WAIT_SECS:-0.1}
+if ! retry_wait_secs_is_valid "$ENDPOINT_QUIESCE_WAIT_SECS"; then
+  ENDPOINT_QUIESCE_WAIT_SECS=0.1
+fi
+TREEHOUSE_ENDPOINT_QUIESCED=0
+
+quiesce_treehouse_task_endpoint() {
+  local attempt=0 expected_label="fm-$ID" focus_lock= focus_lock_held=0 focus_attempt=0
+  [ -n "$T" ] || {
+    echo "REFUSED: task $ID has no recorded runtime endpoint; cannot prove the worktree is quiescent." >&2
+    return 1
+  }
+
+  if [ "$HERDR_PRESENTATION_RETIRE_CANDIDATE" = 1 ]; then
+    # shellcheck source=bin/fm-wake-lib.sh
+    . "$SCRIPT_DIR/fm-wake-lib.sh"
+    if focus_lock=$(fm_backend_herdr_presentation_session_lock_path "$HERDR_PRESENTATION_SESSION"); then
+      while [ "$focus_attempt" -lt 50 ]; do
+        if fm_lock_try_acquire "$focus_lock"; then
+          focus_lock_held=1
+          break
+        fi
+        sleep 0.1
+        focus_attempt=$((focus_attempt + 1))
+      done
     fi
+    if [ "$focus_lock_held" != 1 ]; then
+      echo "REFUSED: herdr presentation focus lock unavailable; preserving task records and worktree." >&2
+      return 1
+    fi
+    fm_backend_herdr_projection_close_pane_focus_preserving \
+      "$HERDR_PRESENTATION_SESSION" "$HERDR_PRESENTATION_PANE" 2>/dev/null || true
+    focus_lock_held=0
+    fm_lock_release "$focus_lock" || true
+  else
+    fm_backend_kill "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "$expected_label" 2>/dev/null || true
+  fi
+
+  while fm_backend_target_exists "$BACKEND" "$T" "$expected_label"; do
+    if [ "$attempt" -ge "$ENDPOINT_QUIESCE_RETRIES" ]; then
+      echo "REFUSED: recorded $BACKEND endpoint $T is still present after close; preserving task records and worktree." >&2
+      return 1
+    fi
+    sleep "$ENDPOINT_QUIESCE_WAIT_SECS"
+    attempt=$((attempt + 1))
+  done
+  TREEHOUSE_ENDPOINT_QUIESCED=1
+}
+
+if [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
+  validate_worktree_teardown_safety_with_lock_recovery || exit 1
+fi
+
+# Treehouse providers do not own the runtime endpoint. Close only the exact
+# recorded endpoint, prove it is gone, then repeat the safety check so the
+# worker cannot mutate the copy between authorization and provider return.
+if [ -d "$WT" ] && [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
+  quiesce_treehouse_task_endpoint || exit 1
+  if [ "$FORCE" != "--force" ]; then
+    validate_worktree_teardown_safety_with_lock_recovery || exit 1
   fi
 fi
 
@@ -1142,10 +1241,9 @@ elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
   # Remove our hook file so a reused pool worktree cannot fire signals for a dead task.
   rm -f "$WT/.claude/settings.local.json" "$WT/.opencode/plugins/fm-turn-end.js" \
     "$WT/.fm-grok-turnend" "$WT/.fm-kimi-turnend"
-  # Kills remaining processes in the worktree (including the agent), resets, returns
-  # to pool. treehouse resolves the pool from the working directory, so run it from
-  # the project. teardown_treehouse_return tolerates transient and stale git locks
-  # left by a killed crew process; see the script header for retry and stale-lock proof.
+  # Return only after the endpoint is confirmed gone and the final safety check
+  # passes. treehouse resolves the provider from the project working directory.
+  # The return wrapper retains transient and stale git-lock recovery.
   post_lock_cleanup_check=
   if [ "$FORCE" != "--force" ] && [ "$KIND" != scout ] && [ "$KIND" != secondmate ]; then
     post_lock_cleanup_check=validate_worktree_teardown_safety
@@ -1155,53 +1253,7 @@ elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
     exit 1
   }
 fi
-
-HERDR_PRESENTATION_JOURNAL="$STATE/$ID.herdr-presentation"
-HERDR_PRESENTATION_RETIRE_CANDIDATE=0
-HERDR_PRESENTATION_SESSION=
-HERDR_PRESENTATION_PANE=
-if [ "$BACKEND" = herdr ] \
-   && { [ -e "$HERDR_PRESENTATION_JOURNAL" ] || [ -L "$HERDR_PRESENTATION_JOURNAL" ]; }; then
-  fm_backend_source herdr || true
-  HERDR_PRESENTATION_SESSION=$(meta_value "$META" herdr_session)
-  HERDR_PRESENTATION_WORKSPACE=$(meta_value "$META" herdr_workspace_id)
-  HERDR_PRESENTATION_PANE=$(meta_value "$META" herdr_pane_id)
-  if [ -n "$HERDR_PRESENTATION_SESSION" ] \
-     && [ -n "$HERDR_PRESENTATION_WORKSPACE" ] \
-     && [ -n "$HERDR_PRESENTATION_PANE" ] \
-     && [ "$T" = "$HERDR_PRESENTATION_SESSION:$HERDR_PRESENTATION_PANE" ] \
-     && fm_backend_herdr_projection_endpoint_matches_journal \
-       "$HERDR_PRESENTATION_SESSION" "$HERDR_PRESENTATION_WORKSPACE" \
-       "$HERDR_PRESENTATION_JOURNAL" "$ID"; then
-    HERDR_PRESENTATION_RETIRE_CANDIDATE=1
-  fi
-fi
-
-if [ "$HERDR_PRESENTATION_RETIRE_CANDIDATE" = 1 ]; then
-  # shellcheck source=bin/fm-wake-lib.sh
-  . "$SCRIPT_DIR/fm-wake-lib.sh"
-  HERDR_PRESENTATION_FOCUS_LOCK=
-  HERDR_PRESENTATION_FOCUS_LOCK_HELD=0
-  HERDR_PRESENTATION_FOCUS_LOCK_ATTEMPT=0
-  if HERDR_PRESENTATION_FOCUS_LOCK=$(fm_backend_herdr_presentation_session_lock_path "$HERDR_PRESENTATION_SESSION"); then
-    while [ "$HERDR_PRESENTATION_FOCUS_LOCK_ATTEMPT" -lt 50 ]; do
-      if fm_lock_try_acquire "$HERDR_PRESENTATION_FOCUS_LOCK"; then
-        HERDR_PRESENTATION_FOCUS_LOCK_HELD=1
-        break
-      fi
-      sleep 0.1
-      HERDR_PRESENTATION_FOCUS_LOCK_ATTEMPT=$((HERDR_PRESENTATION_FOCUS_LOCK_ATTEMPT + 1))
-    done
-  fi
-  if [ "$HERDR_PRESENTATION_FOCUS_LOCK_HELD" = 1 ]; then
-    fm_backend_herdr_projection_close_pane_focus_preserving \
-      "$HERDR_PRESENTATION_SESSION" "$HERDR_PRESENTATION_PANE" 2>/dev/null || true
-    HERDR_PRESENTATION_FOCUS_LOCK_HELD=0
-    fm_lock_release "$HERDR_PRESENTATION_FOCUS_LOCK" || true
-  else
-    echo "warning: herdr presentation focus lock unavailable; refusing a concurrent focus-unsafe pane close" >&2
-  fi
-elif [ "$BACKEND" != orca ]; then
+if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ] && [ "$TREEHOUSE_ENDPOINT_QUIESCED" != 1 ]; then
   fm_backend_kill "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID" 2>/dev/null || true
 fi
 if [ "$HERDR_PRESENTATION_RETIRE_CANDIDATE" = 1 ]; then
@@ -1215,6 +1267,7 @@ elif [ "$BACKEND" = herdr ] \
   echo "warning: herdr presentation journal for $ID remains quarantined; no workspace cleanup was attempted" >&2
 fi
 if [ "$KIND" = secondmate ]; then
+  [ "$BACKEND" = orca ] || fm_backend_kill "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID" 2>/dev/null || true
   [ -n "$HOME_PATH" ] || HOME_PATH=$WT
   remove_firstmate_home "$HOME_PATH" "secondmate home" "$ID"
   remove_secondmate_registry_entry "$ID"

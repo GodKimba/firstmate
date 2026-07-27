@@ -83,7 +83,28 @@ exit 0
 SH
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
-# tmux kill-window etc.: succeed silently.
+set -u
+case "${1:-}" in
+  kill-window)
+    : > "${FM_FAKE_TMUX_STATE:?}"
+    case "${FM_FAKE_TMUX_ON_KILL:-}" in
+      dirty)
+        printf '%s\n' 'late mutation' > "${FM_FAKE_TMUX_WT:?}/late-mutation.txt"
+        ;;
+      commit)
+        printf '%s\n' 'late commit' > "${FM_FAKE_TMUX_WT:?}/late-commit.txt"
+        git -C "${FM_FAKE_TMUX_WT:?}" add late-commit.txt
+        git -C "${FM_FAKE_TMUX_WT:?}" -c user.email=t@t -c user.name=t commit -q -m 'late unlanded commit'
+        ;;
+    esac
+    exit 0
+    ;;
+  display-message)
+    [ ! -e "${FM_FAKE_TMUX_STATE:?}" ] || exit 1
+    printf '%s\n' '%%1'
+    exit 0
+    ;;
+esac
 exit 0
 SH
   # Default gh-axi mock: no PR is associated with the branch, and viewing any PR
@@ -144,6 +165,10 @@ if [ "${1:-}" = update ] && [ "${2:-}" = --help ]; then
 fi
 if [ "${1:-}" = mv ] && [ "${2:-}" = --help ]; then
   printf '%s\n' 'usage: tasks-axi mv <id> [<id>...] --to <path-or-dir>'
+  exit 0
+fi
+if [ "${1:-}" = hold ] && [ "${2:-}" = --help ]; then
+  printf '%s\n' 'usage: tasks-axi hold <id> --kind captain'
   exit 0
 fi
 exit 0
@@ -492,7 +517,10 @@ run_teardown() {
   local case_dir=$1; shift
   FM_ROOT_OVERRIDE="$ROOT" \
   FM_STATE_OVERRIDE="$case_dir/state" \
+  FM_DATA_OVERRIDE="$case_dir/data" \
   FM_CONFIG_OVERRIDE="$case_dir/config" \
+  FM_FAKE_TMUX_STATE="$case_dir/tmux-killed" \
+  FM_FAKE_TMUX_WT="$case_dir/wt" \
   PATH="$case_dir/fakebin:$PATH" \
     "$TEARDOWN" task-x1 "$@"
 }
@@ -864,6 +892,124 @@ test_dirty_worktree_refuses() {
   grep -q REFUSED "$case_dir/stderr" || fail "dirty-wt: no REFUSED line in stderr"
   grep -q "uncommitted changes" "$case_dir/stderr" || fail "dirty-wt: refusal did not cite uncommitted changes"
   pass "dirty worktree is refused even when its committed work has landed (dirty always wins)"
+}
+
+test_provider_refusal_preserves_task_records() {
+  local case_dir rc
+  case_dir=$(make_case provider-refusal)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit "$case_dir" "landed provider-refusal work"
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  git -C "$case_dir/project" fetch -q origin
+  cat > "$case_dir/fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+[ "${FM_TREEHOUSE_RETURN_AUTHORIZED:-}" = 1 ] || exit 9
+[ "${FM_TREEHOUSE_RETURN_PROJECT:-}" = "${FM_EXPECTED_PROJECT:?}" ] || exit 8
+exit 1
+SH
+  chmod +x "$case_dir/fakebin/treehouse"
+
+  set +e
+  FM_EXPECTED_PROJECT="$case_dir/project" run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "provider-refusal: teardown must fail when treehouse refuses return"
+  [ -f "$case_dir/state/task-x1.meta" ] || fail "provider-refusal: task metadata was cleared after provider refusal"
+  [ -d "$case_dir/wt" ] || fail "provider-refusal: worktree disappeared despite provider refusal"
+  assert_grep "treehouse return failed" "$case_dir/stderr" \
+    "provider-refusal: teardown did not report the provider refusal"
+  pass "provider refusal preserves task records and the worktree"
+}
+
+test_late_dirty_mutation_after_quiesce_refuses() {
+  local case_dir rc
+  case_dir=$(make_case late-dirty)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit "$case_dir" "landed before late dirty mutation"
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  git -C "$case_dir/project" fetch -q origin
+
+  set +e
+  FM_FAKE_TMUX_ON_KILL=dirty run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "late-dirty: final safety check must refuse mutation after endpoint close"
+  [ -f "$case_dir/state/task-x1.meta" ] || fail "late-dirty: task metadata was cleared"
+  [ -f "$case_dir/wt/late-mutation.txt" ] || fail "late-dirty: fixture did not create the late mutation"
+  assert_grep "uncommitted changes" "$case_dir/stderr" \
+    "late-dirty: final safety refusal did not cite uncommitted changes"
+  pass "final quiesced safety check preserves a late dirty mutation"
+}
+
+test_late_unlanded_commit_after_quiesce_refuses() {
+  local case_dir rc
+  case_dir=$(make_case late-commit)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit "$case_dir" "landed before late commit"
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  git -C "$case_dir/project" fetch -q origin
+
+  set +e
+  FM_FAKE_TMUX_ON_KILL=commit run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "late-commit: final safety check must refuse a new unlanded commit"
+  [ -f "$case_dir/state/task-x1.meta" ] || fail "late-commit: task metadata was cleared"
+  [ -f "$case_dir/wt/late-commit.txt" ] || fail "late-commit: fixture did not create the late commit"
+  assert_grep "not on any remote and not landed" "$case_dir/stderr" \
+    "late-commit: final safety refusal did not cite unlanded work"
+  pass "final quiesced safety check preserves a late unlanded commit"
+}
+
+test_endpoint_close_must_be_confirmed_before_return() {
+  local case_dir rc
+  case_dir=$(make_case endpoint-still-live)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit "$case_dir" "landed endpoint-close work"
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  git -C "$case_dir/project" fetch -q origin
+  cat > "$case_dir/fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  display-message) printf '%s\n' '%%1'; exit 0 ;;
+  kill-window) exit 0 ;;
+esac
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/tmux"
+
+  set +e
+  FM_ENDPOINT_QUIESCE_RETRIES=0 run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "endpoint-still-live: teardown must refuse while the endpoint remains"
+  [ -f "$case_dir/state/task-x1.meta" ] || fail "endpoint-still-live: task metadata was cleared"
+  assert_grep "still present after close" "$case_dir/stderr" \
+    "endpoint-still-live: refusal did not explain the live endpoint"
+  pass "treehouse return waits for confirmed exact-endpoint closure"
+}
+
+test_report_gated_scout_cleanup_remains_supported() {
+  local case_dir rc
+  case_dir=$(make_case scout-report-gated)
+  mkdir -p "$case_dir/data/task-x1"
+  printf '%s\n' 'scout result' > "$case_dir/data/task-x1/report.md"
+  write_meta "$case_dir" no-mistakes scout
+  printf '%s\n' 'decisions_reviewed=1' 'decision_keys=' >> "$case_dir/state/task-x1.meta"
+  add_compatible_tasks_axi "$case_dir"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "scout-report-gated: completed scout cleanup should remain supported"
+  [ ! -f "$case_dir/state/task-x1.meta" ] || fail "scout-report-gated: task metadata remains after successful cleanup"
+  pass "report-gated disposable scout cleanup remains explicit and supported"
 }
 
 test_gh_error_and_content_absent_refuses() {
@@ -1243,7 +1389,7 @@ test_local_only_force_overrides_unpushed() {
 }
 
 test_herdr_teardown_clears_escalation_marker() {
-  local case_dir marker
+  local case_dir marker closed
   case_dir=$(make_case herdr-marker-cleanup)
   write_meta "$case_dir" local-only ship
   sed -i.bak 's/^window=.*/window=default:wG:pQ/' "$case_dir/state/task-x1.meta"
@@ -1251,13 +1397,20 @@ test_herdr_teardown_clears_escalation_marker() {
   printf '%s\n' 'backend=herdr' >> "$case_dir/state/task-x1.meta"
   cat > "$case_dir/fakebin/herdr" <<'SH'
 #!/usr/bin/env bash
+case "${1:-} ${2:-}" in
+  "status --json") printf '%s\n' '{"server":{"running":true}}'; exit 0 ;;
+  "session list") printf '%s\n' '{"sessions":[{"name":"default","running":true,"socket_path":"/tmp/default.sock"}]}'; exit 0 ;;
+  "pane close") : > "${FM_FAKE_HERDR_CLOSED:?}"; exit 0 ;;
+  "pane get") [ ! -e "${FM_FAKE_HERDR_CLOSED:?}" ] || exit 1; printf '%s\n' '{"result":{"pane":{"pane_id":"wG:pQ"}}}'; exit 0 ;;
+esac
 exit 0
 SH
   chmod +x "$case_dir/fakebin/herdr"
   marker="$case_dir/state/.herdr-escalated-default_wG_pQ"
+  closed="$case_dir/herdr-closed"
   : > "$marker"
 
-  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" \
+  FM_FAKE_HERDR_CLOSED="$closed" run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" \
     || fail "herdr-marker-cleanup: forced teardown failed"
   [ ! -e "$marker" ] || fail "herdr-marker-cleanup: teardown left the pane's escalation marker behind"
   pass "herdr teardown removes pane-owned escalation dedupe state"
@@ -1353,19 +1506,24 @@ test_herdr_projection_teardown_retires_journal_only_after_confirmed_close() {
 }
 
 test_herdr_projection_teardown_retains_journal_when_close_unconfirmed() {
-  local case_dir log closed restored
+  local case_dir log closed restored rc
   case_dir=$(make_case herdr-projection-unconfirmed-close)
   write_meta "$case_dir" local-only ship
   configure_herdr_projection_teardown_case "$case_dir"
   log="$case_dir/herdr.log"; closed="$case_dir/closed"; restored="$case_dir/restored"; : > "$log"
 
-  FM_FAKE_HERDR_LOG="$log" FM_FAKE_HERDR_CLOSED="$closed" FM_FAKE_HERDR_RESTORED="$restored" FM_FAKE_HERDR_CLOSE_FAIL=1 \
-    run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" \
-    || fail "herdr-projection-unconfirmed-close: teardown should preserve best-effort endpoint semantics"
+  set +e
+  FM_ENDPOINT_QUIESCE_RETRIES=0 FM_FAKE_HERDR_LOG="$log" FM_FAKE_HERDR_CLOSED="$closed" FM_FAKE_HERDR_RESTORED="$restored" FM_FAKE_HERDR_CLOSE_FAIL=1 \
+    run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "herdr-projection-unconfirmed-close: teardown must refuse an unconfirmed endpoint close"
   [ -e "$case_dir/state/task-x1.herdr-presentation" ] \
     || fail "unconfirmed task-pane close incorrectly retired the presentation journal"
-  assert_grep "close could not be confirmed" "$case_dir/stderr" \
-    "unconfirmed projected close did not explain why the journal was retained"
+  [ -f "$case_dir/state/task-x1.meta" ] \
+    || fail "unconfirmed task-pane close incorrectly cleared task metadata"
+  assert_grep "still present after close" "$case_dir/stderr" \
+    "unconfirmed projected close did not preserve work on a live endpoint"
   assert_not_contains "$(cat "$log")" "workspace close" \
     "unconfirmed projected close must not escalate to workspace cleanup"
   pass "herdr projection teardown retains the stale journal and attempts no workspace cleanup when exact-pane close is unconfirmed"
@@ -1392,6 +1550,11 @@ test_pr_check_records_remote_head_when_local_lags
 test_content_in_default_fallback_allows
 test_content_fallback_refreshes_stale_origin_ref
 test_dirty_worktree_refuses
+test_provider_refusal_preserves_task_records
+test_late_dirty_mutation_after_quiesce_refuses
+test_late_unlanded_commit_after_quiesce_refuses
+test_endpoint_close_must_be_confirmed_before_return
+test_report_gated_scout_cleanup_remains_supported
 test_gh_error_and_content_absent_refuses
 test_stale_index_lock_cleared_and_teardown_succeeds
 test_live_index_lock_is_never_removed_and_teardown_refuses

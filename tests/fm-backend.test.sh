@@ -902,6 +902,10 @@ make_teardown_fakebin() {  # <dir> -> echoes fakebin dir; logs tmux+treehouse ca
 #!/usr/bin/env bash
 set -u
 { printf 'tmux'; for a in "$@"; do printf '\x1f%s' "$a"; done; printf '\n'; } >> "${FM_TMUX_LOG:?}"
+case "${1:-}" in
+  kill-window) : > "${FM_TMUX_KILLED:?}"; exit 0 ;;
+  display-message) [ ! -e "${FM_TMUX_KILLED:?}" ] || exit 1; printf '%s\n' '%%1'; exit 0 ;;
+esac
 exit 0
 SH
   cat > "$fb/treehouse" <<'SH'
@@ -925,14 +929,13 @@ run_teardown_case() {
   : > "$log"
   env PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$fmroot" \
     FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
-    FM_TMUX_LOG="$log" \
+    FM_TMUX_LOG="$log" FM_TMUX_KILLED="$state/tmux-killed" \
     "$script" "$id"
 }
 
-test_teardown_conformance_old_vs_new() {
-  local old_bin fb proj wt id
-  local state_old state_new config_old config_new data log_old log_new out_old out_new rc_old rc_new
-  old_bin=$(build_old_bin teardown-old)
+test_teardown_closes_endpoint_before_treehouse_return() {
+  local shim_root fb proj wt id state_new config_new data log_new out_new rc_new kill_line return_line
+  shim_root=$(build_old_bin teardown-root)
   proj="$TMP_ROOT/teardown-project"; wt="$TMP_ROOT/teardown-wt"
   id="teardownconform1"
   fm_git_worktree "$proj" "$wt" "fm/$id"
@@ -942,34 +945,29 @@ test_teardown_conformance_old_vs_new() {
   mkdir -p "$data/$id"
   printf 'scout findings\n' > "$data/$id/report.md"
 
-  state_old="$TMP_ROOT/teardown-state-old"; state_new="$TMP_ROOT/teardown-state-new"
-  config_old="$TMP_ROOT/teardown-config-old"; config_new="$TMP_ROOT/teardown-config-new"
-  mkdir -p "$state_old" "$state_new" "$config_old" "$config_new"
-
-  fm_write_meta "$state_old/$id.meta" \
-    "window=firstmate:fm-$id" "worktree=$wt" "project=$proj" "harness=claude" "kind=scout" "mode=no-mistakes" "yolo=off" \
-    "decisions_reviewed=1" "decision_keys="
+  state_new="$TMP_ROOT/teardown-state-new"
+  config_new="$TMP_ROOT/teardown-config-new"
+  mkdir -p "$state_new" "$config_new"
   fm_write_meta "$state_new/$id.meta" \
     "window=firstmate:fm-$id" "worktree=$wt" "project=$proj" "harness=claude" "kind=scout" "mode=no-mistakes" "yolo=off" \
     "decisions_reviewed=1" "decision_keys="
-  touch "$state_old/.last-watcher-beat" "$state_new/.last-watcher-beat"
+  touch "$state_new/.last-watcher-beat"
 
-  log_old="$TMP_ROOT/teardown-old.log"; log_new="$TMP_ROOT/teardown-new.log"
-  out_old=$(run_teardown_case "$old_bin/bin/fm-teardown.sh" "$old_bin" "$fb" "$log_old" "$state_old" "$data" "$config_old" "$id" 2>&1)
-  rc_old=$?
-  out_new=$(run_teardown_case "$ROOT/bin/fm-teardown.sh" "$old_bin" "$fb" "$log_new" "$state_new" "$data" "$config_new" "$id" 2>&1)
+  log_new="$TMP_ROOT/teardown-new.log"
+  out_new=$(run_teardown_case "$ROOT/bin/fm-teardown.sh" "$shim_root" "$fb" "$log_new" "$state_new" "$data" "$config_new" "$id" 2>&1)
   rc_new=$?
 
-  expect_code 0 "$rc_old" "old fm-teardown.sh (scout, report present) should succeed"$'\n'"$out_old"
-  expect_code 0 "$rc_new" "new fm-teardown.sh (scout, report present) should succeed"$'\n'"$out_new"
-  diff -u "$log_old" "$log_new" > "$TMP_ROOT/teardown-diff.txt" 2>&1 \
-    || fail "fm-teardown.sh: tmux+treehouse command log differs old vs new"$'\n'"$(cat "$TMP_ROOT/teardown-diff.txt")"
+  expect_code 0 "$rc_new" "fm-teardown.sh (scout, report present) should succeed"$'\n'"$out_new"
   assert_contains "$(cat "$log_new")" "treehouse"$'\x1f''return'$'\x1f''--force'$'\x1f'"$wt" \
     "teardown did not call treehouse return --force <worktree>"
   assert_contains "$(cat "$log_new")" "tmux"$'\x1f''kill-window'$'\x1f''-t'$'\x1f'"firstmate:fm-$id" \
     "teardown did not call tmux kill-window -t <window>"
+  kill_line=$(grep -nF "tmux"$'\x1f''kill-window'$'\x1f''-t'$'\x1f'"firstmate:fm-$id" "$log_new" | cut -d: -f1)
+  return_line=$(grep -nF "treehouse"$'\x1f''return'$'\x1f''--force'$'\x1f'"$wt" "$log_new" | cut -d: -f1)
+  [ "$kill_line" -lt "$return_line" ] \
+    || fail "fm-teardown.sh did not close the exact endpoint before treehouse return"
 
-  pass "fm-teardown.sh: treehouse return + tmux kill-window command log is byte-identical old vs new for a scout task"
+  pass "fm-teardown.sh: exact endpoint closes before the scout worktree is returned"
 }
 
 # --- backend selection loudly refuses an unknown backend --------------------
@@ -1106,7 +1104,7 @@ test_backend_of_selector_matches_explicit_target_meta
 test_send_conformance_old_vs_new
 test_peek_conformance_old_vs_new
 test_spawn_symlinked_project_prefix_avoids_false_refusal
-test_teardown_conformance_old_vs_new
+test_teardown_closes_endpoint_before_treehouse_return
 test_spawn_refuses_unknown_backend_flag
 test_spawn_refuses_codex_app_backend_flag
 test_spawn_refuses_unknown_fm_backend_env
