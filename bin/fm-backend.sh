@@ -584,6 +584,20 @@ fm_backend_kill() {  # <backend> <target>
   esac
 }
 
+fm_backend_kill_recorded() {  # <backend> <target> [backend identity arguments]
+  local backend=$1
+  shift
+  fm_backend_source "$backend" || return 1
+  case "$backend" in
+    cmux) fm_backend_cmux_kill_recorded "$@" ;;
+    tmux) fm_backend_tmux_kill "$@" ;;
+    herdr) fm_backend_herdr_kill "$@" ;;
+    zellij) fm_backend_zellij_kill "$@" ;;
+    orca) fm_backend_orca_kill "$@" ;;
+    *) echo "error: no recorded-endpoint close implementation for backend '$backend'" >&2; return 1 ;;
+  esac
+}
+
 fm_backend_remove_worktree() {  # <backend> <worktree-id>
   local backend=$1
   shift
@@ -693,6 +707,30 @@ fm_backend_target_exists() {  # <backend> <target> [expected-label]
       ;;
     *)
       return 1
+      ;;
+  esac
+}
+
+fm_backend_endpoint_state() {  # <backend> <target> [expected-label] [recorded-tab-id]
+  local backend=$1 target=$2 expected_label=${3:-} recorded_tab_id=${4:-} state
+  fm_backend_source "$backend" || { printf 'unreadable'; return 0; }
+  case "$backend" in
+    tmux|herdr)
+      state=$(fm_backend_agent_state "$backend" "$target")
+      case "$state" in
+        missing) printf 'missing' ;;
+        alive|dead|ambiguous) printf 'present' ;;
+        *) printf 'unreadable' ;;
+      esac
+      ;;
+    zellij)
+      fm_backend_zellij_endpoint_state "$target" "$expected_label" "$recorded_tab_id"
+      ;;
+    cmux)
+      fm_backend_cmux_endpoint_state "$target" "$expected_label"
+      ;;
+    *)
+      printf 'unreadable'
       ;;
   esac
 }

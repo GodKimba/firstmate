@@ -149,6 +149,11 @@ KIND=$(grep '^kind=' "$META" | cut -d= -f2- || true)
 [ -n "$KIND" ] || KIND=ship
 MODE=$(grep '^mode=' "$META" | cut -d= -f2- || true)
 [ -n "$MODE" ] || MODE=no-mistakes
+ACQUISITION_BRANCH=$(fm_meta_get "$META" acquisition_branch)
+[ -n "$ACQUISITION_BRANCH" ] || ACQUISITION_BRANCH="fm/$ID"
+TREEHOUSE_RETURN_VALIDATED_HEAD=-
+TREEHOUSE_RETURN_DISPOSITION=discard
+TREEHOUSE_RETURN_ROUTE=managed
 
 default_branch() {
   local ref branch
@@ -595,15 +600,54 @@ cleanup_stale_lock_for_safety_check() {
   return "$TEARDOWN_TREEHOUSE_LOCK_REFUSED"
 }
 
-# Return a worktree/home via `treehouse return --force`, tolerating a transient or
-# stale git index.lock left by a killed crew process. See the script header.
+treehouse_return_route() {
+  local dir=$1 cd_dir=$2 out rc
+  if out=$( ( cd "$cd_dir" && treehouse firstmate-return-route "$dir" ) 2>/dev/null); then
+    rc=0
+  else
+    rc=$?
+  fi
+  if [ "$rc" -ne 0 ] || [ -z "$out" ]; then
+    printf 'managed'
+    return 0
+  fi
+  case "$out" in
+    generic|managed) printf '%s' "$out" ;;
+    *)
+      echo "REFUSED: treehouse return router reported invalid route '$out' for $dir." >&2
+      return 1
+      ;;
+  esac
+}
+
+invoke_treehouse_return() {
+  local dir=$1 cd_dir=$2 route=$3 pool
+  if [ "$route" = generic ]; then
+    pool=$(dirname "$(dirname "$dir")")
+    FM_TREEHOUSE_RETURN_AUTHORIZED=1 \
+      "$SCRIPT_DIR/fm-treehouse-generic-return.sh" \
+      "$cd_dir" "$dir" "$pool" "$ACQUISITION_BRANCH" \
+      "$TREEHOUSE_RETURN_VALIDATED_HEAD" "$TREEHOUSE_RETURN_DISPOSITION" "$META"
+    return $?
+  fi
+  (
+    cd "$cd_dir"
+    FM_TREEHOUSE_RETURN_AUTHORIZED=1 \
+      FM_TREEHOUSE_RETURN_PROJECT="$cd_dir" \
+      FM_TREEHOUSE_GENERIC_RETURN_HELPER="$SCRIPT_DIR/fm-treehouse-generic-return.sh" \
+      treehouse return --force "$dir"
+  )
+}
+
+# Return a worktree/home through its selected provider route, tolerating a
+# transient or stale git index.lock left by a killed crew process.
 teardown_treehouse_return() {
-  local dir=$1 cd_dir=$2 label=$3 post_cleanup_check=${4:-}
+  local dir=$1 cd_dir=$2 label=$3 post_cleanup_check=${4:-} route=${5:-managed}
   local out lock attempt=0 max_retries lock_desc
 
   # Capture stdout+stderr so non-lock failures stay visible and lock failures can
   # be matched by signature even when the lock file is already gone mid-check.
-  if out=$( ( cd "$cd_dir" && FM_TREEHOUSE_RETURN_AUTHORIZED=1 FM_TREEHOUSE_RETURN_PROJECT="$cd_dir" treehouse return --force "$dir" ) 2>&1 ); then
+  if out=$(invoke_treehouse_return "$dir" "$cd_dir" "$route" 2>&1); then
     [ -n "$out" ] && printf '%s\n' "$out"
     return 0
   fi
@@ -628,7 +672,7 @@ teardown_treehouse_return() {
     echo "teardown: $label return failed with transient git lock ($lock_desc); waiting ${TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS}s and retrying ($attempt/${max_retries})" >&2
     sleep "$TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS"
 
-    if out=$( ( cd "$cd_dir" && FM_TREEHOUSE_RETURN_AUTHORIZED=1 FM_TREEHOUSE_RETURN_PROJECT="$cd_dir" treehouse return --force "$dir" ) 2>&1 ); then
+    if out=$(invoke_treehouse_return "$dir" "$cd_dir" "$route" 2>&1); then
       [ -n "$out" ] && printf '%s\n' "$out"
       echo "teardown: $label return succeeded on retry; lock cleared on its own" >&2
       return 0
@@ -655,7 +699,7 @@ teardown_treehouse_return() {
           return 1
         fi
       fi
-      if out=$( ( cd "$cd_dir" && FM_TREEHOUSE_RETURN_AUTHORIZED=1 FM_TREEHOUSE_RETURN_PROJECT="$cd_dir" treehouse return --force "$dir" ) 2>&1 ); then
+      if out=$(invoke_treehouse_return "$dir" "$cd_dir" "$route" 2>&1); then
         [ -n "$out" ] && printf '%s\n' "$out"
         echo "teardown: $label return succeeded after stale-lock cleanup" >&2
         return 0
@@ -673,15 +717,40 @@ teardown_treehouse_return() {
   return 1
 }
 
+worktree_safety_status() {
+  local allow_generated=${1:-0} tracked untracked
+  tracked=$(git -C "$WT" status --porcelain --untracked-files=no 2>/dev/null) || return 1
+  untracked=$(git -C "$WT" ls-files --others 2>/dev/null) || return 1
+  if [ "$allow_generated" = 1 ]; then
+    untracked=$(printf '%s\n' "$untracked" | grep -vE \
+      '^(\.claude/settings\.local\.json|\.opencode/plugins/fm-turn-end\.js|\.fm-grok-turnend|\.fm-kimi-turnend)$' \
+      || true)
+  fi
+  printf '%s\n%s\n' "$tracked" "$untracked" | sed '/^$/d'
+}
+
+remove_generated_worktree_artifacts() {
+  rm -f -- "$WT/.claude/settings.local.json" \
+    "$WT/.opencode/plugins/fm-turn-end.js" \
+    "$WT/.fm-grok-turnend" "$WT/.fm-kimi-turnend"
+}
+
 validate_worktree_teardown_safety() {
-  local dirty_raw dirty unpushed_raw unpushed DEFAULT unmerged_raw unmerged branch
+  local dirty unpushed_raw unpushed DEFAULT unmerged_raw unmerged branch
   [ -d "$WT" ] || return 0
   [ "$FORCE" != "--force" ] || return 0
   case "$KIND" in
     secondmate|scout) return 0 ;;
   esac
 
-  if ! dirty_raw=$(git -C "$WT" status --porcelain 2>/dev/null); then
+  branch=$(git -C "$WT" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
+  if [ "$branch" != "$ACQUISITION_BRANCH" ]; then
+    echo "REFUSED: worktree $WT is on ${branch:-detached HEAD}, not its acquisition branch $ACQUISITION_BRANCH." >&2
+    echo "Restore the exact task branch before teardown so another branch is never discarded." >&2
+    return 1
+  fi
+
+  if ! dirty=$(worktree_safety_status "${TEARDOWN_ALLOW_GENERATED_ARTIFACTS:-1}"); then
     if worktree_safety_blocked_by_lock "uncommitted changes"; then
       return "$TEARDOWN_WORKTREE_SAFETY_LOCK_BLOCKED"
     fi
@@ -689,7 +758,7 @@ validate_worktree_teardown_safety() {
     echo "Restore the git index state, or get the captain's explicit OK to discard, then --force." >&2
     return 1
   fi
-  dirty=$(printf '%s\n' "$dirty_raw" | grep -vE '^\?\? (\.claude/|\.fm-(grok|kimi)-turnend$)' | head -1 || true)
+  dirty=$(printf '%s\n' "$dirty" | head -1)
 
   if ! unpushed_raw=$(git -C "$WT" log --oneline HEAD --not --remotes -- 2>/dev/null); then
     if worktree_safety_blocked_by_lock "commits not on a remote"; then
@@ -725,11 +794,7 @@ validate_worktree_teardown_safety() {
     echo "Commit them (or get the captain's explicit OK to discard, then --force)." >&2
     return 1
   elif [ -n "$unpushed" ]; then
-    branch=${TEARDOWN_WORKTREE_BRANCH_FOR_SAFETY:-}
-    if [ -z "$branch" ]; then
-      branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
-      TEARDOWN_WORKTREE_BRANCH_FOR_SAFETY=$branch
-    fi
+    branch=$ACQUISITION_BRANCH
     if ! work_is_landed "$branch"; then
       echo "REFUSED: worktree $WT has work not on any remote and not landed." >&2
       printf 'unpushed commits:\n%s\n' "$unpushed" >&2
@@ -1158,6 +1223,7 @@ TREEHOUSE_ENDPOINT_QUIESCED=0
 
 quiesce_treehouse_task_endpoint() {
   local attempt=0 expected_label="fm-$ID" focus_lock= focus_lock_held=0 focus_attempt=0
+  local endpoint_state recorded_tab_id
   [ -n "$T" ] || {
     echo "REFUSED: task $ID has no recorded runtime endpoint; cannot prove the worktree is quiescent." >&2
     return 1
@@ -1185,21 +1251,40 @@ quiesce_treehouse_task_endpoint() {
     focus_lock_held=0
     fm_lock_release "$focus_lock" || true
   else
-    fm_backend_kill "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "$expected_label" 2>/dev/null || true
+    fm_backend_kill_recorded \
+      "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "$expected_label" \
+      2>/dev/null || true
   fi
 
-  while fm_backend_target_exists "$BACKEND" "$T" "$expected_label"; do
-    if [ "$attempt" -ge "$ENDPOINT_QUIESCE_RETRIES" ]; then
-      echo "REFUSED: recorded $BACKEND endpoint $T is still present after close; preserving task records and worktree." >&2
-      return 1
-    fi
+  recorded_tab_id=$(meta_value "$META" zellij_tab_id)
+  while :; do
+    endpoint_state=$(fm_backend_endpoint_state \
+      "$BACKEND" "$T" "$expected_label" "$recorded_tab_id")
+    case "$endpoint_state" in
+      missing)
+        TREEHOUSE_ENDPOINT_QUIESCED=1
+        return 0
+        ;;
+      present)
+        if [ "$attempt" -ge "$ENDPOINT_QUIESCE_RETRIES" ]; then
+          echo "REFUSED: recorded $BACKEND endpoint $T is still present after close; preserving task records and worktree." >&2
+          return 1
+        fi
+        ;;
+      *)
+        if [ "$attempt" -ge "$ENDPOINT_QUIESCE_RETRIES" ]; then
+          echo "REFUSED: recorded $BACKEND endpoint $T could not be authoritatively queried after close; preserving task records and worktree." >&2
+          return 1
+        fi
+        ;;
+    esac
     sleep "$ENDPOINT_QUIESCE_WAIT_SECS"
     attempt=$((attempt + 1))
   done
-  TREEHOUSE_ENDPOINT_QUIESCED=1
 }
 
 if [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
+  TEARDOWN_ALLOW_GENERATED_ARTIFACTS=1
   validate_worktree_teardown_safety_with_lock_recovery || exit 1
 fi
 
@@ -1207,13 +1292,71 @@ fi
 # recorded endpoint, prove it is gone, then repeat the safety check so the
 # worker cannot mutate the copy between authorization and provider return.
 if [ -d "$WT" ] && [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
+  TREEHOUSE_RETURN_ROUTE=$(treehouse_return_route "$WT" "$PROJ") || exit 1
   quiesce_treehouse_task_endpoint || exit 1
+  remove_generated_worktree_artifacts || {
+    echo "REFUSED: could not remove Firstmate-generated worktree artifacts; preserving task records and worktree." >&2
+    exit 1
+  }
   if [ "$FORCE" != "--force" ]; then
+    TEARDOWN_ALLOW_GENERATED_ARTIFACTS=0
     validate_worktree_teardown_safety_with_lock_recovery || exit 1
+  fi
+  if [ "$FORCE" != "--force" ] && [ "$KIND" != scout ]; then
+    TREEHOUSE_RETURN_VALIDATED_HEAD=$(git -C "$WT" rev-parse --verify HEAD^{commit} 2>/dev/null) || {
+      echo "REFUSED: cannot bind landed-work authorization to the final worktree HEAD." >&2
+      exit 1
+    }
+    TREEHOUSE_RETURN_DISPOSITION=landed
   fi
 fi
 
-# Best-effort: drop the local task branch so the shared repo does not accumulate refs.
+ACQUISITION_BRANCH_HEAD=
+prepare_acquisition_branch_cleanup() {
+  git check-ref-format --branch "$ACQUISITION_BRANCH" >/dev/null 2>&1 || {
+    echo "REFUSED: invalid recorded acquisition branch $ACQUISITION_BRANCH." >&2
+    return 1
+  }
+  ACQUISITION_BRANCH_HEAD=$(git -C "$PROJ" rev-parse --verify \
+    "refs/heads/$ACQUISITION_BRANCH^{commit}" 2>/dev/null || true)
+  if [ -z "$ACQUISITION_BRANCH_HEAD" ] \
+     && [ "$FORCE" != "--force" ] && [ "$KIND" != scout ]; then
+    echo "REFUSED: acquisition branch $ACQUISITION_BRANCH is missing; preserving task records and worktree." >&2
+    return 1
+  fi
+}
+
+delete_acquisition_branch_after_return() {
+  local current current_branch
+  [ -n "$ACQUISITION_BRANCH_HEAD" ] || return 0
+  current=$(git -C "$PROJ" rev-parse --verify \
+    "refs/heads/$ACQUISITION_BRANCH^{commit}" 2>/dev/null || true)
+  [ -n "$current" ] || return 0
+  if [ "$current" != "$ACQUISITION_BRANCH_HEAD" ]; then
+    echo "error: acquisition branch $ACQUISITION_BRANCH moved during provider return; preserving it and task records" >&2
+    return 1
+  fi
+  if [ -d "$WT" ]; then
+    current_branch=$(git -C "$WT" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
+    if [ "$current_branch" = "$ACQUISITION_BRANCH" ]; then
+      git -C "$WT" checkout --detach -q 2>/dev/null || {
+        echo "error: could not detach returned worktree before deleting acquisition branch $ACQUISITION_BRANCH" >&2
+        return 1
+      }
+    fi
+  fi
+  git -C "$PROJ" branch -D -- "$ACQUISITION_BRANCH" >/dev/null 2>&1 || {
+    echo "error: could not delete acquisition branch $ACQUISITION_BRANCH after provider return" >&2
+    return 1
+  }
+  git -C "$PROJ" show-ref --verify --quiet "refs/heads/$ACQUISITION_BRANCH" && {
+    echo "error: acquisition branch $ACQUISITION_BRANCH remains after provider return" >&2
+    return 1
+  }
+  return 0
+}
+
+# Release the selected provider resource, then retire its task branch.
 if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
   if [ "$ORCA_PATH_MATCH_VERIFIED" != 1 ]; then
     require_orca_worktree_path_match_if_present "$ORCA_WORKTREE_ID" "$WT" || exit 1
@@ -1232,15 +1375,7 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
   [ -z "$T_ORCA" ] || fm_backend_kill "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID" 2>/dev/null || true
   fm_backend_remove_worktree "$BACKEND" "$ORCA_WORKTREE_ID"
 elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
-  branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
-  if [ "$branch" != "HEAD" ]; then
-    if git -C "$WT" checkout --detach -q 2>/dev/null; then
-      git -C "$WT" branch -D "$branch" >/dev/null 2>&1 || true
-    fi
-  fi
-  # Remove our hook file so a reused pool worktree cannot fire signals for a dead task.
-  rm -f "$WT/.claude/settings.local.json" "$WT/.opencode/plugins/fm-turn-end.js" \
-    "$WT/.fm-grok-turnend" "$WT/.fm-kimi-turnend"
+  prepare_acquisition_branch_cleanup || exit 1
   # Return only after the endpoint is confirmed gone and the final safety check
   # passes. treehouse resolves the provider from the project working directory.
   # The return wrapper retains transient and stale git-lock recovery.
@@ -1248,10 +1383,12 @@ elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
   if [ "$FORCE" != "--force" ] && [ "$KIND" != scout ] && [ "$KIND" != secondmate ]; then
     post_lock_cleanup_check=validate_worktree_teardown_safety
   fi
-  teardown_treehouse_return "$WT" "$PROJ" "worktree" "$post_lock_cleanup_check" || {
+  teardown_treehouse_return "$WT" "$PROJ" "worktree" "$post_lock_cleanup_check" \
+    "$TREEHOUSE_RETURN_ROUTE" || {
     echo "error: treehouse return failed for worktree $WT; teardown aborted" >&2
     exit 1
   }
+  delete_acquisition_branch_after_return || exit 1
 fi
 if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ] && [ "$TREEHOUSE_ENDPOINT_QUIESCED" != 1 ]; then
   fm_backend_kill "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID" 2>/dev/null || true

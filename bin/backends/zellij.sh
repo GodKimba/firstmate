@@ -281,6 +281,70 @@ fm_backend_zellij_pane_exists() {  # <session> <pane_id>
     | jq -e --argjson p "$pane_id" '[.[]? | select(.id == $p and .is_plugin == false)] | length > 0' >/dev/null 2>&1
 }
 
+fm_backend_zellij_endpoint_state() {  # <target> [expected-label] [recorded-tab-id]
+  local target=$1 expected_label=${2:-} recorded_tab_id=${3:-}
+  local sessions panes tabs pane_tab_id exact_tab_id= scoped exact_title bare_count
+  fm_backend_zellij_parse_target "$target" || { printf 'unreadable'; return 0; }
+  sessions=$(zellij list-sessions --short --no-formatting 2>/dev/null) \
+    || { printf 'unreadable'; return 0; }
+  if ! printf '%s\n' "$sessions" | grep -qxF "$FM_BACKEND_ZELLIJ_SESSION"; then
+    printf 'missing'
+    return 0
+  fi
+  panes=$(fm_backend_zellij_cli "$FM_BACKEND_ZELLIJ_SESSION" action list-panes --json 2>/dev/null) \
+    || { printf 'unreadable'; return 0; }
+  tabs=$(fm_backend_zellij_cli "$FM_BACKEND_ZELLIJ_SESSION" action list-tabs --json 2>/dev/null) \
+    || { printf 'unreadable'; return 0; }
+  printf '%s' "$panes" | jq -e 'type == "array"' >/dev/null 2>&1 \
+    || { printf 'unreadable'; return 0; }
+  printf '%s' "$tabs" | jq -e 'type == "array"' >/dev/null 2>&1 \
+    || { printf 'unreadable'; return 0; }
+
+  pane_tab_id=$(printf '%s' "$panes" \
+    | jq -r --argjson p "$FM_BACKEND_ZELLIJ_PANE" \
+      '.[]? | select(.id == $p and .is_plugin == false) | .tab_id' 2>/dev/null \
+    | head -1)
+  case "$recorded_tab_id" in
+    ''|*[!0-9]*) ;;
+    *) exact_tab_id=$recorded_tab_id ;;
+  esac
+  if [ -n "$pane_tab_id" ]; then
+    if [ -n "$exact_tab_id" ] && [ "$pane_tab_id" != "$exact_tab_id" ]; then
+      printf 'unreadable'
+      return 0
+    fi
+    exact_tab_id=$pane_tab_id
+  fi
+  [ -n "$exact_tab_id" ] || { printf 'missing'; return 0; }
+
+  if [ -n "$expected_label" ]; then
+    scoped=$(fm_backend_zellij_scoped_title "$expected_label")
+    exact_title=$(printf '%s' "$tabs" \
+      | jq -r --argjson t "$exact_tab_id" \
+        '.[]? | select(.tab_id == $t) | .name' 2>/dev/null \
+      | head -1)
+    if [ -z "$exact_title" ]; then
+      [ -z "$pane_tab_id" ] && printf 'missing' || printf 'unreadable'
+      return 0
+    fi
+    if [ "$exact_title" != "$scoped" ]; then
+      bare_count=$(printf '%s' "$tabs" \
+        | jq -r --arg want "$expected_label" \
+          '[.[]? | select(.name == $want)] | length' 2>/dev/null)
+      if [ "$exact_title" != "$expected_label" ] || [ "$bare_count" != 1 ]; then
+        printf 'unreadable'
+        return 0
+      fi
+    fi
+  elif ! printf '%s' "$tabs" \
+    | jq -e --argjson t "$exact_tab_id" \
+      '[.[]? | select(.tab_id == $t)] | length == 1' >/dev/null 2>&1; then
+    printf 'missing'
+    return 0
+  fi
+  printf 'present'
+}
+
 # fm_backend_zellij_tab_matches_label: does <tab_id> in <session> carry the
 # tab name firstmate expects for the caller-facing task label <label>?
 # Checks the home-scoped, tagged title first (fm_backend_zellij_scoped_title

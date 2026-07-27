@@ -904,7 +904,15 @@ set -u
 { printf 'tmux'; for a in "$@"; do printf '\x1f%s' "$a"; done; printf '\n'; } >> "${FM_TMUX_LOG:?}"
 case "${1:-}" in
   kill-window) : > "${FM_TMUX_KILLED:?}"; exit 0 ;;
-  display-message) [ ! -e "${FM_TMUX_KILLED:?}" ] || exit 1; printf '%s\n' '%%1'; exit 0 ;;
+  list-windows)
+    [ ! -e "${FM_TMUX_KILLED:?}" ] || {
+      echo "can't find session: firstmate" >&2
+      exit 1
+    }
+    printf '%s\n' 'fm-teardownconform1'
+    exit 0
+    ;;
+  display-message) [ ! -e "${FM_TMUX_KILLED:?}" ] || exit 1; printf '%s\n' 'codex'; exit 0 ;;
 esac
 exit 0
 SH
@@ -912,9 +920,22 @@ SH
 #!/usr/bin/env bash
 set -u
 { printf 'treehouse'; for a in "$@"; do printf '\x1f%s' "$a"; done; printf '\n'; } >> "${FM_TMUX_LOG:?}"
+if [ "${1:-}" = firstmate-return-route ]; then
+  printf 'managed'
+fi
 exit 0
 SH
-  chmod +x "$fb/tmux" "$fb/treehouse"
+  cat > "$fb/tasks-axi" <<'SH'
+#!/usr/bin/env bash
+case "${1:-} ${2:-}" in
+  "--version ") printf '%s\n' 'tasks-axi 0.2.2' ;;
+  "update --help") printf '%s\n' 'usage: tasks-axi update --archive-body' ;;
+  "mv --help") printf '%s\n' 'usage: tasks-axi mv [<id>...]' ;;
+  "hold --help") printf '%s\n' 'usage: tasks-axi hold --kind captain' ;;
+esac
+exit 0
+SH
+  chmod +x "$fb/tmux" "$fb/treehouse" "$fb/tasks-axi"
   printf '%s\n' "$fb"
 }
 

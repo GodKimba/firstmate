@@ -1441,6 +1441,7 @@ META_WINDOW=$T
   echo "kind=$KIND"
   echo "mode=$MODE"
   echo "yolo=$YOLO"
+  [ "$KIND" = secondmate ] || echo "acquisition_branch=fm/$ID"
   echo "tasktmp=$TASK_TMP"
   echo "model=${MODEL:-default}"
   echo "effort=${EFFORT:-default}"

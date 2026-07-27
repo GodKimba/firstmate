@@ -73,12 +73,17 @@ make_case() {
   case_dir="$TMP_ROOT/$name"
   fakebin="$case_dir/fakebin"
   mkdir -p "$case_dir/state" "$case_dir/config" "$fakebin"
+  case_dir=$(cd "$case_dir" && pwd -P)
+  fakebin="$case_dir/fakebin"
 
   # Mocks for the post-check teardown steps. Refuse logic exits before these
   # run; the ALLOW cases need them so the script can complete cleanly.
   cat > "$fakebin/treehouse" <<'SH'
 #!/usr/bin/env bash
-# `treehouse return --force <wt>`: succeed silently.
+if [ "${1:-}" = firstmate-return-route ]; then
+  printf 'managed'
+  exit 0
+fi
 exit 0
 SH
   cat > "$fakebin/tmux" <<'SH'
@@ -99,9 +104,20 @@ case "${1:-}" in
     esac
     exit 0
     ;;
+  list-windows)
+    if [ -e "${FM_FAKE_TMUX_STATE:?}" ]; then
+      echo "can't find session: firstmate" >&2
+      exit 1
+    fi
+    printf '%s\n' 'fm-task-x1'
+    exit 0
+    ;;
   display-message)
     [ ! -e "${FM_FAKE_TMUX_STATE:?}" ] || exit 1
-    printf '%s\n' '%%1'
+    case "${@: -1}" in
+      '#{pane_current_command}') printf '%s\n' 'codex' ;;
+      *) printf '%s\n' '%%1' ;;
+    esac
     exit 0
     ;;
 esac
@@ -180,9 +196,10 @@ SH
 write_meta() {
   local case_dir=$1 mode=$2 kind=$3
   fm_write_meta "$case_dir/state/task-x1.meta" \
-    "window=fm-task-x1" \
+    "window=firstmate:fm-task-x1" \
     "worktree=$case_dir/wt" \
     "project=$case_dir/project" \
+    "acquisition_branch=fm/task-x1" \
     "kind=$kind" \
     "mode=$mode"
 }
@@ -318,6 +335,10 @@ add_lock_aware_treehouse() {
   local case_dir=$1
   cat > "$case_dir/fakebin/treehouse" <<'SH'
 #!/usr/bin/env bash
+if [ "${1:-}" = firstmate-return-route ]; then
+  printf 'managed'
+  exit 0
+fi
 if [ "${1:-}" = return ]; then
   shift
   wt=""
@@ -352,6 +373,10 @@ add_transient_lock_treehouse() {
   local case_dir=$1
   cat > "$case_dir/fakebin/treehouse" <<'SH'
 #!/usr/bin/env bash
+if [ "${1:-}" = firstmate-return-route ]; then
+  printf 'managed'
+  exit 0
+fi
 if [ "${1:-}" = return ]; then
   shift
   wt=""
@@ -397,6 +422,10 @@ add_persistent_lock_treehouse() {
   local case_dir=$1
   cat > "$case_dir/fakebin/treehouse" <<'SH'
 #!/usr/bin/env bash
+if [ "${1:-}" = firstmate-return-route ]; then
+  printf 'managed'
+  exit 0
+fi
 if [ "${1:-}" = return ]; then
   shift
   wt=""
@@ -514,15 +543,59 @@ SH
 
 # Run teardown with PATH mocking. Args: case_dir [extra args...]
 run_teardown() {
-  local case_dir=$1; shift
+  local case_dir=$1 wt generic_state=; shift
+  wt=$(grep '^worktree=' "$case_dir/state/task-x1.meta" | tail -1 | cut -d= -f2-)
+  [ ! -f "$case_dir/config/fake-generic-state" ] \
+    || generic_state=$(cat "$case_dir/config/fake-generic-state")
   FM_ROOT_OVERRIDE="$ROOT" \
   FM_STATE_OVERRIDE="$case_dir/state" \
   FM_DATA_OVERRIDE="$case_dir/data" \
   FM_CONFIG_OVERRIDE="$case_dir/config" \
   FM_FAKE_TMUX_STATE="$case_dir/tmux-killed" \
-  FM_FAKE_TMUX_WT="$case_dir/wt" \
+  FM_FAKE_TMUX_WT="$wt" \
+  FM_FAKE_GENERIC_STATE="$generic_state" \
+  FM_FAKE_GENERIC_WT="$wt" \
+  FM_FAKE_GENERIC_MV_COUNT="$case_dir/generic-mv-count" \
+  FM_FAKE_TREEHOUSE_LOG="$case_dir/treehouse.log" \
   PATH="$case_dir/fakebin:$PATH" \
     "$TEARDOWN" task-x1 "$@"
+}
+
+configure_generic_pool_case() {
+  local case_dir=$1 pool target old
+  old="$case_dir/wt"
+  pool="$case_dir/.treehouse/project-pool"
+  target="$pool/1/project"
+  mkdir -p "$pool/1"
+  git -C "$case_dir/project" worktree move "$old" "$target"
+  sed "s|^worktree=.*|worktree=$target|" "$case_dir/state/task-x1.meta" \
+    > "$case_dir/state/task-x1.meta.tmp"
+  mv "$case_dir/state/task-x1.meta.tmp" "$case_dir/state/task-x1.meta"
+  jq -n --arg path "$target" \
+    '{worktrees: [{name: "1", path: $path, created_at: "2026-07-27T00:00:00Z"}]}' \
+    > "$pool/treehouse-state.json"
+  printf '%s\n' "$pool/treehouse-state.json" > "$case_dir/config/fake-generic-state"
+  cat > "$case_dir/fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "${FM_FAKE_TREEHOUSE_LOG:?}"
+case "${1:-}" in
+  firstmate-return-route)
+    printf 'generic'
+    ;;
+  status)
+    tmp="${FM_FAKE_GENERIC_STATE:?}.tmp"
+    jq --arg path "${FM_FAKE_GENERIC_WT:?}" \
+      '.worktrees |= map(select(.path != $path))' \
+      "${FM_FAKE_GENERIC_STATE:?}" > "$tmp"
+    mv "$tmp" "${FM_FAKE_GENERIC_STATE:?}"
+    ;;
+  return)
+    echo "generic route must not call treehouse return" >&2
+    exit 91
+    ;;
+esac
+SH
+  chmod +x "$case_dir/fakebin/treehouse"
 }
 
 test_local_only_fork_remote_allows() {
@@ -903,6 +976,10 @@ test_provider_refusal_preserves_task_records() {
   git -C "$case_dir/project" fetch -q origin
   cat > "$case_dir/fakebin/treehouse" <<'SH'
 #!/usr/bin/env bash
+if [ "${1:-}" = firstmate-return-route ]; then
+  printf 'managed'
+  exit 0
+fi
 [ "${FM_TREEHOUSE_RETURN_AUTHORIZED:-}" = 1 ] || exit 9
 [ "${FM_TREEHOUSE_RETURN_PROJECT:-}" = "${FM_EXPECTED_PROJECT:?}" ] || exit 8
 exit 1
@@ -917,6 +994,10 @@ SH
   expect_code 1 "$rc" "provider-refusal: teardown must fail when treehouse refuses return"
   [ -f "$case_dir/state/task-x1.meta" ] || fail "provider-refusal: task metadata was cleared after provider refusal"
   [ -d "$case_dir/wt" ] || fail "provider-refusal: worktree disappeared despite provider refusal"
+  git -C "$case_dir/project" show-ref --verify --quiet refs/heads/fm/task-x1 \
+    || fail "provider-refusal: acquisition branch was deleted before provider success"
+  [ "$(git -C "$case_dir/wt" symbolic-ref --quiet --short HEAD)" = "fm/task-x1" ] \
+    || fail "provider-refusal: worktree was detached before provider success"
   assert_grep "treehouse return failed" "$case_dir/stderr" \
     "provider-refusal: teardown did not report the provider refusal"
   pass "provider refusal preserves task records and the worktree"
@@ -974,7 +1055,8 @@ test_endpoint_close_must_be_confirmed_before_return() {
   cat > "$case_dir/fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 case "${1:-}" in
-  display-message) printf '%s\n' '%%1'; exit 0 ;;
+  list-windows) printf '%s\n' 'fm-task-x1'; exit 0 ;;
+  display-message) printf '%s\n' 'codex'; exit 0 ;;
   kill-window) exit 0 ;;
 esac
 exit 0
@@ -991,6 +1073,200 @@ SH
   assert_grep "still present after close" "$case_dir/stderr" \
     "endpoint-still-live: refusal did not explain the live endpoint"
   pass "treehouse return waits for confirmed exact-endpoint closure"
+}
+
+test_endpoint_query_error_preserves_worktree() {
+  local case_dir rc
+  case_dir=$(make_case endpoint-unreadable)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit "$case_dir" "landed endpoint-query work"
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  git -C "$case_dir/project" fetch -q origin
+  cat > "$case_dir/fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  kill-window) exit 0 ;;
+  list-windows) echo "tmux transport unavailable" >&2; exit 1 ;;
+esac
+exit 1
+SH
+  chmod +x "$case_dir/fakebin/tmux"
+
+  set +e
+  FM_ENDPOINT_QUIESCE_RETRIES=0 run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "endpoint-unreadable: teardown must refuse an unreadable endpoint query"
+  [ -f "$case_dir/state/task-x1.meta" ] || fail "endpoint-unreadable: task metadata was cleared"
+  [ -d "$case_dir/wt" ] || fail "endpoint-unreadable: worktree was removed"
+  assert_grep "could not be authoritatively queried" "$case_dir/stderr" \
+    "endpoint-unreadable: refusal did not distinguish an unreadable query"
+  pass "unreadable endpoint queries preserve task records and worktrees"
+}
+
+test_only_exact_generated_artifacts_are_exempt() {
+  local case_dir rc
+  case_dir=$(make_case generated-artifact-scope)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit "$case_dir" "landed generated-artifact work"
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  git -C "$case_dir/project" fetch -q origin
+  mkdir -p "$case_dir/wt/.claude"
+  printf '%s\n' '{}' > "$case_dir/wt/.claude/settings.local.json"
+  printf '%s\n' 'keep me' > "$case_dir/wt/.claude/notes"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "generated-artifact-scope: unrelated .claude content must be dirty"
+  [ -f "$case_dir/wt/.claude/notes" ] || fail "generated-artifact-scope: unrelated file was removed"
+  [ ! -e "$case_dir/tmux-killed" ] || fail "generated-artifact-scope: endpoint closed before dirty refusal"
+  pass "cleanliness exempts only exact Firstmate-generated artifact paths"
+}
+
+test_exact_generated_artifact_is_removed_before_final_validation() {
+  local case_dir rc
+  case_dir=$(make_case exact-generated-artifact)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit "$case_dir" "landed exact-artifact work"
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  git -C "$case_dir/project" fetch -q origin
+  mkdir -p "$case_dir/wt/.claude"
+  printf '%s\n' '{}' > "$case_dir/wt/.claude/settings.local.json"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "exact-generated-artifact: exact generated hook should not block cleanup"
+  [ ! -e "$case_dir/wt/.claude/settings.local.json" ] \
+    || fail "exact-generated-artifact: generated hook remained after cleanup"
+  pass "exact generated artifacts are removed before the final clean-state proof"
+}
+
+test_switched_branch_refuses_without_deleting_acquisition_branch() {
+  local case_dir rc
+  case_dir=$(make_case switched-branch)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit "$case_dir" "landed acquisition-branch work"
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  git -C "$case_dir/project" fetch -q origin
+  git -C "$case_dir/wt" checkout -q -b unrelated-branch
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "switched-branch: teardown must bind safety to the acquisition branch"
+  git -C "$case_dir/project" show-ref --verify --quiet refs/heads/fm/task-x1 \
+    || fail "switched-branch: acquisition branch was deleted"
+  git -C "$case_dir/project" show-ref --verify --quiet refs/heads/unrelated-branch \
+    || fail "switched-branch: current unrelated branch was deleted"
+  assert_grep "not its acquisition branch" "$case_dir/stderr" \
+    "switched-branch: refusal did not name the provenance mismatch"
+  pass "branch cleanup remains bound to the exact acquisition branch"
+}
+
+test_generic_return_removes_exact_worktree_without_force() {
+  local case_dir rc wt state
+  case_dir=$(make_case generic-return)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit "$case_dir" "landed generic-return work"
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  git -C "$case_dir/project" fetch -q origin
+  configure_generic_pool_case "$case_dir"
+  wt=$(grep '^worktree=' "$case_dir/state/task-x1.meta" | cut -d= -f2-)
+  state=$(cat "$case_dir/config/fake-generic-state")
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "generic-return: exact generic worktree removal should succeed"
+  [ ! -e "$wt" ] || fail "generic-return: generic worktree still exists"
+  [ "$(jq --arg path "$wt" '[.worktrees[]? | select(.path == $path)] | length' "$state")" = 0 ] \
+    || fail "generic-return: Treehouse state retained the removed worktree"
+  git -C "$case_dir/project" show-ref --verify --quiet refs/heads/fm/task-x1 \
+    && fail "generic-return: acquisition branch remains after verified removal"
+  grep -F 'return --force' "$case_dir/treehouse.log" >/dev/null \
+    && fail "generic-return: generic route called treehouse return --force"
+  pass "generic return removes only the exact authorized worktree without forcing Git"
+}
+
+test_missing_private_router_preserves_managed_return() {
+  local case_dir rc
+  case_dir=$(make_case staged-managed-route)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit "$case_dir" "landed staged-route work"
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  git -C "$case_dir/project" fetch -q origin
+  cat > "$case_dir/fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "${FM_FAKE_TREEHOUSE_LOG:?}"
+case "${1:-}" in
+  firstmate-return-route) exit 2 ;;
+  return) exit 0 ;;
+esac
+exit 90
+SH
+  chmod +x "$case_dir/fakebin/treehouse"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "staged-managed-route: absent private router must retain managed return"
+  grep -F 'return --force' "$case_dir/treehouse.log" >/dev/null \
+    || fail "staged-managed-route: missing router activated generic removal"
+  pass "generic removal activates only after an explicit private-router decision"
+}
+
+test_generic_postcondition_failure_restores_worktree() {
+  local case_dir rc wt
+  case_dir=$(make_case generic-postcondition)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit "$case_dir" "landed generic-postcondition work"
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  git -C "$case_dir/project" fetch -q origin
+  configure_generic_pool_case "$case_dir"
+  wt=$(grep '^worktree=' "$case_dir/state/task-x1.meta" | cut -d= -f2-)
+  cat > "$case_dir/fakebin/mv" <<'SH'
+#!/usr/bin/env bash
+if [ "${*: -1}" = "${FM_FAKE_GENERIC_STATE:?}" ]; then
+  count=0
+  [ ! -f "${FM_FAKE_GENERIC_MV_COUNT:?}" ] \
+    || count=$(cat "$FM_FAKE_GENERIC_MV_COUNT")
+  count=$((count + 1))
+  printf '%s\n' "$count" > "$FM_FAKE_GENERIC_MV_COUNT"
+  [ "$count" -ne 2 ] || exit 73
+fi
+exec /bin/mv "$@"
+SH
+  chmod +x "$case_dir/fakebin/mv"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "generic-postcondition: stale provider state must fail"
+  [ -d "$wt" ] || fail "generic-postcondition: worktree was not restored"
+  [ -f "$case_dir/state/task-x1.meta" ] || fail "generic-postcondition: task metadata was cleared"
+  git -C "$case_dir/project" show-ref --verify --quiet refs/heads/fm/task-x1 \
+    || fail "generic-postcondition: acquisition branch was deleted"
+  [ "$(jq --arg path "$wt" '[.worktrees[]? | select(.path == $path and ((.destroying // false) == false))] | length' \
+      "$case_dir/.treehouse/project-pool/treehouse-state.json")" = 1 ] \
+    || fail "generic-postcondition: Treehouse state was not restored"
+  assert_grep "state commit failed" "$case_dir/stderr" \
+    "generic-postcondition: failed provider postcondition was not reported"
+  pass "generic provider postcondition failures restore recovery state"
 }
 
 test_report_gated_scout_cleanup_remains_supported() {
@@ -1401,7 +1677,14 @@ case "${1:-} ${2:-}" in
   "status --json") printf '%s\n' '{"server":{"running":true}}'; exit 0 ;;
   "session list") printf '%s\n' '{"sessions":[{"name":"default","running":true,"socket_path":"/tmp/default.sock"}]}'; exit 0 ;;
   "pane close") : > "${FM_FAKE_HERDR_CLOSED:?}"; exit 0 ;;
-  "pane get") [ ! -e "${FM_FAKE_HERDR_CLOSED:?}" ] || exit 1; printf '%s\n' '{"result":{"pane":{"pane_id":"wG:pQ"}}}'; exit 0 ;;
+  "pane get")
+    if [ -e "${FM_FAKE_HERDR_CLOSED:?}" ]; then
+      printf '%s\n' '{"error":{"code":"pane_not_found"}}' >&2
+      exit 1
+    fi
+    printf '%s\n' '{"result":{"pane":{"pane_id":"wG:pQ"}}}'
+    exit 0
+    ;;
 esac
 exit 0
 SH
@@ -1554,6 +1837,13 @@ test_provider_refusal_preserves_task_records
 test_late_dirty_mutation_after_quiesce_refuses
 test_late_unlanded_commit_after_quiesce_refuses
 test_endpoint_close_must_be_confirmed_before_return
+test_endpoint_query_error_preserves_worktree
+test_only_exact_generated_artifacts_are_exempt
+test_exact_generated_artifact_is_removed_before_final_validation
+test_switched_branch_refuses_without_deleting_acquisition_branch
+test_generic_return_removes_exact_worktree_without_force
+test_missing_private_router_preserves_managed_return
+test_generic_postcondition_failure_restores_worktree
 test_report_gated_scout_cleanup_remains_supported
 test_gh_error_and_content_absent_refuses
 test_stale_index_lock_cleared_and_teardown_succeeds

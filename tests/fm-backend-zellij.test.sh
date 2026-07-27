@@ -208,6 +208,29 @@ test_session_honors_override() {
   pass "fm_backend_zellij_session: honors the FM_ZELLIJ_SESSION test-isolation override"
 }
 
+test_endpoint_state_distinguishes_missing_from_contradictory_inventory() {
+  local dir fb out
+  dir="$TMP_ROOT/endpoint-missing"; mkdir -p "$dir/responses"
+  printf '[]\n' > "$dir/responses/1.out"
+  printf '[]\n' > "$dir/responses/2.out"
+  fb=$(make_zellij_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_ZELLIJ_LOG="$dir/log" FM_ZELLIJ_RESPONSES="$dir/responses" \
+    FM_ZELLIJ_SESSION_LIST=firstmate \
+    bash -c '. "$0/bin/backends/zellij.sh"; fm_backend_zellij_endpoint_state firstmate:7 fm-task 3' "$ROOT" )
+  [ "$out" = missing ] || fail "absent recorded pane and tab should be missing, got '$out'"
+
+  dir="$TMP_ROOT/endpoint-contradictory"; mkdir -p "$dir/responses"
+  zellij_pane_response "$dir" 1 7 3
+  printf '[]\n' > "$dir/responses/2.out"
+  fb=$(make_zellij_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_ZELLIJ_LOG="$dir/log" FM_ZELLIJ_RESPONSES="$dir/responses" \
+    FM_ZELLIJ_SESSION_LIST=firstmate \
+    bash -c '. "$0/bin/backends/zellij.sh"; fm_backend_zellij_endpoint_state firstmate:7 fm-task 3' "$ROOT" )
+  [ "$out" = unreadable ] \
+    || fail "a pane whose owning tab vanished from the same inventory should be unreadable, got '$out'"
+  pass "fm_backend_zellij_endpoint_state: licenses absence only from consistent inventory"
+}
+
 # --- target parsing, key normalization ---------------------------------------
 
 test_parse_target() {
@@ -806,6 +829,17 @@ test_teardown_passes_recorded_tab_id_to_zellij_kill() {
   printf '[]\n' > "$dir/responses/1.out"
   printf '[{"tab_id":3,"name":"fm-zghost"}]\n' > "$dir/responses/2.out"
   fb=$(make_zellij_fakebin "$dir")
+  cat > "$fb/tasks-axi" <<'SH'
+#!/usr/bin/env bash
+case "${1:-} ${2:-}" in
+  "--version ") printf '%s\n' 'tasks-axi 0.2.2' ;;
+  "update --help") printf '%s\n' 'usage: tasks-axi update --archive-body' ;;
+  "mv --help") printf '%s\n' 'usage: tasks-axi mv [<id>...]' ;;
+  "hold --help") printf '%s\n' 'usage: tasks-axi hold --kind captain' ;;
+esac
+exit 0
+SH
+  chmod +x "$fb/tasks-axi"
   out=$( PATH="$fb:$PATH" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
     FM_ZELLIJ_LOG="$dir/log" FM_ZELLIJ_RESPONSES="$dir/responses" FM_ZELLIJ_SESSION_LIST="firstmate" \
     "$ROOT/bin/fm-teardown.sh" zghost 2>&1 )
@@ -1019,6 +1053,7 @@ test_version_check_refuses_old_version
 test_version_check_refuses_missing_zellij
 test_session_defaults_to_firstmate
 test_session_honors_override
+test_endpoint_state_distinguishes_missing_from_contradictory_inventory
 test_parse_target
 test_normalize_key
 test_scoped_title_uses_primary_home_label
