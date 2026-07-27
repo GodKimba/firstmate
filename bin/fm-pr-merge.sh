@@ -2,11 +2,12 @@
 # Merge a task's PR after recording pr= and any available pr_head= through
 # bin/fm-pr-check.sh, so teardown can verify landed work after squash merges.
 # The full canonical GitHub PR URL is parsed by bin/fm-pr-lib.sh and the derived
-# owner/repository and PR number are passed to gh-axi as separate arguments.
+# host, owner/repository, and PR number are passed to gh-axi.
 #
 # Merge method defaults to --squash when the caller passes none of --squash,
 # --merge, --rebase, or --method after the optional -- separator. Extra args
-# must not include --repo or -R because the repository comes only from the URL.
+# must not include --repo, -R, or --hostname because the target comes only from
+# the URL.
 # After gh-axi returns, the helper reads the current GitHub REST state. Exit 0
 # means GitHub verifies the PR is merged; exit 3 means auto-merge is enabled on
 # an open PR and the existing merge poll must keep watching; every unreadable or
@@ -37,6 +38,7 @@ if ! fm_pr_task_id_valid "$ID" || ! fm_pr_url_parse "$RAW_URL" \
   exit 2
 fi
 URL=$FM_PR_URL
+PR_HOST=$FM_PR_HOST
 PR_OWNER=$FM_PR_OWNER
 PR_REPO=$FM_PR_REPO
 PR_NUMBER=$FM_PR_NUMBER
@@ -60,7 +62,7 @@ state_field() {
   printf '%s\n' "$output" | awk -F': ' -v key="$key" '$1 == key { sub(/^[^:]*: /, ""); print }'
 }
 
-reject_repo_overrides() {
+reject_target_overrides() {
   local arg
   for arg in "$@"; do
     case "$arg" in
@@ -68,11 +70,15 @@ reject_repo_overrides() {
         echo "error: extra merge arguments must not override the repository" >&2
         return 1
         ;;
+      --hostname|--hostname=*)
+        echo "error: extra merge arguments must not override the hostname" >&2
+        return 1
+        ;;
     esac
   done
 }
 
-reject_repo_overrides "$@" || exit 1
+reject_target_overrides "$@" || exit 1
 
 # Task-derived paths are constructed only after the canonical ID validation.
 META="$STATE/$ID.meta"
@@ -96,10 +102,10 @@ fi
 # including one that only enables auto-merge. Suppress that human-oriented label
 # and establish the result from a fresh authoritative GitHub read instead.
 MERGE_STATUS=0
-gh-axi pr merge "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" \
+GH_HOST="$PR_HOST" gh-axi pr merge "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" \
   "${merge_args[@]+"${merge_args[@]}"}" "$@" >/dev/null || MERGE_STATUS=$?
 
-if ! PR_STATE_OUTPUT=$(gh-axi api "/repos/$PR_OWNER/$PR_REPO/pulls/$PR_NUMBER" --jq \
+if ! PR_STATE_OUTPUT=$(GH_HOST="$PR_HOST" gh-axi api "/repos/$PR_OWNER/$PR_REPO/pulls/$PR_NUMBER" --jq \
   '{state: .state, merged: .merged, merged_at: .merged_at, auto_merge_enabled: (.auto_merge != null)}'); then
   echo "error: GitHub PR state could not be verified after the merge request; task work is preserved" >&2
   exit 1

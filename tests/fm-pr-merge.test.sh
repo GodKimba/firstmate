@@ -13,10 +13,11 @@
 #   (e) PR URL is parsed to number + --repo for gh-axi (defaults to --squash)
 #   (f) malformed PR URL fails fast without calling gh-axi
 #   (g) explicit merge method is not overridden by the default --squash
-#   (h) repo override args fail fast because the repo comes from the URL
+#   (h) repository and hostname overrides fail fast because the URL owns both
 #   (i) newly enabled and already queued auto-merges stay open and monitored
 #   (j) an auto request that merges immediately is reported as actually merged
 #   (k) unreadable or contradictory post-command GitHub state refuses safely
+#   (l) ambient GH_HOST cannot redirect mutation or verification
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -117,11 +118,39 @@ SH
   chmod +x "$case_dir/fakebin/gh-axi"
 }
 
+add_gh_mocks_host_sensitive() {
+  local case_dir=$1
+  add_gh_mocks "$case_dir" aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa open false null true
+  cat > "$case_dir/fakebin/gh-axi" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FM_TEST_GH_AXI_LOG"
+printf '%s\n' "${GH_HOST:-}" >> "$FM_TEST_GH_HOST_LOG"
+case "${1:-} ${2:-}" in
+  "pr merge") exit 0 ;;
+  "api /repos/"*)
+    if [ "${GH_HOST:-}" = github.com ]; then
+      cat "$FM_TEST_PR_STATE_FILE"
+    else
+      printf '%s\n' \
+        'auto_merge_enabled: false' \
+        'merged: true' \
+        'merged_at: "2026-07-27T21:58:23Z"' \
+        'state: closed'
+    fi
+    exit 0
+    ;;
+esac
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/gh-axi"
+}
+
 run_pr_merge() {
   local case_dir=$1 rc; shift
   FM_ROOT_OVERRIDE="$ROOT" \
   FM_STATE_OVERRIDE="$case_dir/state" \
   FM_TEST_GH_AXI_LOG="$case_dir/gh-axi.log" \
+  FM_TEST_GH_HOST_LOG="$case_dir/gh-host.log" \
   FM_TEST_PR_STATE_FILE="$case_dir/pr-state.out" \
   PATH="$case_dir/fakebin:$PATH" \
     "$PR_MERGE" "$@"
@@ -322,6 +351,31 @@ test_repo_override_args_refuse_before_recording() {
   pass "fm-pr-merge refuses repo override args before recording state"
 }
 
+test_hostname_override_args_refuse_before_recording() {
+  local case_dir rc
+  case_dir=$(make_case hostname-override)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" 9999999999999999999999999999999999999999
+  : > "$case_dir/gh-axi.log"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/right/repo/pull/6 -- --hostname=ghe.example.com \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "hostname-override: fm-pr-merge should refuse"
+  assert_grep 'extra merge arguments must not override the hostname' "$case_dir/stderr" \
+    "hostname-override: refusal did not explain the hostname override"
+  assert_no_grep 'pr=https://github.com/right/repo/pull/6' "$case_dir/state/task-x1.meta" \
+    "hostname-override: PR URL was recorded before rejecting hostname override"
+  assert_absent "$case_dir/state/task-x1.check.sh" \
+    "hostname-override: hostname override armed a merge poll"
+  [ ! -s "$case_dir/gh-axi.log" ] \
+    || fail "hostname-override: gh-axi pr merge was invoked despite hostname override"
+  pass "fm-pr-merge refuses hostname override args before recording state"
+}
+
 test_explicit_merge_method_not_overridden() {
   local case_dir
   case_dir=$(make_case explicit-merge-method)
@@ -434,6 +488,31 @@ test_implicit_merge_queue_auto_merge_waits() {
   pass "implicit merge-queue auto-merge remains a waiting outcome"
 }
 
+test_ambient_host_cannot_redirect_merge_truth() {
+  local case_dir rc
+  case_dir=$(make_case ambient-host)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks_host_sensitive "$case_dir"
+  : > "$case_dir/gh-axi.log"
+  : > "$case_dir/gh-host.log"
+
+  set +e
+  GH_HOST=ghe.example.com \
+    run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/38 \
+      > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 3 "$rc" "ambient-host: canonical GitHub auto-merge should remain waiting"
+  [ "$(wc -l < "$case_dir/gh-host.log" | tr -d ' ')" -eq 2 ] \
+    || fail "ambient-host: merge and verification did not both record their target host"
+  ! grep -vxF github.com "$case_dir/gh-host.log" >/dev/null \
+    || fail "ambient-host: a gh-axi call inherited the adversarial ambient host"
+  assert_grep 'auto-merge enabled: https://github.com/example/repo/pull/38; waiting on checks' "$case_dir/stdout" \
+    "ambient-host: state from another GitHub host authorized a false merge"
+  pass "canonical PR host binds merge and authoritative verification"
+}
+
 test_auto_merge_that_completes_immediately_is_merged() {
   local case_dir
   case_dir=$(make_case auto-merge-immediate)
@@ -505,12 +584,14 @@ test_missing_meta_refuses_before_merge
 test_malformed_url_refuses_before_merge
 test_rejects_unsafe_url_segments_before_recording
 test_repo_override_args_refuse_before_recording
+test_hostname_override_args_refuse_before_recording
 test_explicit_merge_method_not_overridden
 test_method_equals_merge_method_not_overridden
 test_parses_pr_url_for_gh_axi
 test_auto_merge_enabled_waits_and_preserves_monitoring
 test_already_queued_auto_merge_waits
 test_implicit_merge_queue_auto_merge_waits
+test_ambient_host_cannot_redirect_merge_truth
 test_auto_merge_that_completes_immediately_is_merged
 test_unreadable_state_refuses_after_merge_command
 test_contradictory_state_refuses_after_merge_command
