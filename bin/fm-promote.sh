@@ -5,6 +5,10 @@
 # (inventory scratch state, reset to a clean default-branch base, carry over only
 # intended fix changes on branch fm/<task-id>, implement, then report done
 # according to the project's delivery mode).
+# The recorded project and worktree paths are proven by resolving them, not by
+# requiring the stored strings to already be physical: a project clone is legitimately
+# registered through a symlink. Every Git operation then uses the resolved paths, and
+# the stored strings are preserved exactly as recorded.
 # Usage: fm-promote.sh <task-id>
 set -eu
 
@@ -28,16 +32,16 @@ cleanup_promote() {
   trap - EXIT
   set +e
   if [ "$BRANCH_CREATED" = 1 ]; then
-    current_branch=$(git -C "$WT" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
-    branch_head=$(git -C "$PROJ" rev-parse --verify "$BRANCH_REF^{commit}" 2>/dev/null || true)
+    current_branch=$(git -C "$WT_REAL" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
+    branch_head=$(git -C "$PROJ_REAL" rev-parse --verify "$BRANCH_REF^{commit}" 2>/dev/null || true)
     if [ "$current_branch" = "$BRANCH" ] && [ "$branch_head" = "$PROMOTION_HEAD" ]; then
-      git -C "$WT" checkout --detach -q "$PROMOTION_HEAD" 2>/dev/null \
+      git -C "$WT_REAL" checkout --detach -q "$PROMOTION_HEAD" 2>/dev/null \
         || echo "error: could not restore detached scout worktree after failed promotion" >&2
     fi
-    current_branch=$(git -C "$WT" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
-    branch_head=$(git -C "$PROJ" rev-parse --verify "$BRANCH_REF^{commit}" 2>/dev/null || true)
+    current_branch=$(git -C "$WT_REAL" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
+    branch_head=$(git -C "$PROJ_REAL" rev-parse --verify "$BRANCH_REF^{commit}" 2>/dev/null || true)
     if [ "$current_branch" != "$BRANCH" ] && [ "$branch_head" = "$PROMOTION_HEAD" ]; then
-      git -C "$PROJ" update-ref -d "$BRANCH_REF" "$PROMOTION_HEAD" 2>/dev/null \
+      git -C "$PROJ_REAL" update-ref -d "$BRANCH_REF" "$PROMOTION_HEAD" 2>/dev/null \
         || echo "error: could not remove incomplete acquisition branch $BRANCH" >&2
     fi
   fi
@@ -79,7 +83,7 @@ meta_value_unique() {
 
 canonical_dir() {
   [ -d "$1" ] || return 1
-  (cd "$1" && pwd -P)
+  (cd -- "$1" && pwd -P)
 }
 
 canonical_git_common_dir() {
@@ -89,38 +93,81 @@ canonical_git_common_dir() {
   canonical_dir "$common"
 }
 
+# Count worktree inventory entries that resolve to <canonical-dir>. Git records a
+# physical path when it registers a worktree itself, but a hand-written or aliased
+# registration can list a symlinked path for the same directory, so every entry is
+# resolved before it is compared. Two entries resolving to one directory stay
+# ambiguous and still refuse promotion. An entry whose directory no longer exists
+# keeps its recorded string, which cannot equal an existing canonical target.
+count_worktree_inventory_matches() {  # <canonical-dir> ; inventory on stdin
+  local target=$1 line entry matches=0
+  while IFS= read -r line; do
+    case "$line" in
+      worktree\ *)
+        entry=${line#worktree }
+        entry=$(canonical_dir "$entry") || entry=${line#worktree }
+        if [ "$entry" = "$target" ]; then
+          matches=$((matches + 1))
+        fi
+        ;;
+    esac
+  done
+  printf '%s\n' "$matches"
+}
+
+# A project is registered by the path the captain chose, which is legitimately a
+# symlink to the Git root (bin/fm-spawn.sh persists that registry path verbatim).
+# Identity is therefore proven on the resolved physical paths rather than by
+# demanding that the recorded strings already be physical, and every later Git
+# operation uses those resolved paths so a symlink re-pointed mid-promotion cannot
+# redirect branch creation. The recorded strings themselves are never rewritten.
 WT=$(meta_value_unique worktree) || exit 1
 PROJ=$(meta_value_unique project) || exit 1
+# Both recorded paths must be absolute before anything resolves them: a relative
+# string would otherwise resolve against this script's own working directory, and a
+# leading dash would reach `cd` as an option instead of a path.
+case "$WT" in
+  /*) ;;
+  *) echo "error: recorded scout worktree path is not absolute: $WT" >&2; exit 1 ;;
+esac
+case "$PROJ" in
+  /*) ;;
+  *) echo "error: recorded scout project path is not absolute: $PROJ" >&2; exit 1 ;;
+esac
 WT_REAL=$(canonical_dir "$WT") \
   || { echo "error: recorded scout worktree is not an existing directory: $WT" >&2; exit 1; }
 PROJ_REAL=$(canonical_dir "$PROJ") \
   || { echo "error: recorded scout project is not an existing directory: $PROJ" >&2; exit 1; }
-[ "$WT" = "$WT_REAL" ] && [ "$PROJ" = "$PROJ_REAL" ] && [ "$WT" != "$PROJ" ] \
-  || { echo "error: recorded scout project/worktree identity is not canonical" >&2; exit 1; }
+[ "$WT_REAL" != "$PROJ_REAL" ] \
+  || { echo "error: recorded scout worktree resolves to its own project: $WT" >&2; exit 1; }
 
-WT_TOP=$(git -C "$WT" rev-parse --show-toplevel 2>/dev/null) \
+WT_TOP=$(git -C "$WT_REAL" rev-parse --show-toplevel 2>/dev/null) \
   || { echo "error: recorded scout worktree is not inspectable" >&2; exit 1; }
-PROJ_TOP=$(git -C "$PROJ" rev-parse --show-toplevel 2>/dev/null) \
+PROJ_TOP=$(git -C "$PROJ_REAL" rev-parse --show-toplevel 2>/dev/null) \
   || { echo "error: recorded scout project is not inspectable" >&2; exit 1; }
 WT_TOP=$(canonical_dir "$WT_TOP") \
   || { echo "error: recorded scout worktree root is unreadable" >&2; exit 1; }
 PROJ_TOP=$(canonical_dir "$PROJ_TOP") \
   || { echo "error: recorded scout project root is unreadable" >&2; exit 1; }
-[ "$WT_TOP" = "$WT" ] && [ "$PROJ_TOP" = "$PROJ" ] \
+[ "$WT_TOP" = "$WT_REAL" ] && [ "$PROJ_TOP" = "$PROJ_REAL" ] \
   || { echo "error: recorded scout project/worktree is not at its Git root" >&2; exit 1; }
 
-WT_COMMON=$(canonical_git_common_dir "$WT") \
+WT_COMMON=$(canonical_git_common_dir "$WT_REAL") \
   || { echo "error: cannot resolve recorded scout worktree ownership" >&2; exit 1; }
-PROJ_COMMON=$(canonical_git_common_dir "$PROJ") \
+PROJ_COMMON=$(canonical_git_common_dir "$PROJ_REAL") \
   || { echo "error: cannot resolve recorded scout project ownership" >&2; exit 1; }
 [ "$WT_COMMON" = "$PROJ_COMMON" ] \
   || { echo "error: recorded scout worktree does not belong to its project" >&2; exit 1; }
-WORKTREES=$(git -C "$PROJ" -c core.quotePath=false worktree list --porcelain 2>/dev/null) \
+WORKTREES=$(git -C "$PROJ_REAL" -c core.quotePath=false worktree list --porcelain 2>/dev/null) \
   || { echo "error: cannot inspect recorded project worktrees" >&2; exit 1; }
-[ "$(printf '%s\n' "$WORKTREES" | grep -Fxc "worktree $WT" || true)" = 1 ] \
+WT_REGISTERED=$(count_worktree_inventory_matches "$WT_REAL" <<EOF
+$WORKTREES
+EOF
+)
+[ "$WT_REGISTERED" = 1 ] \
   || { echo "error: recorded scout worktree is not uniquely registered to its project" >&2; exit 1; }
 
-if CURRENT_BRANCH=$(git -C "$WT" symbolic-ref --quiet --short HEAD 2>/dev/null); then
+if CURRENT_BRANCH=$(git -C "$WT_REAL" symbolic-ref --quiet --short HEAD 2>/dev/null); then
   echo "error: recorded scout worktree is attached to branch $CURRENT_BRANCH" >&2
   exit 1
 else
@@ -128,10 +175,10 @@ else
 fi
 [ "$STATUS" = 1 ] \
   || { echo "error: cannot prove recorded scout worktree is detached" >&2; exit 1; }
-PROMOTION_HEAD=$(git -C "$WT" rev-parse --verify "HEAD^{commit}" 2>/dev/null) \
+PROMOTION_HEAD=$(git -C "$WT_REAL" rev-parse --verify "HEAD^{commit}" 2>/dev/null) \
   || { echo "error: cannot resolve recorded scout worktree HEAD" >&2; exit 1; }
 
-if git -C "$PROJ" show-ref --verify --quiet "$BRANCH_REF"; then
+if git -C "$PROJ_REAL" show-ref --verify --quiet "$BRANCH_REF"; then
   echo "error: acquisition branch $BRANCH already exists; refusing promotion" >&2
   exit 1
 else
@@ -148,10 +195,10 @@ if [ ! -f "$META" ] || [ -L "$META" ] || ! cmp -s "$ORIGINAL" "$META"; then
   echo "error: task $ID metadata changed during promotion" >&2
   exit 1
 fi
-git -C "$WT" checkout -q -b "$BRANCH" "$PROMOTION_HEAD"
+git -C "$WT_REAL" checkout -q -b "$BRANCH" "$PROMOTION_HEAD"
 BRANCH_CREATED=1
-[ "$(git -C "$WT" symbolic-ref --quiet --short HEAD 2>/dev/null || true)" = "$BRANCH" ] \
-  && [ "$(git -C "$PROJ" rev-parse --verify "$BRANCH_REF^{commit}" 2>/dev/null || true)" = "$PROMOTION_HEAD" ] \
+[ "$(git -C "$WT_REAL" symbolic-ref --quiet --short HEAD 2>/dev/null || true)" = "$BRANCH" ] \
+  && [ "$(git -C "$PROJ_REAL" rev-parse --verify "$BRANCH_REF^{commit}" 2>/dev/null || true)" = "$PROMOTION_HEAD" ] \
   || { echo "error: acquisition branch $BRANCH was not created at the proven scout HEAD" >&2; exit 1; }
 if [ ! -f "$META" ] || [ -L "$META" ] || ! cmp -s "$ORIGINAL" "$META"; then
   echo "error: task $ID metadata changed during branch acquisition" >&2

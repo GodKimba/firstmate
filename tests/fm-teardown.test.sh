@@ -1663,6 +1663,136 @@ test_scout_promotion_refuses_unproven_branch_identity() {
   pass "scout promotion refuses attached copies and stale acquisition branches"
 }
 
+# A project clone is registered by the path the captain chose, which is legitimately
+# a symlink to the Git root, and fm-spawn.sh persists that registry path verbatim.
+# Promotion must prove identity on the resolved paths and leave the recorded strings
+# untouched, so no operator ever has to hand-edit a task record to promote a scout.
+test_scout_promotion_accepts_registered_symlink_project() {
+  local case_dir style project_arg worktree_arg rc
+  for style in physical project-symlink both-symlink; do
+    case_dir=$(make_case "scout-promotion-path-$style")
+    project_arg="$case_dir/project"
+    worktree_arg="$case_dir/wt"
+    case "$style" in
+      project-symlink)
+        ln -s "$case_dir/project" "$case_dir/registry-clone"
+        project_arg="$case_dir/registry-clone"
+        ;;
+      both-symlink)
+        ln -s "$case_dir/project" "$case_dir/registry-clone"
+        ln -s "$case_dir/wt" "$case_dir/registry-wt"
+        project_arg="$case_dir/registry-clone"
+        worktree_arg="$case_dir/registry-wt"
+        ;;
+    esac
+    [ "$style" = physical ] || [ "$(cd "$project_arg" && pwd -P)" != "$project_arg" ] \
+      || fail "scout-promotion-path-$style: fixture did not actually exercise a symlinked registry path"
+    fm_write_meta "$case_dir/state/task-x1.meta" \
+      "window=firstmate:fm-task-x1" \
+      "worktree=$worktree_arg" \
+      "project=$project_arg" \
+      "acquisition_branch=-" \
+      "kind=scout" \
+      "mode=no-mistakes"
+    git -C "$case_dir/wt" checkout -q --detach main
+    git -C "$case_dir/project" branch -D -- fm/task-x1 >/dev/null
+
+    FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$case_dir" \
+      FM_STATE_OVERRIDE="$case_dir/state" "$PROMOTE" task-x1 \
+      > "$case_dir/promote.stdout" 2> "$case_dir/promote.stderr" \
+      || fail "scout-promotion-path-$style: promotion failed"$'\n'"$(cat "$case_dir/promote.stderr")"
+
+    [ "$(grep -c "^project=$project_arg\$" "$case_dir/state/task-x1.meta")" = 1 ] \
+      || fail "scout-promotion-path-$style: recorded project path was rewritten instead of preserved"
+    [ "$(grep -c "^worktree=$worktree_arg\$" "$case_dir/state/task-x1.meta")" = 1 ] \
+      || fail "scout-promotion-path-$style: recorded worktree path was rewritten instead of preserved"
+    [ "$(grep -c '^kind=ship$' "$case_dir/state/task-x1.meta")" = 1 ] \
+      || fail "scout-promotion-path-$style: ship kind was not recorded exactly once"
+    [ "$(grep -c '^acquisition_branch=fm/task-x1$' "$case_dir/state/task-x1.meta")" = 1 ] \
+      || fail "scout-promotion-path-$style: exact acquisition branch was not recorded once"
+    [ "$(git -C "$case_dir/wt" symbolic-ref --quiet --short HEAD)" = fm/task-x1 ] \
+      || fail "scout-promotion-path-$style: worktree was not attached to its acquired branch"
+    git -C "$case_dir/project" show-ref --verify --quiet refs/heads/fm/task-x1 \
+      || fail "scout-promotion-path-$style: exact acquisition branch was not created"
+
+    # The promoted task must stay usable end to end on the same recorded paths, with
+    # no hand edit anywhere: cleanup accepts the promoted branch, whose base is the
+    # landed default branch, and retires the task record it was handed.
+    set +e
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+    rc=$?
+    set -e
+    expect_code 0 "$rc" "scout-promotion-path-$style: promoted landed work should clean up on the recorded paths"$'\n'"$(cat "$case_dir/stderr")"
+    [ ! -f "$case_dir/state/task-x1.meta" ] \
+      || fail "scout-promotion-path-$style: task record survived a successful cleanup"
+  done
+  pass "scout promotion accepts a symlinked registry path without hand-editing the task record"
+}
+
+# Resolving paths for validation must not weaken identity: a worktree owned by a
+# different repository, a symlink aimed below the Git root, and two inventory
+# entries that resolve to one directory all stay refusals.
+test_scout_promotion_refuses_aliased_identity() {
+  local case_dir style rc project_arg worktree_arg expected
+  for style in foreign-owner subdir-alias ambiguous-inventory; do
+    case_dir=$(make_case "scout-promotion-alias-$style")
+    project_arg="$case_dir/project"
+    worktree_arg="$case_dir/wt"
+    # Detach and drop the seeded branch before any alias registration exists, so
+    # the aliased inventory entry cannot claim the branch and block the fixture.
+    git -C "$case_dir/wt" checkout -q --detach main
+    git -C "$case_dir/project" branch -D -- fm/task-x1 >/dev/null
+    case "$style" in
+      foreign-owner)
+        fm_git_init_commit "$case_dir/other"
+        git -C "$case_dir/other" worktree add -q --detach "$case_dir/otherwt"
+        ln -s "$case_dir/otherwt" "$case_dir/registry-wt"
+        worktree_arg="$case_dir/registry-wt"
+        expected="does not belong to its project"
+        ;;
+      subdir-alias)
+        mkdir -p "$case_dir/project/sub"
+        ln -s "$case_dir/project/sub" "$case_dir/registry-clone"
+        project_arg="$case_dir/registry-clone"
+        expected="is not at its Git root"
+        ;;
+      ambiguous-inventory)
+        ln -s "$case_dir/wt" "$case_dir/registry-wt"
+        cp -R "$case_dir/project/.git/worktrees/wt" "$case_dir/project/.git/worktrees/wt-alias"
+        printf '%s\n' "$case_dir/registry-wt/.git" \
+          > "$case_dir/project/.git/worktrees/wt-alias/gitdir"
+        expected="not uniquely registered"
+        ;;
+    esac
+    fm_write_meta "$case_dir/state/task-x1.meta" \
+      "window=firstmate:fm-task-x1" \
+      "worktree=$worktree_arg" \
+      "project=$project_arg" \
+      "acquisition_branch=-" \
+      "kind=scout" \
+      "mode=no-mistakes"
+    cp "$case_dir/state/task-x1.meta" "$case_dir/state/task-x1.before"
+
+    set +e
+    FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$case_dir" \
+      FM_STATE_OVERRIDE="$case_dir/state" "$PROMOTE" task-x1 \
+      > "$case_dir/promote.stdout" 2> "$case_dir/promote.stderr"
+    rc=$?
+    set -e
+
+    expect_code 1 "$rc" "scout-promotion-alias-$style: aliased identity must refuse promotion"
+    assert_contains "$(cat "$case_dir/promote.stderr")" "$expected" \
+      "scout-promotion-alias-$style: refusal did not name the proven identity failure"
+    cmp -s "$case_dir/state/task-x1.before" "$case_dir/state/task-x1.meta" \
+      || fail "scout-promotion-alias-$style: metadata changed after refusal"
+    git -C "$case_dir/project" show-ref --verify --quiet refs/heads/fm/task-x1 \
+      && fail "scout-promotion-alias-$style: acquisition branch was created despite refusal"
+    [ -z "$(git -C "$case_dir/wt" symbolic-ref --quiet --short HEAD 2>/dev/null || true)" ] \
+      || fail "scout-promotion-alias-$style: detached worktree was changed after refusal"
+  done
+  pass "scout promotion refuses foreign, below-root, and ambiguous aliased identities"
+}
+
 test_scout_promotion_failure_preserves_metadata() {
   local case_dir rc
   case_dir=$(make_case scout-promotion-atomic-failure)
@@ -2321,6 +2451,8 @@ test_report_gated_scout_cleanup_remains_supported
 test_legacy_branchless_scout_metadata_remains_supported
 test_scout_promotion_records_exact_acquisition_branch
 test_scout_promotion_refuses_unproven_branch_identity
+test_scout_promotion_accepts_registered_symlink_project
+test_scout_promotion_refuses_aliased_identity
 test_scout_promotion_failure_preserves_metadata
 test_generic_return_retries_guarded_branch_cleanup
 test_gh_error_and_content_absent_refuses
