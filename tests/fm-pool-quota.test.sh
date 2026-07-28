@@ -419,12 +419,25 @@ test_panel_is_self_contained_local_and_private() {
 
   mkdir "$root/outside"
   rm "$panel"
-  ln -s "$root/outside/escaped.html" "$panel"
+  ln -s "$root/outside" "$panel"
   run_pool "$pool" "$fakebin" --json >/dev/null || fail "panel leaf-symlink replacement failed"
   [ ! -L "$panel" ] || fail "the canonical panel remained a symlink"
-  assert_absent "$root/outside/escaped.html" "the panel followed a leaf symlink outside its private directory"
+  [ -f "$panel" ] || fail "the canonical panel was not atomically installed"
+  [ -z "$(find "$root/outside" -mindepth 1 -maxdepth 1 -print -quit)" ] \
+    || fail "the panel followed a directory symlink outside its private directory"
+  [ -z "$(find "$root/home/.lavish" -name '.pool-quota.*' -print -quit)" ] \
+    || fail "a private panel artifact survived successful installation"
 
   rm "$panel"
+  mkdir "$panel"
+  code=0
+  out=$(run_pool "$pool" "$fakebin" --json 2>&1) || code=$?
+  expect_code 2 "$code" "a panel installation collision must fail closed"
+  assert_contains "$out" "cannot install the panel" "the panel installation failure is not explained"
+  [ -z "$(find "$root/home/.lavish" -name '.pool-quota.*' -print -quit)" ] \
+    || fail "a failed panel installation left its private artifact behind"
+  rmdir "$panel"
+
   rmdir "$root/home/.lavish"
   ln -s "$root/outside" "$root/home/.lavish"
   code=0

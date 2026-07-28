@@ -113,6 +113,7 @@ while [ $# -gt 0 ]; do
 done
 
 command -v jq >/dev/null 2>&1 || die "jq is required"
+command -v node >/dev/null 2>&1 || die "node is required"
 command -v "$QUOTA_BIN" >/dev/null 2>&1 || die "$QUOTA_BIN is required (it owns provider quota semantics)"
 
 NOW=${FM_POOL_QUOTA_NOW:-$(date -u +%s)}
@@ -127,7 +128,11 @@ GENERATED=$(date -u -r "$NOW" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
 umask 077
 PRIVATE_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/fm-pool-quota.XXXXXX") || die "cannot create a private workspace"
 chmod 700 "$PRIVATE_ROOT" 2>/dev/null || true
-cleanup_private() { [ -n "${PRIVATE_ROOT:-}" ] && rm -rf "$PRIVATE_ROOT"; }
+PANEL_TMP=
+cleanup_private() {
+  [ -z "${PANEL_TMP:-}" ] || rm -f "$PANEL_TMP"
+  [ -z "${PRIVATE_ROOT:-}" ] || rm -rf "$PRIVATE_ROOT"
+}
 trap 'cleanup_private' EXIT
 trap 'cleanup_private; exit 130' INT
 trap 'cleanup_private; exit 143' TERM
@@ -437,7 +442,9 @@ render_panel() {
     die "panel directory is not a private local directory"
   fi
   chmod 700 "$PANEL_DIR" 2>/dev/null || die "cannot make the panel directory private"
-  tmp="$PRIVATE_ROOT/panel.html"
+  PANEL_TMP=$(mktemp "$PANEL_DIR/.pool-quota.XXXXXX") || die "cannot create a private panel artifact"
+  tmp=$PANEL_TMP
+  chmod 600 "$tmp" 2>/dev/null || die "cannot make the panel artifact private"
   {
     cat <<'HTML_HEAD'
 <!doctype html>
@@ -556,9 +563,10 @@ HTML_HEAD
 </html>
 HTML_TAIL
   } > "$tmp" || die "cannot write the panel"
-  rm -f "$out" 2>/dev/null || true
-  cat "$tmp" > "$out" || die "cannot install the panel at $out"
-  chmod 600 "$out" 2>/dev/null || true
+  node -e 'require("node:fs").renameSync(process.argv[1], process.argv[2])' \
+    "$tmp" "$out" 2>/dev/null || die "cannot install the panel at $out"
+  PANEL_TMP=
+  [ -f "$out" ] && [ ! -L "$out" ] || die "the installed panel is not a regular file"
 }
 
 if [ "$WRITE_PANEL" -eq 1 ]; then
