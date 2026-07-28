@@ -326,10 +326,10 @@ ROWS
   pass "settle intervals use one second by default and preserve positive overrides"
 }
 
-test_zero_equivalent_poll_count_uses_production_default() {
-  local rec id out status reads sleep_log
-  id=settle-zero-equivalent-polls-z6
-  rec=$(make_nested_case settle-zero-equivalent-polls "$id")
+test_poll_count_validation() {
+  local rec seed_id id out status reads sleep_log n=0 label value expected
+  seed_id=settle-poll-validation-seed-z6
+  rec=$(make_nested_case settle-poll-validation "$seed_id")
   read_nested_record "$rec"
   printf '%s\n' "$WT_DIR/nutri-anamnese" > "$SEQFILE"
   sleep_log="$TMP_ROOT/settle-poll-sleeps"
@@ -340,15 +340,37 @@ printf '%s\n' "${1:-}" >> "${FM_FAKE_SLEEP_LOG:?FM_FAKE_SLEEP_LOG unset}"
 SH
   chmod +x "$FAKEBIN_DIR/sleep"
 
-  out=$(run_nested_spawn "$id" FM_WORKTREE_SETTLE_POLLS=00 \
-    FM_WORKTREE_SETTLE_INTERVAL=0.01 FM_FAKE_SLEEP_LOG="$sleep_log")
-  status=$?
-  expect_code 1 "$status" "an all-zero poll count should exhaust the production bound"
-  assert_contains "$out" "within 60 polls 0.01s apart" \
-    "an all-zero poll count did not use the production default"
-  reads=$(cat "$COUNTFILE")
-  [ "$reads" = 60 ] || fail "an all-zero poll count made $reads reads, expected 60"
-  pass "an all-zero settle poll count uses the production default"
+  while IFS='|' read -r label value expected; do
+    n=$((n + 1))
+    id="settle-polls-$n-z6"
+    mkdir -p "$HOME_DIR/data/$id"
+    printf 'brief for %s\n' "$id" > "$HOME_DIR/data/$id/brief.md"
+    rm -f "$COUNTFILE"
+    : > "$sleep_log"
+    if [ "$label" = unset ]; then
+      out=$(unset FM_WORKTREE_SETTLE_POLLS; run_nested_spawn "$id" \
+        FM_WORKTREE_SETTLE_INTERVAL=0.01 FM_FAKE_SLEEP_LOG="$sleep_log")
+    else
+      out=$(run_nested_spawn "$id" "FM_WORKTREE_SETTLE_POLLS=$value" \
+        FM_WORKTREE_SETTLE_INTERVAL=0.01 FM_FAKE_SLEEP_LOG="$sleep_log")
+    fi
+    status=$?
+    expect_code 1 "$status" "$label poll-count case should exhaust the settle bound"
+    assert_contains "$out" "within $expected polls 0.01s apart" \
+      "$label poll-count case reported the wrong effective bound"
+    reads=$(cat "$COUNTFILE")
+    [ "$reads" = "$expected" ] || \
+      fail "$label poll-count case made $reads reads, expected $expected"
+  done <<'ROWS'
+unset||60
+blank||60
+zero|0|60
+zero-equivalent|00|60
+invalid|nope|60
+positive|3|3
+ROWS
+
+  pass "settle poll counts use 60 by default and preserve positive overrides"
 }
 
 test_single_stale_first_read_is_not_accepted
@@ -356,6 +378,6 @@ test_already_settled_pane_costs_one_confirm_sleep
 test_stable_nested_path_waits_for_the_exact_root
 test_permanently_nested_path_times_out_without_launching
 test_settle_interval_validation
-test_zero_equivalent_poll_count_uses_production_default
+test_poll_count_validation
 
 echo "# all fm-spawn-worktree-settle tests passed"

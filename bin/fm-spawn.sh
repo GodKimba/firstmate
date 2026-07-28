@@ -1277,7 +1277,7 @@ if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   # checkout entirely) before the shell catches up with treehouse get's cd. That
   # stale path still resolves to a real, distinct worktree top-level, so accepting
   # it on one read alone silently records the wrong worktree= in state/<id>.meta.
-  # Require two consecutive reads to agree on the same path before accepting it;
+  # Require two consecutive reads to resolve to the same physical root before accepting it;
   # a mismatch just becomes the new candidate rather than resetting the wait, so a
   # pane that is already settled by the first real read only costs the one existing
   # inter-poll sleep as confirmation, not a whole extra cycle on top.
