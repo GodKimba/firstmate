@@ -550,9 +550,186 @@ test_resolve_matches_quoted_blocked_by_edges() {
   pass "resolve matches first/middle/last in quoted blocked_by and rejects a genuinely absent id"
 }
 
+# Backlog retention archives a resolved decision out of the active backlog. The
+# completion check must still verify that one durable identity, in either store,
+# without rehydrating the archived task and without copying it into both stores.
+# Every ambiguous or corrupt archive shape must refuse instead of choosing.
+resolved_decision_home() {  # <name> - home with one resolved decision, pre-retention
+  local home=$1 id=sample-archive-review
+  home=$(make_home "$home")
+  mkdir -p "$home/data/$id"
+  tasks_in "$home" add "$id" "Investigate archive retention" --kind scout --repo sample --start >/dev/null \
+    || fail "could not create retention origin"
+  write_origin_meta "$home" "$id"
+  printf 'done: report complete\n' > "$home/state/$id.status"
+  printf '# Archive retention review\n\nOne captain choice was answered.\n' > "$home/data/$id/report.md"
+  run_decisions "$home" hold "$id" route \
+    --title "Choose the retention route" --reason "captain route choice pending" --repo sample >/dev/null \
+    || fail "could not register the retention hold"
+  tasks_in "$home" add sample-retention-impl "Apply the retention route" --kind ship --repo sample >/dev/null \
+    || fail "could not create dependent work"
+  tasks_in "$home" block sample-retention-impl --by "$id-decision-route" >/dev/null \
+    || fail "could not route dependent work behind the hold"
+  printf 'Use the north retention route.\n' > "$home/retention-decision.txt"
+  run_decisions "$home" resolve "$id" route --decision-file "$home/retention-decision.txt" \
+    --routed-to sample-retention-impl >/dev/null \
+    || fail "could not resolve the retention decision"
+  run_decisions "$home" complete "$id" route >/dev/null \
+    || fail "could not complete the retention inventory"
+  printf '%s\n' "$home"
+}
+
+test_resolved_decision_survives_backlog_retention() {
+  local home id=sample-archive-review hold=sample-archive-review-decision-route archive backlog
+  home=$(resolved_decision_home retention-durability)
+  archive="$home/data/done-archive.md"
+  backlog="$home/data/backlog.md"
+
+  # Active-only: the decision verifies while its record is still in the backlog.
+  run_decisions "$home" verify "$id" >/dev/null \
+    || fail "resolved decision did not verify before retention"
+
+  # Normal retention runs over the whole Done section while the originating
+  # investigation is still live, which is exactly how the incident arose.
+  tasks_in "$home" prune --keep 0 --state "done" >/dev/null \
+    || fail "could not apply normal backlog retention"
+  ! grep -E "^- \[x\] $hold -" "$backlog" >/dev/null \
+    || fail "retention fixture left the decision in the active backlog"
+  grep -E "^- \[x\] $hold -" "$archive" >/dev/null \
+    || fail "retention fixture did not archive the decision"
+
+  # Archive-only: the same identity still verifies, with no rehydration.
+  run_decisions "$home" verify "$id" >/dev/null \
+    || fail "resolved decision stopped verifying after normal retention"
+  ! grep -E "^- \[[ x]\] $hold -" "$backlog" >/dev/null \
+    || fail "verification rehydrated the archived decision into the active backlog"
+  [ "$(grep -cE "^- \[x\] $hold -" "$archive")" = 1 ] \
+    || fail "verification duplicated the archived decision record"
+
+  # The identity is still one decision: a new hold under it is still refused.
+  if run_decisions "$home" hold "$id" route \
+    --title "Choose the retention route" --reason "captain route choice pending" --repo sample \
+    > "$home/rehold.out" 2> "$home/rehold.err"; then
+    fail "an archived resolved decision was reopened as a second live identity"
+  fi
+  assert_grep "already durably resolved" "$home/rehold.err" \
+    "reopening an archived decision must name the durable resolution"
+  ! grep -E "^- \[[ x]\] $hold -" "$backlog" >/dev/null \
+    || fail "the refused hold still created an active backlog copy"
+
+  # An identical resolution retry stays idempotent across retention, while a
+  # changed captain decision under the same identity is still rejected.
+  run_decisions "$home" resolve "$id" route --decision-file "$home/retention-decision.txt" \
+    --routed-to sample-retention-impl >/dev/null \
+    || fail "identical resolution retry failed after retention"
+  printf 'Use the south retention route.\n' > "$home/changed-retention-decision.txt"
+  if run_decisions "$home" resolve "$id" route --decision-file "$home/changed-retention-decision.txt" \
+    --routed-to sample-retention-impl > "$home/drift.out" 2> "$home/drift.err"; then
+    fail "post-retention retry accepted a different captain decision"
+  fi
+
+  # Cleanup is unblocked because the gate passed, not because it was weakened.
+  run_teardown "$home" "$id" >/dev/null 2> "$home/post-retention-teardown.err" \
+    || fail "post-retention cleanup failed: $(cat "$home/post-retention-teardown.err")"
+  pass "a resolved decision verifies before and after normal retention under one identity"
+}
+
+test_retention_transition_and_conflicting_records_are_distinguished() {
+  local home id=sample-archive-review hold=sample-archive-review-decision-route archive backlog record
+  home=$(resolved_decision_home retention-transition)
+  archive="$home/data/done-archive.md"
+  backlog="$home/data/backlog.md"
+  tasks_in "$home" prune --keep 0 --state "done" >/dev/null \
+    || fail "could not apply retention for the transition fixture"
+  record=$(sed -n "/^- \[x\] $hold -/,\$p" "$archive")
+
+  # A prune writes the archive before rewriting the backlog. Identical copies in
+  # both stores are that bounded window, and must verify rather than refuse.
+  printf '%s\n' "$record" >> "$backlog"
+  run_decisions "$home" verify "$id" >/dev/null \
+    || fail "the identical retention transition state was rejected"
+
+  # Divergent copies are a genuine conflict this script must not resolve.
+  sed -i.bak "s/^- \[x\] $hold - Choose the retention route/- [x] $hold - Choose a different route/" "$backlog"
+  rm -f "$backlog.bak"
+  if run_decisions "$home" verify "$id" > "$home/conflict.out" 2> "$home/conflict.err"; then
+    fail "conflicting active and archived records for one identity were accepted"
+  fi
+  assert_grep "differs between the active backlog and the archive" "$home/conflict.err" \
+    "a divergent duplicate must name both stores"
+  pass "an identical retention transition verifies while a divergent duplicate refuses"
+}
+
+test_unusable_archived_records_refuse_and_preserve_cleanup_refusal() {
+  local home id=sample-archive-review archive pristine case_name
+  home=$(resolved_decision_home archive-integrity)
+  archive="$home/data/done-archive.md"
+  tasks_in "$home" prune --keep 0 --state "done" >/dev/null \
+    || fail "could not apply retention for the integrity fixture"
+  pristine="$home/pristine-archive.md"
+  cp "$archive" "$pristine"
+
+  # A second archived row for the same identity: two candidate decisions.
+  case_name=duplicate
+  sed -n '/^- \[x\]/p' "$pristine" | sed 's/Choose the retention route/Choose a rival route/' >> "$archive"
+  if run_decisions "$home" verify "$id" > "$home/$case_name.out" 2> "$home/$case_name.err"; then
+    fail "two archived records for one identity were accepted"
+  fi
+  assert_grep "conflicting records" "$home/$case_name.err" "a duplicate archive must name the conflict"
+
+  # An archived row that is not a completed record.
+  case_name=not-done
+  sed 's/^- \[x\]/- [ ]/' "$pristine" > "$archive"
+  if run_decisions "$home" verify "$id" > "$home/$case_name.out" 2> "$home/$case_name.err"; then
+    fail "an archived row that is not a completed record was accepted"
+  fi
+  assert_grep "not a completed record" "$home/$case_name.err" "a non-done archived row must say so"
+
+  # A malformed row under this identity reads as corrupt, never as absent.
+  case_name=malformed
+  sed 's/^- \[x\]/- [X]/' "$pristine" > "$archive"
+  if run_decisions "$home" verify "$id" > "$home/$case_name.out" 2> "$home/$case_name.err"; then
+    fail "a malformed archived record was accepted"
+  fi
+  assert_grep "not in canonical form" "$home/$case_name.err" "a malformed archived row must say so"
+
+  # A symlinked archive is never followed.
+  case_name=symlink
+  cp "$pristine" "$home/data/real-archive.md"
+  rm -f "$archive"
+  ln -s "$home/data/real-archive.md" "$archive"
+  if run_decisions "$home" verify "$id" > "$home/$case_name.out" 2> "$home/$case_name.err"; then
+    fail "a symlinked archive was followed"
+  fi
+  assert_grep "symlink" "$home/$case_name.err" "a symlinked archive must be named"
+  # Cleanup stays refused while the durable store is unusable.
+  if run_teardown "$home" "$id" > "$home/$case_name-teardown.out" 2> "$home/$case_name-teardown.err"; then
+    fail "cleanup proceeded while the durable decision store was unusable"
+  fi
+  rm -f "$archive"
+  mv "$home/data/real-archive.md" "$archive"
+
+  # Absent from both stores: still the ordinary absence refusal, not a pass.
+  case_name=absent
+  printf '\n' > "$archive"
+  if run_decisions "$home" verify "$id" > "$home/$case_name.out" 2> "$home/$case_name.err"; then
+    fail "a decision absent from both durable stores was accepted"
+  fi
+  assert_grep "is absent from the durable records" "$home/$case_name.err" \
+    "an absent decision must name the durable records"
+
+  cp "$pristine" "$archive"
+  run_decisions "$home" verify "$id" >/dev/null \
+    || fail "a restored archive did not verify again"
+  pass "duplicate, non-done, malformed, symlinked, and absent archived records refuse safely"
+}
+
 test_uninventoried_report_decision_refuses_completion
 
 test_scout_teardown_always_requires_inventory_verification
+test_resolved_decision_survives_backlog_retention
+test_retention_transition_and_conflicting_records_are_distinguished
+test_unusable_archived_records_refuse_and_preserve_cleanup_refusal
 test_structured_holds_survive_teardown_and_route_resolution
 test_origin_slug_validation_precedes_path_construction
 test_visual_review_uses_shared_completion_owner

@@ -16,6 +16,19 @@
 # All backlog mutations run in the active FM_HOME, which keeps main-home and
 # secondmate-home ownership aligned with the work that discovered the decision.
 #
+# One identity, two durable stores. Backlog retention moves a completed record
+# out of the active backlog into the tasks-axi archive, so every lookup here
+# reads the active backlog and that archive under the same identity: a resolved
+# decision stays verifiable after retention without rehydrating the archived
+# task and without copying one decision into both stores. The archive is only
+# ever read; its rows are projected into a private temporary Done section so
+# tasks-axi stays the single record parser. A record present in both stores is
+# accepted only while the two copies are identical, which is the bounded window
+# a prune can expose. Any other duplicate, a second archived row for the same
+# identity, an archived row that is not a completed record, an unparsable
+# archived row, or a symlinked or non-regular archive refuses instead of
+# choosing silently. Mutating subcommands still require the active backlog.
+#
 # Usage:
 #   fm-decision-hold.sh id <origin-id> <decision-key>
 #   fm-decision-hold.sh hold <origin-id> <decision-key> \
@@ -106,8 +119,157 @@ require_tasks_axi() {
     || fail "tasks-axi does not expose the captain-hold contract"
 }
 
-task_show() {  # <id>
+active_show() {  # <id> - the active backlog alone; every mutation requires this
   tasks_axi show "$1" --full 2>/dev/null
+}
+
+# .tasks.toml owns the backlog schema; this reads only the two keys needed to
+# locate the archive tasks-axi prunes into, using the same FM_HOME-relative
+# resolution tasks_axi() gets by running in FM_HOME.
+toml_value() {  # <section> <key>
+  local file="$FM_HOME/.tasks.toml"
+  [ -f "$file" ] || return 0
+  awk -v want="$1" -v key="$2" '
+    /^[[:space:]]*\[/ {
+      section = $0
+      sub(/^[[:space:]]*\[[[:space:]]*/, "", section)
+      sub(/[[:space:]]*\].*$/, "", section)
+      next
+    }
+    section != want { next }
+    {
+      line = $0
+      sub(/^[[:space:]]*/, "", line)
+      if (line !~ "^" key "[[:space:]]*=") next
+      sub("^" key "[[:space:]]*=[[:space:]]*", "", line)
+      if (substr(line, 1, 1) == "\"") {
+        line = substr(line, 2)
+        quote = index(line, "\"")
+        if (quote == 0) next
+        line = substr(line, 1, quote - 1)
+      } else {
+        sub(/[[:space:]].*$/, "", line)
+      }
+      print line
+      exit
+    }
+  ' "$file"
+}
+
+archive_file() {  # prints the archive path, or nothing when this home has none
+  local backend archive backlog dir
+  backend=$(toml_value '' backend)
+  [ -z "$backend" ] || [ "$backend" = markdown ] || return 0
+  archive=$(toml_value markdown archive)
+  if [ -z "$archive" ]; then
+    backlog=$(toml_value markdown path)
+    [ -n "$backlog" ] || backlog=backlog.md
+    dir=$(dirname "$backlog")
+    if [ "$dir" = . ]; then archive=done-archive.md; else archive="$dir/done-archive.md"; fi
+  fi
+  case "$archive" in
+    /*) printf '%s\n' "$archive" ;;
+    *) printf '%s\n' "$FM_HOME/$archive" ;;
+  esac
+}
+
+# Prints the archived record's own lines for <id>, or a `refuse: <reason>` line
+# when the archive holds an ambiguous or unusable record under that identity.
+# Only a column-zero checkbox row is a record, so indented body prose never
+# counts; a mangled row under this identity refuses instead of reading as absent.
+archive_rows() {  # <archive-file> <id>
+  awk -v id="$2" '
+    function is_record(line) { return line ~ /^-[[:space:]]*\[[^]]*\][[:space:]]/ }
+    function record_id(line,   rest) {
+      rest = line
+      sub(/^-[[:space:]]*\[[^]]*\][[:space:]]*/, "", rest)
+      sub(/[[:space:]].*$/, "", rest)
+      return rest
+    }
+    {
+      if (is_record($0) && record_id($0) == id) {
+        if (index($0, "- [x] " id " -") == 1) {
+          starts++
+          capture = 1
+          block = block $0 "\n"
+          next
+        }
+        if (index($0, "- [ ] " id " -") == 1) {
+          printf "refuse: archived record %s is not a completed record\n", id
+          exit 0
+        }
+        printf "refuse: archived record %s is not in canonical form\n", id
+        exit 0
+      }
+      if (capture && (is_record($0) || $0 ~ /^##/)) { capture = 0 }
+      if (capture) { block = block $0 "\n" }
+    }
+    END {
+      if (starts > 1) {
+        printf "refuse: archive holds %d conflicting records for %s\n", starts, id
+        exit 0
+      }
+      if (starts == 1) { printf "%s", block }
+    }
+  ' "$1"
+}
+
+# 0 = found (stdout is the record), 1 = absent, 3 = refused (stdout is why).
+archive_lookup() {  # <id>
+  local id=$1 archive rows tmp show rc=0
+  archive=$(archive_file)
+  [ -n "$archive" ] || return 1
+  if [ -L "$archive" ]; then
+    printf 'archived decision store is a symlink: %s\n' "$archive"
+    return 3
+  fi
+  [ -e "$archive" ] || return 1
+  if [ ! -f "$archive" ]; then
+    printf 'archived decision store is not a regular file: %s\n' "$archive"
+    return 3
+  fi
+  rows=$(archive_rows "$archive" "$id") || {
+    printf 'archived decision store could not be read: %s\n' "$archive"
+    return 3
+  }
+  case "$rows" in
+    'refuse: '*) printf '%s\n' "${rows#refuse: }"; return 3 ;;
+    '') return 1 ;;
+  esac
+  tmp=$(umask 077; mktemp "${TMPDIR:-/tmp}/fm-decision-archive.XXXXXX") || {
+    printf 'could not stage the archived record for %s\n' "$id"
+    return 3
+  }
+  { printf '## In flight\n\n## Queued\n\n## Done\n'; printf '%s' "$rows"; } > "$tmp"
+  show=$(tasks_axi show "$id" --file "$tmp" --full 2>/dev/null) || rc=$?
+  rm -f "$tmp"
+  if [ "$rc" -ne 0 ]; then
+    printf 'archived record %s could not be parsed by tasks-axi\n' "$id"
+    return 3
+  fi
+  printf '%s\n' "$show"
+}
+
+# The one identity lookup for this script: a decision is durable whether it is
+# still in the active backlog or has already been archived by retention.
+# 0 = found (stdout is the record), 1 = absent, 3 = refused (stdout is why).
+lookup_task() {  # <id>
+  local id=$1 active archived active_rc=0 archived_rc=0
+  active=$(tasks_axi show "$id" --full 2>/dev/null) || active_rc=$?
+  archived=$(archive_lookup "$id") || archived_rc=$?
+  [ "$archived_rc" -ne 3 ] || { printf '%s\n' "$archived"; return 3; }
+  if [ "$active_rc" -eq 0 ] && [ "$archived_rc" -eq 0 ]; then
+    # A prune writes the archive before rewriting the backlog, so identical
+    # copies are the one legitimate transition state. Anything else is a
+    # conflict this script must not resolve on its own.
+    [ "$active" = "$archived" ] \
+      || { printf 'durable record %s differs between the active backlog and the archive\n' "$id"; return 3; }
+    printf '%s\n' "$active"
+    return 0
+  fi
+  [ "$active_rc" -ne 0 ] || { printf '%s\n' "$active"; return 0; }
+  [ "$archived_rc" -ne 0 ] || { printf '%s\n' "$archived"; return 0; }
+  return 1
 }
 
 show_field() {  # <show-output> <field>
@@ -116,9 +278,12 @@ show_field() {  # <show-output> <field>
 }
 
 origin_exists_here() {  # <origin-id>
+  local out rc=0
   [ -f "$STATE/$1.meta" ] && return 0
   [ -f "$DATA/$1/report.md" ] && return 0
-  task_show "$1" >/dev/null 2>&1
+  out=$(lookup_task "$1") || rc=$?
+  [ "$rc" -ne 3 ] || fail "$out"
+  [ "$rc" -eq 0 ]
 }
 
 list_has_key() {  # <comma-list> <key>
@@ -157,9 +322,11 @@ origin_open_decisions() {  # <origin-id>
   printf '%s' "$open"
 }
 
+# Activating or closing a hold writes to the active backlog, so this deliberately
+# never accepts an archived record: retention durability is a read guarantee.
 verify_hold_active() {  # <hold-id>
   local id=$1 show state held kind hold_kind
-  show=$(task_show "$id") || fail "captain hold $id is absent from $FM_HOME/data/backlog.md"
+  show=$(active_show "$id") || fail "captain hold $id is absent from $FM_HOME/data/backlog.md"
   state=$(show_field "$show" state)
   held=$(show_field "$show" held)
   kind=$(show_field "$show" kind)
@@ -171,8 +338,10 @@ verify_hold_active() {  # <hold-id>
 }
 
 verify_hold_resolved() {  # <hold-id>
-  local id=$1 show state kind body
-  show=$(task_show "$id") || return 1
+  local id=$1 show state kind body rc=0
+  show=$(lookup_task "$id") || rc=$?
+  [ "$rc" -ne 3 ] || fail "$show"
+  [ "$rc" -eq 0 ] || return 1
   state=$(show_field "$show" state)
   kind=$(show_field "$show" kind)
   body=$(show_field "$show" body)
@@ -184,9 +353,14 @@ verify_hold_resolved() {  # <hold-id>
   return 1
 }
 
+# The completion check: durable means actively held in the backlog, or durably
+# resolved in either store, so normal retention cannot make a decision unverifiable.
 verify_hold_durable() {  # <hold-id>
-  local id=$1 show state held kind hold_kind body
-  show=$(task_show "$id") || fail "captain decision $id is absent from $FM_HOME/data/backlog.md"
+  local id=$1 show state held kind hold_kind body rc=0
+  show=$(lookup_task "$id") || rc=$?
+  [ "$rc" -ne 3 ] || fail "$show"
+  [ "$rc" -eq 0 ] \
+    || fail "captain decision $id is absent from the durable records of $FM_HOME"
   state=$(show_field "$show" state)
   held=$(show_field "$show" held)
   kind=$(show_field "$show" kind)
@@ -229,7 +403,7 @@ command_id() {
 }
 
 command_hold() {
-  local origin=${1:-} key=${2:-} title='' reason='' repo='' id show state kind existing_title body
+  local origin=${1:-} key=${2:-} title='' reason='' repo='' id show state kind existing_title body lookup_rc=0
   [ "$#" -ge 2 ] || { usage >&2; exit 2; }
   shift 2
   while [ "$#" -gt 0 ]; do
@@ -249,7 +423,11 @@ command_hold() {
   require_tasks_axi
   origin_exists_here "$origin" || fail "origin $origin is not owned by the active home $FM_HOME"
   id=$(hold_id "$origin" "$key")
-  if show=$(task_show "$id"); then
+  # Look in both stores so a resolved decision already moved into the archive
+  # cannot be re-created as a second live item under the same identity.
+  show=$(lookup_task "$id") || lookup_rc=$?
+  [ "$lookup_rc" -ne 3 ] || fail "$show"
+  if [ "$lookup_rc" -eq 0 ]; then
     state=$(show_field "$show" state)
     kind=$(show_field "$show" kind)
     existing_title=$(show_field "$show" title)
@@ -394,14 +572,16 @@ command_resolve() {
   require_tasks_axi
   id=$(hold_id "$origin" "$key")
   if verify_hold_resolved "$id"; then
-    hold_show=$(task_show "$id")
+    # Read from the same durable pair the resolved check used, so an identical
+    # retry stays idempotent after retention archived the closed hold.
+    hold_show=$(lookup_task "$id")
     hold_body=$(show_field "$hold_show" body)
     verify_resolution_identity "$id" "$hold_body" "$decision_digest" "$routed_csv"
     printf 'resolved: %s\n' "$id"
     return 0
   fi
   verify_hold_active "$id"
-  hold_show=$(task_show "$id")
+  hold_show=$(active_show "$id")
   hold_body=$(show_field "$hold_show" body)
   case "$hold_body" in
     *"Resolution recorded by fm-decision-hold."*)
@@ -411,7 +591,7 @@ command_resolve() {
   esac
 
   for dep in $routed; do
-    show=$(task_show "$dep") || fail "routed task $dep does not exist in the active home"
+    show=$(active_show "$dep") || fail "routed task $dep does not exist in the active home"
     state=$(show_field "$show" state)
     [ "$state" != "done" ] || [ "$resolution_recorded" = 1 ] \
       || fail "routed task $dep is already done"
@@ -437,7 +617,7 @@ command_resolve() {
   tasks_axi update "$id" --body "$body" >/dev/null \
     || fail "could not record the captain decision on $id"
   for dep in $routed; do
-    show=$(task_show "$dep") || fail "routed task $dep disappeared before routing"
+    show=$(active_show "$dep") || fail "routed task $dep disappeared before routing"
     blocked=$(show_field "$show" blocked_by | tr -d '[:space:]')
     blocked=${blocked#\"}
     blocked=${blocked%\"}
