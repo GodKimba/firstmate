@@ -191,7 +191,7 @@ meta_value() {  # <meta-file> <key>
 
 last_nonempty_line() {  # <file>
   [ -f "$1" ] || return 1
-  grep -v '^[[:space:]]*$' "$1" 2>/dev/null | tail -1
+  last_status_line "$1"
 }
 
 crew_state_json() {  # <id>

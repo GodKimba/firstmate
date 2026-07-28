@@ -13,8 +13,10 @@
 # daemon keeps its escalation-digest seen-markers; the watcher keeps its .seen-*
 # signatures).
 #
-# The one exception is the absorb classification (crew_absorb_class and its
-# working/paused wrappers). It is NOT a pure status-file read: it reuses
+# The explicit fm_decision_cutover_ensure_* writers establish the one-time
+# status-history boundary used by bootstrap and brief scaffolding.
+# The absorb classification (crew_absorb_class and its working/paused wrappers)
+# is also NOT a pure status-file read: it reuses
 # bin/fm-crew-state.sh, which may make a bounded no-mistakes call, to decide
 # whether a crew that just stopped its turn or went stale is working, deliberately
 # paused, or neither. Callers run it ONLY on no-verb signal handling and first
@@ -72,6 +74,7 @@ FM_PAUSE_RESURFACE_SECS_DEFAULT=3600
 # fm-decision-hold.sh has verified the corresponding captain-held backlog item.
 FM_CLASSIFY_RESOLVE_VERB_DEFAULT='resolved'
 FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT='captain-held'
+FM_CLASSIFY_DECISION_CUTOVER_MARK_DEFAULT='[fm-decision-answer-cutover:v1]'
 
 # The verb firstmate uses when it issues a correlated answer to an open decision.
 # It names the decision-answer message shape owned by bin/fm-send.sh --decision;
@@ -80,9 +83,13 @@ FM_CLASSIFY_DECISION_VERB_DEFAULT='decision'
 
 # Return the last non-blank line of a status file (empty if missing/blank).
 last_status_line() {
-  local f=$1
+  local f=$1 marker
   [ -e "$f" ] || return 0
-  grep -v '^[[:space:]]*$' "$f" 2>/dev/null | tail -1
+  marker=$FM_CLASSIFY_DECISION_CUTOVER_MARK_DEFAULT
+  LC_ALL=C awk -v marker="$marker" '
+    $0 != marker && /[^[:space:]]/ { line = $0 }
+    END { if (line != "") print line }
+  ' "$f" 2>/dev/null
 }
 
 # 0 if the given (last) status line's leading verb is a real terminal captain verb
@@ -177,9 +184,14 @@ status_is_paused_or_captain_held() {  # <status-line>
 # stream in "<task>.decision-answers". A resolution closes the request only when
 # its token was minted for that key AND for that request instance, so a generic
 # command, an unkeyed message, and any input composed before the request opened
-# can never become its approval. An uncorrelated resolution leaves the request
-# open, which surfaces it rather than silently advancing past it. Closure of a
-# blocked line is unchanged: a blocker clears by being fixed, not by authority.
+# can never become its approval. The one-time
+# "[fm-decision-answer-cutover:v1]" stream marker makes this strict rule
+# forward-compatible: decision openings before the marker retain legacy plain
+# keyed closure even when their resolution arrives later, while every opening
+# after it requires a correlated token. An uncorrelated post-cutover resolution
+# leaves the request open, which surfaces it rather than silently advancing past
+# it. Closure of a blocked line is unchanged: a blocker clears by being fixed,
+# not by authority.
 # The verified captain-held transfer written by bin/fm-decision-hold.sh is also
 # unchanged, and remains the durable path for a request whose answer never
 # arrived through the correlated channel.
@@ -324,8 +336,52 @@ fm_decision_answer_message() {  # <key> <token> <text>
     "${FM_CLASSIFY_DECISION_VERB:-$FM_CLASSIFY_DECISION_VERB_DEFAULT}" "$1" "$2" "$3"
 }
 
+fm_decision_cutover_ensure_status() {  # <status-file>
+  local f=$1 parent marker
+  parent=${f%/*}
+  [ "$parent" != "$f" ] || return 1
+  [ -d "$parent" ] && [ ! -L "$parent" ] || return 1
+  marker=$FM_CLASSIFY_DECISION_CUTOVER_MARK_DEFAULT
+  if [ ! -e "$f" ] && [ ! -L "$f" ]; then
+    ( set -C; printf '%s\n' "$marker" > "$f" ) 2>/dev/null || true
+  fi
+  [ -f "$f" ] && [ ! -L "$f" ] || return 1
+  grep -Fqx "$marker" "$f" 2>/dev/null && return 0
+  printf '%s\n' "$marker" >> "$f" || return 1
+  grep -Fqx "$marker" "$f" 2>/dev/null
+}
+
+fm_decision_cutover_ensure_state() {  # <state-dir>
+  local state=$1 complete f tmp marker
+  if [ ! -e "$state" ] && [ ! -L "$state" ]; then
+    mkdir -p "$state" || return 1
+  fi
+  [ -d "$state" ] && [ ! -L "$state" ] || return 1
+  complete="$state/.decision-answer-cutover-v1"
+  marker=$FM_CLASSIFY_DECISION_CUTOVER_MARK_DEFAULT
+  if [ -f "$complete" ] && [ ! -L "$complete" ] \
+    && [ "$(cat "$complete" 2>/dev/null)" = "$marker" ]; then
+    return 0
+  fi
+  [ ! -e "$complete" ] && [ ! -L "$complete" ] || return 1
+  for f in "$state"/*.status; do
+    [ -e "$f" ] || continue
+    fm_decision_cutover_ensure_status "$f" || return 1
+  done
+  tmp=$(umask 077; mktemp "$state/.decision-answer-cutover-v1.XXXXXX" 2>/dev/null) || return 1
+  printf '%s\n' "$marker" > "$tmp" \
+    || { rm -f "$tmp"; return 1; }
+  if ln "$tmp" "$complete" 2>/dev/null; then
+    rm -f "$tmp"
+    return 0
+  fi
+  rm -f "$tmp"
+  [ -f "$complete" ] && [ ! -L "$complete" ] \
+    && [ "$(cat "$complete" 2>/dev/null)" = "$marker" ]
+}
+
 # Drop the record for <key> from a newline-terminated
-# "<key>\t<verb>\t<instance>\t<note>" set.
+# "<key>\t<verb>\t<instance>\t<authority>\t<note>" set.
 # Portable (no associative arrays) so the fold runs on bash 3.2 as well as 4+.
 _fm_decision_drop() {  # <open-set> <key>
   local set=$1 key=$2 line out=''
@@ -340,8 +396,7 @@ $set
 EOF
   printf '%s' "$out"
 }
-# Print the "<key>\t<verb>\t<instance>\t<note>" record currently held for
-# <key>, or nothing.
+# Print the internal record currently held for <key>, or nothing.
 _fm_decision_get() {  # <open-set> <key>
   local set=$1 key=$2 line
   while IFS= read -r line; do
@@ -359,18 +414,20 @@ EOF
 # most-recently-opened-last order; prints nothing when none are open.
 # "--with-instance" inserts the occurrence identifier before the summary for the
 # answer-issuance boundary. Pure read of the file and of the paired answer
-# records, no globals beyond the optional FM_CLASSIFY_RESOLVE_VERB override. This
-# is the durable open-set the fleet snapshot and any point-in-time consumer must
-# use instead of trusting the last status line.
+# records, and the home cutover completion marker; no mutation. This is the
+# durable open-set the fleet snapshot and any point-in-time consumer must use
+# instead of trusting the last status line.
 #
-# A needs-decision request additionally requires a correlated answer token to
-# close (see the answer-correlation contract above), so an uncorrelated
-# resolution leaves it open. A blocked line still closes on a plain keyed
-# resolution: clearing a blocker is work, not an exercise of authority.
+# A post-cutover needs-decision request additionally requires a correlated
+# answer token to close (see the answer-correlation contract above), so an
+# uncorrelated resolution leaves it open. A blocked line still closes on a
+# plain keyed resolution: clearing a blocker is work, not an exercise of
+# authority.
 status_open_decisions() {  # <status-file> [--with-instance]
   local f=$1 view=${2:-} line verb key note resolve held open='' stripped
-  local answers held_rec held_fields held_verb held_instance ans
-  local position=0 instance out_key out_verb _out_instance out_note
+  local answers held_rec held_fields held_verb held_instance held_authority ans
+  local position=0 instance authority=legacy marker complete
+  local out_key out_verb out_instance _out_authority out_note
   case "$view" in
     ''|--with-instance) ;;
     *) return 2 ;;
@@ -378,9 +435,20 @@ status_open_decisions() {  # <status-file> [--with-instance]
   [ -f "$f" ] || return 0
   resolve=${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}
   held=${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}
+  marker=$FM_CLASSIFY_DECISION_CUTOVER_MARK_DEFAULT
+  complete="${f%/*}/.decision-answer-cutover-v1"
+  if ! grep -Fqx "$marker" "$f" 2>/dev/null \
+    && [ -f "$complete" ] && [ ! -L "$complete" ] \
+    && [ "$(cat "$complete" 2>/dev/null)" = "$marker" ]; then
+    authority=correlated
+  fi
   answers=$(fm_decision_answers_file "$f")
   while IFS= read -r line || [ -n "$line" ]; do
     position=$((position + 1))
+    if [ "$line" = "$marker" ]; then
+      authority=correlated
+      continue
+    fi
     stripped=${line//[[:space:]]/}
     [ -n "$stripped" ] || continue
     verb=$(status_line_verb "$line")
@@ -391,7 +459,7 @@ status_open_decisions() {  # <status-file> [--with-instance]
         instance=$(fm_decision_instance_id "$position") || continue
         open=$(_fm_decision_drop "$open" "$key")
         [ -n "$open" ] && open="${open}"$'\n'
-        open="${open}${key}"$'\t'"${verb}"$'\t'"${instance}"$'\t'"${note}"$'\n'
+        open="${open}${key}"$'\t'"${verb}"$'\t'"${instance}"$'\t'"${authority}"$'\t'"${note}"$'\n'
         ;;
       "$resolve")
         # Only a correlated answer closes a request for authority.
@@ -400,7 +468,9 @@ status_open_decisions() {  # <status-file> [--with-instance]
           held_verb=${held_fields%%$'\t'*}
           held_fields=${held_fields#*$'\t'}
           held_instance=${held_fields%%$'\t'*}
-          if [ "$held_verb" = needs-decision ]; then
+          held_fields=${held_fields#*$'\t'}
+          held_authority=${held_fields%%$'\t'*}
+          if [ "$held_verb" = needs-decision ] && [ "$held_authority" = correlated ]; then
             ans=$(_fm_decision_answer "$line")
             fm_decision_answer_matches "$answers" "$ans" "$key" "$held_instance" \
               || continue
@@ -415,13 +485,13 @@ status_open_decisions() {  # <status-file> [--with-instance]
         ;;
     esac
   done < "$f"
-  if [ "$view" = --with-instance ]; then
-    printf '%s' "$open"
-    return 0
-  fi
-  while IFS=$'\t' read -r out_key out_verb _out_instance out_note || [ -n "$out_key" ]; do
+  while IFS=$'\t' read -r out_key out_verb out_instance _out_authority out_note || [ -n "$out_key" ]; do
     [ -n "$out_key" ] || continue
-    printf '%s\t%s\t%s\n' "$out_key" "$out_verb" "$out_note"
+    if [ "$view" = --with-instance ]; then
+      printf '%s\t%s\t%s\t%s\n' "$out_key" "$out_verb" "$out_instance" "$out_note"
+    else
+      printf '%s\t%s\t%s\n' "$out_key" "$out_verb" "$out_note"
+    fi
   done <<EOF
 $open
 EOF

@@ -68,9 +68,10 @@
 #          refresh relays any completed fm-fleet-sync.sh output before the
 #          aggregate timeout skip line with timeout and elapsed seconds.
 #          Set FM_FLEET_PRUNE=0 to skip branch pruning during that refresh.
-#          Set FM_BOOTSTRAP_DETECT_ONLY=1 to skip the five MUTATING sweeps
-#          (PR-check migration, secondmate_sync, secondmate_liveness_sweep,
-#          x_mode_setup, fleet_sync) while still printing every read-only detect line
+#          Set FM_BOOTSTRAP_DETECT_ONLY=1 to skip the six MUTATING sweeps
+#          (PR-check migration, decision-answer cutover, secondmate_sync,
+#          secondmate_liveness_sweep, x_mode_setup, fleet_sync) while still
+#          printing every read-only detect line
 #          above; the TANGLE line switches to advisory-only wording with no
 #          checkout command. Used by
 #          fm-session-start.sh's read-only path when another live session holds
@@ -104,6 +105,8 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 . "$SCRIPT_DIR/fm-x-lib.sh"
 # shellcheck source=bin/fm-backend.sh disable=SC1091
 . "$SCRIPT_DIR/fm-backend.sh"
+# shellcheck source=bin/fm-classify-lib.sh disable=SC1091
+. "$SCRIPT_DIR/fm-classify-lib.sh"
 
 fleet_sync_origin_backed_project_count() {
   local count proj
@@ -203,7 +206,14 @@ secondmate_sync() {
   # a deterministic locked sweep and can report success as BOOTSTRAP_INFO while
   # preserving failed sends as NUDGE_SECONDMATES retry markers.
   [ -d "$STATE" ] || return 0
-  local primary_head
+  local primary_head cutover_id cutover_home cutover_real
+  while IFS='|' read -r cutover_id cutover_home _window _meta; do
+    validate_secondmate_home "$cutover_id" "$cutover_home" || continue
+    cutover_real="$VALIDATED_HOME"
+    if ! fm_decision_cutover_ensure_state "$cutover_real/state"; then
+      echo "SECONDMATE_SYNC: secondmate $cutover_id: skipped: decision-answer cutover failed"
+    fi
+  done < <(live_secondmate_meta_records "$STATE" "$DATA/secondmates.md")
   if ! primary_head=$(primary_head_commit "$FM_ROOT"); then
     local meta id
     for meta in "$STATE"/*.meta; do
@@ -823,6 +833,8 @@ fi
 # runnable. Detect-only sessions never touch state.
 if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ]; then
   "$SCRIPT_DIR/fm-pr-check-migrate.sh" || true
+  fm_decision_cutover_ensure_state "$STATE" \
+    || echo "DECISION_CUTOVER: failed to establish the correlated-answer boundary in $STATE"
 fi
 
 if [ "$BACKEND_VALID" -eq 0 ]; then

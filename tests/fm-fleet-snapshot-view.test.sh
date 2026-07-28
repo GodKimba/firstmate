@@ -5,6 +5,8 @@ set -u
 # shellcheck source=tests/lib.sh
 # shellcheck disable=SC1091
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=bin/fm-classify-lib.sh
+. "$ROOT/bin/fm-classify-lib.sh"
 
 SNAPSHOT="$ROOT/bin/fm-fleet-snapshot.sh"
 VIEW="$ROOT/bin/fm-fleet-view.sh"
@@ -680,7 +682,9 @@ test_open_decision_clears_on_keyed_resolution() {
     "mode=secondmate" \
     "home=$home/secondmate-home" \
     "projects=alpha"
-  printf 'needs-decision [key=race]: fix the reconcile-before-subscribe race\n' > "$home/state/resolved-decision.status"
+  fm_decision_cutover_ensure_status "$home/state/resolved-decision.status" \
+    || fail "could not establish a post-cutover snapshot fixture"
+  printf 'needs-decision [key=race]: fix the reconcile-before-subscribe race\n' >> "$home/state/resolved-decision.status"
   printf 'done: an unrelated subtask finished\n' >> "$home/state/resolved-decision.status"
   # The resolution carries the answer token firstmate minted against this exact
   # open request, which is the only thing that closes a request for authority.

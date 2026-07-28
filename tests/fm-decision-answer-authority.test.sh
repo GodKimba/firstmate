@@ -20,6 +20,13 @@ TMP_ROOT=$(fm_test_tmproot fm-decision-answer-authority)
 new_case() {  # <name> -> case dir with a state/ dir
   local d="$TMP_ROOT/$1"
   mkdir -p "$d/state"
+  fm_decision_cutover_ensure_state "$d/state" || fail "could not establish a post-cutover case"
+  printf '%s' "$d"
+}
+
+new_legacy_case() {  # <name> -> case dir without a cutover marker
+  local d="$TMP_ROOT/$1"
+  mkdir -p "$d/state"
   printf '%s' "$d"
 }
 
@@ -110,6 +117,47 @@ SH
 }
 
 # --- the valid post-request correlated response ------------------------------
+
+test_settled_pre_cutover_history_stays_settled() {
+  local d f out
+  d=$(new_legacy_case legacy-settled)
+  f="$d/state/task.status"
+  {
+    printf 'needs-decision [key=route]: north or south?\n'
+    printf 'resolved [key=route]: captain chose north\n'
+    printf 'done: legacy task completed\n'
+  } > "$f"
+  fm_decision_cutover_ensure_state "$d/state" || fail "could not migrate settled legacy history"
+  out=$(open_set "$f")
+  [ -z "$out" ] || fail "settled pre-cutover history reopened: $out"
+  [ "$(last_status_line "$f")" = "done: legacy task completed" ] \
+    || fail "the cutover marker masked the last real status event"
+  pass "settled pre-cutover history remains settled across cutover"
+}
+
+test_pre_cutover_opening_accepts_a_late_legacy_resolution() {
+  local d f out
+  d=$(new_legacy_case legacy-late)
+  f="$d/state/task.status"
+  printf 'needs-decision [key=route]: north or south?\n' > "$f"
+  fm_decision_cutover_ensure_state "$d/state" || fail "could not migrate an open legacy request"
+  printf 'resolved [key=route]: captain chose south after cutover\n' >> "$f"
+  out=$(open_set "$f")
+  [ -z "$out" ] || fail "a late legacy resolution did not close its pre-cutover opening: $out"
+  pass "a pre-cutover opening remains legacy-closable after cutover"
+}
+
+test_post_cutover_plain_resolution_is_rejected() {
+  local d f out
+  d=$(new_case strict-plain)
+  f="$d/state/task.status"
+  printf 'needs-decision [key=route]: north or south?\n' > "$f"
+  printf 'resolved [key=route]: a queued command was mistaken for approval\n' >> "$f"
+  out=$(open_set "$f")
+  assert_contains "$out" "route|needs-decision|" \
+    "a post-cutover plain resolution closed a request for authority"
+  pass "post-cutover decisions reject plain keyed resolutions"
+}
 
 test_correlated_answer_after_the_request_closes_it() {
   local d f token out
@@ -274,6 +322,9 @@ test_answer_token_does_not_disturb_line_parsers() {
 
 test_pre_request_generic_command_never_answers
 test_queued_generic_command_reaches_a_busy_worker_unchanged
+test_settled_pre_cutover_history_stays_settled
+test_pre_cutover_opening_accepts_a_late_legacy_resolution
+test_post_cutover_plain_resolution_is_rejected
 test_correlated_answer_after_the_request_closes_it
 test_token_for_an_earlier_position_cannot_close_a_later_request
 test_reopened_decision_needs_a_fresh_answer

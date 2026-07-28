@@ -9,6 +9,8 @@ set -u
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=bin/fm-classify-lib.sh
+. "$ROOT/bin/fm-classify-lib.sh"
 
 SEND="$ROOT/bin/fm-send.sh"
 TMP_ROOT=$(fm_test_tmproot fm-send-strict)
@@ -193,8 +195,10 @@ test_decision_answer_mints_a_correlated_token() {
   dir="$TMP_ROOT/decision-open"; mkdir -p "$dir"
   fb=$(make_stubs "$dir"); home=$(setup_home decision-open); err="$dir/send.err"; log="$dir/tmux.log"; : > "$log"
   fm_write_meta "$home/state/lane-d2.meta" "window=sess:fm-lane-d2" "kind=ship"
+  fm_decision_cutover_ensure_status "$home/state/lane-d2.status" \
+    || fail "could not establish a post-cutover send fixture"
   printf 'needs-decision [key=red-test]: accept the red test, or keep fixing?\n' \
-    > "$home/state/lane-d2.status"
+    >> "$home/state/lane-d2.status"
 
   PATH="$fb:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_TMUX_LOG="$log" FM_SEND_SETTLE=0 \
     "$SEND" lane-d2 --decision red-test "keep fixing" >/dev/null 2>"$err"; rc=$?

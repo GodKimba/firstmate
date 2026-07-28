@@ -20,6 +20,8 @@ set -u
 
 # shellcheck source=tests/lib.sh disable=SC1091
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=bin/fm-classify-lib.sh disable=SC1091
+. "$ROOT/bin/fm-classify-lib.sh"
 
 BASE_PATH=${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
 TMP_ROOT=$(fm_test_tmproot fm-bootstrap-tests)
@@ -693,6 +695,7 @@ make_routine_bootstrap_fixture() {
     printf '%s\n' '.fm-secondmate-home'
     printf '%s\n' 'config/crew-harness'
     printf '%s\n' 'config/crew-dispatch.json'
+    printf '%s\n' 'state/'
   } > "$root/.gitignore"
   printf '%s\n' 'instructions' > "$root/AGENTS.md"
   mkdir -p "$root/bin" "$root/.agents/skills"
@@ -754,6 +757,47 @@ test_routine_bootstrap_contract_runs_under_system_bash() {
   out=$(run_routine_bootstrap_fixture /bin/bash "$TMP_ROOT/routine-bash")
   [ -z "$out" ] || fail "routine bootstrap contract should be silent under /bin/bash, got: $out"
   pass "bootstrap routine contract runs under system /bin/bash"
+}
+
+test_bootstrap_establishes_the_decision_answer_cutover() {
+  local case_dir home fakebin out status marker_count readonly_home
+  case_dir="$TMP_ROOT/decision-cutover"
+  home="$case_dir/home"
+  mkdir -p "$home/config" "$home/state"
+  printf '%s\n' manual > "$home/config/backlog-backend"
+  status="$home/state/legacy.status"
+  printf 'needs-decision [key=route]: north or south?\n' > "$status"
+  fakebin=$(make_fake_toolchain "$case_dir")
+
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  [ -z "$out" ] || fail "decision cutover migration should be silent, got: $out"
+  grep -Fqx "$FM_CLASSIFY_DECISION_CUTOVER_MARK_DEFAULT" "$status" \
+    || fail "bootstrap did not append the decision-answer cutover marker"
+  assert_present "$home/state/.decision-answer-cutover-v1" \
+    "bootstrap did not record completion of the decision-answer cutover"
+  printf 'resolved [key=route]: captain chose south after cutover\n' >> "$status"
+  [ -z "$(status_open_decisions "$status")" ] \
+    || fail "bootstrap migration did not preserve late legacy closure"
+
+  PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh" >/dev/null
+  marker_count=$(grep -Fxc "$FM_CLASSIFY_DECISION_CUTOVER_MARK_DEFAULT" "$status")
+  [ "$marker_count" -eq 1 ] || fail "bootstrap appended the cutover marker more than once"
+
+  readonly_home="$case_dir/readonly-home"
+  mkdir -p "$readonly_home/config" "$readonly_home/state"
+  printf '%s\n' manual > "$readonly_home/config/backlog-backend"
+  printf 'needs-decision [key=route]: north or south?\n' > "$readonly_home/state/legacy.status"
+  PATH="$fakebin:$BASE_PATH" FM_HOME="$readonly_home" FM_ROOT_OVERRIDE="$readonly_home" \
+    FM_BOOTSTRAP_DETECT_ONLY=1 FM_FAKE_TREEHOUSE_LEASE_HELP=1 \
+    "$ROOT/bin/fm-bootstrap.sh" >/dev/null
+  assert_absent "$readonly_home/state/.decision-answer-cutover-v1" \
+    "detect-only bootstrap wrote the decision-answer cutover completion marker"
+  [ "$(cat "$readonly_home/state/legacy.status")" = \
+    "needs-decision [key=route]: north or south?" ] \
+    || fail "detect-only bootstrap mutated legacy decision history"
+  pass "bootstrap establishes one cutover while detect-only remains read-only"
 }
 
 test_bootstrap_info_is_no_load_and_actionable_lines_trigger() {
@@ -860,6 +904,7 @@ test_fleet_sync_timeout_empty_override_uses_default
 test_fleet_sync_timeout_is_computed_before_launch
 test_routine_bootstrap_confirmations_are_silent
 test_routine_bootstrap_contract_runs_under_system_bash
+test_bootstrap_establishes_the_decision_answer_cutover
 test_bootstrap_info_is_no_load_and_actionable_lines_trigger
 test_crew_dispatch_active_rules_are_verbose_bootstrap_info
 test_crew_dispatch_validation

@@ -168,7 +168,9 @@ test_classifier_primitives() {
     && fail "a late key token silently opened or closed the default decision"
   printf '%s' "$open" | grep -F $'bad key\t' >/dev/null \
     && fail "an invalid key slug entered the open-decision set"
-  printf 'needs-decision [key=route]: choose north or south\n' > "$state/canonical-key.status"
+  fm_decision_cutover_ensure_status "$state/canonical-key.status" \
+    || fail "could not establish a post-cutover decision fixture"
+  printf 'needs-decision [key=route]: choose north or south\n' >> "$state/canonical-key.status"
   canonical=$(status_open_decisions "$state/canonical-key.status")
   printf '%s' "$canonical" | grep -F $'route\tneeds-decision\tchoose north or south' >/dev/null \
     || fail "the canonical early-key form did not open the intended decision"

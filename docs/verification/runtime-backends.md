@@ -409,16 +409,19 @@ Observed output:
 
 ```text
 bin/fm-afk-return.sh
+bin/fm-bootstrap.sh
 bin/fm-brief.sh
 bin/fm-crew-state.sh
 bin/fm-decision-hold.sh
 bin/fm-fleet-snapshot.sh
 bin/fm-push-transition-lib.sh
 bin/fm-send.sh
+bin/fm-session-start.sh
 bin/fm-supervise-daemon.sh
+bin/fm-wake-lib.sh
 ```
 
-`fm-watch.sh` loads the same owner transitively through `fm-push-transition-lib.sh`.
+`fm-watch.sh` loads the same owner transitively through `fm-push-transition-lib.sh`, and wake-queue consumers load it through `fm-wake-lib.sh`.
 
 Observed guarantee: a runtime carries the answer message as opaque text and a backend carries it as opaque keystrokes, so neither can weaken, forge, or bypass the correlation.
 `fm-send.sh --decision` mints and records the token before any backend dispatch, and `fm_backend_send_text_submit` receives an already-composed message, so the refusal to answer a request that is not open is identical on every backend.
