@@ -49,6 +49,11 @@ make_repo_on_branch() {  # <dir> <branch>
   export FM_FAKE_RUN_HEAD
 }
 
+set_no_mistakes_submission_ref() {  # <repo> <branch> [commit]
+  local repo=$1 branch=$2 commit=${3:-HEAD}
+  git -C "$repo" update-ref "refs/remotes/no-mistakes/$branch" "$commit"
+}
+
 # A fakebin with a fake `no-mistakes` (serves the env-driven run output) and a
 # fake `tmux` (serves a busy or idle pane). The fake no-mistakes mirrors the real
 # command surface the helper uses: `axi status`, `axi status --run <id>` (the
@@ -752,6 +757,138 @@ EOF
   pass "coarse run does not probe another branch's ci log"
 }
 
+# A synchronous run can rebase and apply fixes in no-mistakes' isolated gate
+# while the invoking worktree remains at the exact submitted commit. The run
+# head is then intentionally absent from (or divergent in) the invoking repo,
+# so ancestry against the evolving run head cannot prove ownership. The exact
+# no-mistakes submission ref remains bound to the worktree HEAD and is the
+# counterfactual that distinguishes this healthy active run from an idle pane.
+test_active_rebased_run_uses_exact_submission_ref() {
+  reset_fakes
+  local d; d=$(new_case active-rebased-submission)
+  make_repo_on_branch "$d/wt" fm/feat-rebased
+  set_no_mistakes_submission_ref "$d/wt" fm/feat-rebased
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-rebased.meta" "window=fm:fm-feat-rebased" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_RUN_HEAD=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  FM_FAKE_AXI_STATUS="$(run_running fm/feat-rebased)"
+  FM_FAKE_BUSY=0
+  local out; out=$(run_crew_state "$d" feat-rebased)
+  assert_contains "$out" "state: working" "active rebased run -> working"
+  assert_contains "$out" "source: run-step" "active rebased run -> run-step source"
+  assert_not_contains "$out" "source: pane" "idle pane does not mask the active run"
+  pass "active rebased run is tied to the exact submitted code while the pane is idle"
+}
+
+# Run attribution precedes every endpoint fallback, so the exact same active
+# proof must remain authoritative for every supported session backend.
+test_active_rebased_run_precedes_all_backend_fallbacks() {
+  reset_fakes
+  local d backend id out; d=$(new_case active-rebased-backends)
+  make_repo_on_branch "$d/wt" fm/feat-all-backends
+  set_no_mistakes_submission_ref "$d/wt" fm/feat-all-backends
+  make_fakebin "$d" >/dev/null
+  FM_FAKE_RUN_HEAD=eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee
+  FM_FAKE_AXI_STATUS="$(run_running fm/feat-all-backends)"
+  FM_FAKE_BUSY=0
+  for backend in tmux herdr zellij orca cmux; do
+    id="all-backends-$backend"
+    if [ "$backend" = orca ]; then
+      fm_write_meta "$d/state/$id.meta" "terminal=missing-$backend" "worktree=$d/wt" "kind=ship" "backend=$backend"
+    else
+      fm_write_meta "$d/state/$id.meta" "window=missing-$backend" "worktree=$d/wt" "kind=ship" "backend=$backend"
+    fi
+    out=$(run_crew_state "$d" "$id")
+    assert_contains "$out" "state: working" "$backend active rebased run -> working"
+    assert_contains "$out" "source: run-step" "$backend endpoint fallback does not mask the active run"
+  done
+  pass "active rebased run remains authoritative across every supported session backend"
+}
+
+# The same proof must survive concurrent activity when bare axi status reports
+# another branch and this run is found only through the repository runs list.
+test_cross_branch_active_rebased_run_uses_submission_ref() {
+  reset_fakes
+  local d; d=$(new_case crossbranch-active-rebased)
+  make_repo_on_branch "$d/wt" fm/feat-cross-rebased
+  set_no_mistakes_submission_ref "$d/wt" fm/feat-cross-rebased
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-cross-rebased.meta" "window=fm:fm-feat-cross-rebased" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_running fm/other-crew)"
+  FM_FAKE_RUNS_LIST=$(cat <<'EOF'
+  running    fm/other-crew aaaaaaa  2026-07-28 16:00
+  running    fm/feat-cross-rebased bbbbbbb  2026-07-28 15:59
+EOF
+)
+  FM_FAKE_BUSY=0
+  local out; out=$(run_crew_state "$d" feat-cross-rebased)
+  assert_contains "$out" "state: working" "cross-branch active rebased run -> working"
+  assert_contains "$out" "source: run-step" "cross-branch active rebased run -> run-step source"
+  assert_contains "$out" "background run" "cross-branch fallback retains coarse-run detail"
+  pass "cross-branch active rebased run uses the exact submission ref"
+}
+
+# The submission ref is exact code identity, not a branch-only escape hatch.
+# If it names any other commit, the unavailable run head remains unattributed.
+test_active_rebased_run_rejects_mismatched_submission_ref() {
+  reset_fakes
+  local d submitted; d=$(new_case active-rebased-mismatch)
+  make_repo_on_branch "$d/wt" fm/feat-rebased-mismatch
+  submitted=$(git -C "$d/wt" rev-parse HEAD)
+  git -C "$d/wt" commit -q --allow-empty -m 'local work after submitted code'
+  set_no_mistakes_submission_ref "$d/wt" fm/feat-rebased-mismatch "$submitted"
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-rebased-mismatch.meta" "window=fm:fm-feat-rebased-mismatch" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_RUN_HEAD=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+  FM_FAKE_AXI_STATUS="$(run_running fm/feat-rebased-mismatch)"
+  FM_FAKE_RUNS_LIST=""
+  FM_FAKE_BUSY=0
+  local out; out=$(run_crew_state "$d" feat-rebased-mismatch)
+  assert_contains "$out" "state: unknown" "mismatched submitted code -> unknown"
+  assert_contains "$out" "source: none" "mismatched submitted code has no authoritative source"
+  assert_not_contains "$out" "source: run-step" "mismatched submitted code is not attributed"
+  pass "active rebased run rejects a mismatched submission ref"
+}
+
+# A parked run with an unavailable historical head is not flattened into
+# working merely because its original submission ref still matches.
+test_parked_unresolved_run_head_not_classified_active() {
+  reset_fakes
+  local d; d=$(new_case parked-submission-ref)
+  make_repo_on_branch "$d/wt" fm/feat-old-parked
+  set_no_mistakes_submission_ref "$d/wt" fm/feat-old-parked
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-old-parked.meta" "window=fm:fm-feat-old-parked" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_RUN_HEAD=dddddddddddddddddddddddddddddddddddddddd
+  FM_FAKE_AXI_STATUS="$(run_parked fm/feat-old-parked)"
+  FM_FAKE_RUNS_LIST=""
+  FM_FAKE_BUSY=0
+  local out; out=$(run_crew_state "$d" feat-old-parked)
+  assert_not_contains "$out" "state: working" "parked unresolved run is not active"
+  assert_not_contains "$out" "source: run-step" "parked unresolved run is not revived by submission ref"
+  pass "parked run with an unresolved head is not classified active"
+}
+
+# A terminal historical run is not revived merely because its original
+# submission ref still equals the worktree HEAD.
+test_terminal_unresolved_run_head_not_revived_by_submission_ref() {
+  reset_fakes
+  local d; d=$(new_case terminal-submission-ref)
+  make_repo_on_branch "$d/wt" fm/feat-old-terminal
+  set_no_mistakes_submission_ref "$d/wt" fm/feat-old-terminal
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-old-terminal.meta" "window=fm:fm-feat-old-terminal" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_RUN_HEAD=cccccccccccccccccccccccccccccccccccccccc
+  FM_FAKE_AXI_STATUS="$(run_passed fm/feat-old-terminal)"
+  FM_FAKE_RUNS_LIST=""
+  FM_FAKE_BUSY=0
+  local out; out=$(run_crew_state "$d" feat-old-terminal)
+  assert_contains "$out" "state: unknown" "terminal unresolved run head -> unknown"
+  assert_contains "$out" "source: none" "terminal unresolved run is not a current source"
+  assert_not_contains "$out" "source: run-step" "terminal run is not revived by a stale submission ref"
+  pass "terminal run is not revived by the submission-ref fallback"
+}
+
 # A different-branch run with NO matching runs-list row must NOT be
 # misattributed, and must not be treated as a false "working" verdict either.
 test_other_branch_run_ignored() {
@@ -1255,6 +1392,12 @@ test_terminal_failed
 test_cross_branch_attribution_via_runs_list
 test_cross_branch_attribution_picks_most_recent_row
 test_coarse_run_does_not_probe_other_branch_ci_log_for_ready_status
+test_active_rebased_run_uses_exact_submission_ref
+test_active_rebased_run_precedes_all_backend_fallbacks
+test_cross_branch_active_rebased_run_uses_submission_ref
+test_active_rebased_run_rejects_mismatched_submission_ref
+test_parked_unresolved_run_head_not_classified_active
+test_terminal_unresolved_run_head_not_revived_by_submission_ref
 test_other_branch_run_ignored
 test_no_run_busy_pane
 test_no_run_herdr_unknown_uses_backend_capture

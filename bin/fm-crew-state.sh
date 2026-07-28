@@ -26,7 +26,11 @@
 #      branch whose head was rewritten or diverged must not be attributed.
 #      A run matches when its head equals the worktree HEAD, or the worktree HEAD
 #      is an ancestor of the run head (pipeline fix commits advanced the run on
-#      the same line of history). Local work that advanced past the run head, or
+#      the same line of history). An active run whose isolated rebase/fix head is
+#      not comparable in the invoking repository also matches when the exact
+#      no-mistakes submission ref still equals the worktree HEAD. This second
+#      proof is active-only; terminal and historical runs still require run-head
+#      ancestry. Local work that advanced past the submitted or run head, or
 #      diverged from it, invalidates attribution.
 #      The run-step is AUTHORITATIVE: running/fixing -> working, ci -> working,
 #      awaiting_approval/fix_review -> parked (with gate findings), terminal
@@ -369,6 +373,21 @@ nm_ci_checks_state() {
 # file's history - but this cross-branch path was independently confirmed
 # dead code and is worth having actually work.)
 #
+# Exact active-run submission binding. `no-mistakes axi run` first pushes the
+# invoking branch to the local no-mistakes remote, which updates the corresponding
+# remote-tracking ref to the submitted commit. The pipeline may then rebase and
+# fix in its isolated repository without moving that local tracking ref, so its
+# evolving run head can be absent from or divergent in the invoking repository
+# even though the synchronous run is healthy. Equality here proves both branch
+# and code identity without reading no-mistakes' private database format.
+# Deliberately exact: local work after submission invalidates the proof.
+nm_submission_head_matches_worktree() {  # <branch>
+  local branch=$1 local_full submitted_full
+  local_full=$(git -C "$WT" rev-parse HEAD 2>/dev/null) || return 1
+  submitted_full=$(git -C "$WT" rev-parse --verify "refs/remotes/no-mistakes/${branch}^{commit}" 2>/dev/null) || return 1
+  [ "$submitted_full" = "$local_full" ]
+}
+
 # The real run-listing command is the top-level `no-mistakes runs` (verified:
 # `no-mistakes --help` lists it separately from `axi`). It is plain, human-
 # oriented text - no run id, no JSON/TOON, newest-first, columns
@@ -393,10 +412,14 @@ nm_runs_status_for_branch() {  # <branch>
     rest=$(trim "$rest")
     sha=${rest%% *}
     if [ "$br" = "$branch" ]; then
-      # Same code-identity rule as axi status: skip a same-branch row whose
-      # short-sha does not match this worktree (rewritten or advanced tip).
+      # Prefer the run head. During a healthy synchronous run, an isolated
+      # rebase/fix can make that head unavailable or divergent here; only a
+      # running row may then use the exact submission-ref proof. Terminal,
+      # failed, cancelled, stale, or code-mismatched rows remain rejected.
       if ! nm_coarse_head_matches_worktree "$sha"; then
-        continue
+        if [ "$st" != running ] || ! nm_submission_head_matches_worktree "$branch"; then
+          continue
+        fi
       fi
       printf '%s' "$st"
       return 0
@@ -431,6 +454,19 @@ nm_run_head_matches_worktree() {
   return 1
 }
 
+# Full status can use the exact submission ref only while the run is active.
+# Parked full statuses that still say `running` remain attributable, but the
+# run-step mapping below classifies their gate as parked rather than working.
+nm_full_run_matches_worktree() {
+  local status
+  nm_run_head_matches_worktree && return 0
+  status=$(strip_quotes "$(nm_field status)")
+  case "$status" in
+    running|fixing|ci) nm_submission_head_matches_worktree "$CREW_BRANCH" ;;
+    *) return 1 ;;
+  esac
+}
+
 # Coarse runs-list rows are "<status> <branch> <short-sha> ...". 0 if the short
 # sha for this branch row matches the worktree head under the same rules as
 # nm_run_head_matches_worktree (equal, or local is ancestor of run tip).
@@ -459,7 +495,7 @@ if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/n
   RUN_OUT=$(nm_run axi status)
   if [ -n "$RUN_OUT" ]; then
     run_branch=$(strip_quotes "$(nm_field branch)")
-    if [ -n "$run_branch" ] && [ "$run_branch" = "$CREW_BRANCH" ] && nm_run_head_matches_worktree; then
+    if [ -n "$run_branch" ] && [ "$run_branch" = "$CREW_BRANCH" ] && nm_full_run_matches_worktree; then
       HAVE_RUN=1
     else
       # The active-or-most-recent run is for another branch, or same branch with
