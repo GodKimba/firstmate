@@ -122,7 +122,7 @@ test_scan_captain_relevant_statuses_classifier() {
 }
 
 test_classifier_primitives() {
-  local dir state open activity
+  local dir state open activity canonical late
   dir=$(make_case classify-primitives); state="$dir/state"
   printf 'working: a\n\ndone: b\n\n' > "$state/x.status"
   [ "$(last_status_line "$state/x.status")" = "done: b" ] || fail "last_status_line did not return the last non-blank line"
@@ -164,8 +164,25 @@ test_classifier_primitives() {
     || fail "a key token in resolved note prose closed the keyed decision"
   printf '%s' "$open" | grep -F $'prose\t' >/dev/null \
     && fail "a key token in note prose changed the decision key"
+  printf '%s' "$open" | grep -F $'default\t' >/dev/null \
+    && fail "a late key token silently opened or closed the default decision"
   printf '%s' "$open" | grep -F $'bad key\t' >/dev/null \
     && fail "an invalid key slug entered the open-decision set"
+  printf 'needs-decision [key=route]: choose north or south\n' > "$state/canonical-key.status"
+  canonical=$(status_open_decisions "$state/canonical-key.status")
+  printf '%s' "$canonical" | grep -F $'route\tneeds-decision\tchoose north or south' >/dev/null \
+    || fail "the canonical early-key form did not open the intended decision"
+  printf 'resolved [key=route]: captain chose north\n' >> "$state/canonical-key.status"
+  [ -z "$(status_open_decisions "$state/canonical-key.status")" ] \
+    || fail "the canonical matching resolved event did not close the intended decision"
+  printf 'needs-decision: legacy default choice\nresolved: answered route [key=route]\nneeds-decision: choose north or south [key=route]\n' > "$state/late-key.status"
+  late=$(status_open_decisions "$state/late-key.status")
+  printf '%s' "$late" | grep -F $'default\tneeds-decision\tlegacy default choice' >/dev/null \
+    || fail "a late-key resolved event silently closed the default decision"
+  printf '%s' "$late" | grep -F $'route\t' >/dev/null \
+    && fail "a late-key needs-decision event was accepted as the intended decision"
+  [ "$(printf '%s' "$late" | grep -c $'^default\t' || true)" -eq 1 ] \
+    || fail "a late-key needs-decision event silently became another default decision"
   cat > "$state/activity.status" <<'EOF'
 working [key=phase7]: Phase 7 started
 working [key=phase6]: Phase 6 started

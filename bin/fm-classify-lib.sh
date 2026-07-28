@@ -157,6 +157,8 @@ status_is_paused_or_captain_held() {  # <status-line>
 #   resolved       [key=api-shape]: <how it was decided>
 # A line with no token uses the key "default", preserving the historical
 # one-open-decision-per-task behavior (a bare "resolved:" closes "default").
+# A key-like token after the colon is invalid rather than a default-key event,
+# so the late form can neither open nor close the wrong decision silently.
 # The three parsers are pure reads of a single line; the verb parser strips any
 # key token before the colon so the leading word is recovered cleanly.
 status_line_verb() {  # <status-line> -> leading verb word
@@ -173,7 +175,7 @@ status_line_note() {  # <status-line> -> text after the first colon, trimmed
   esac
 }
 _fm_decision_key() {  # <status-line> -> key slug, or "default" when no token
-  local prefix=${1%%:*} k
+  local line=$1 prefix=${1%%:*} k
   case "$prefix" in
     *\[key=*\]*)
       k=${prefix#*\[key=}
@@ -183,7 +185,12 @@ _fm_decision_key() {  # <status-line> -> key slug, or "default" when no token
         *) printf '%s' "$k" ;;
       esac
       ;;
-    *) printf 'default' ;;
+    *)
+      case "$line" in
+        *\[key=*) return 1 ;;
+        *) printf 'default' ;;
+      esac
+      ;;
   esac
 }
 # Drop the record for <key> from a newline-terminated "<key>\t<verb>\t<note>" set.

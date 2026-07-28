@@ -337,10 +337,42 @@ test_pause_verb_override_renders_all_brief_scaffolds() {
     # shellcheck disable=SC2016 # Literal backticks and braces must remain unexpanded.
     assert_no_grep '`paused: {why}`' "$brief" \
       "$kind brief still instructs the default paused status"
-    assert_grep 'or a blocker clears' "$brief" \
+    assert_grep 'When an unkeyed blocker clears' "$brief" \
       "$kind brief did not require durable resolution when a blocker clears"
   done
   pass "fm-brief.sh: custom pause verb renders in every scaffold"
+}
+
+test_keyed_decision_examples_use_authoritative_placement() {
+  local home kind id brief
+  home="$TMP_ROOT/keyed-decision-home"
+  mkdir -p "$home/data"
+
+  for kind in ship scout secondmate; do
+    id="brief-keyed-decision-$kind"
+    case "$kind" in
+      ship)
+        FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate >/dev/null 2>&1
+        ;;
+      scout)
+        FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate --scout >/dev/null 2>&1
+        ;;
+      secondmate)
+        FM_HOME="$home" FM_SECONDMATE_CHARTER='Handle routed decisions.' \
+          "$ROOT/bin/fm-brief.sh" "$id" --secondmate --no-projects >/dev/null 2>&1
+        ;;
+    esac
+    brief="$home/data/$id/brief.md"
+    assert_grep 'needs-decision [key=<decision-slug>]: {summary of options}' "$brief" \
+      "$kind brief did not teach the canonical early-key decision opener"
+    assert_grep 'resolved [key=<decision-slug>]: {how it was decided}' "$brief" \
+      "$kind brief did not teach the matching early-key resolution"
+    assert_no_grep 'needs-decision: {summary of options}' "$brief" \
+      "$kind brief still taught the unkeyed decision opener"
+    assert_no_grep 'resolved: {how it was decided or unblocked}' "$brief" \
+      "$kind brief still implied that a key could be added after the colon"
+  done
+  pass "fm-brief.sh: every worker scaffold teaches authoritative keyed decision placement"
 }
 
 test_scout_and_secondmate_load_decision_hold_policy() {
@@ -395,5 +427,6 @@ test_herdr_lab_contract_applies_to_scouts_but_not_secondmates
 test_secondmate_no_projects_charter
 test_secondmate_marked_request_reporting_contract
 test_pause_verb_override_renders_all_brief_scaffolds
+test_keyed_decision_examples_use_authoritative_placement
 test_scout_and_secondmate_load_decision_hold_policy
 test_scout_and_secondmate_scaffold
