@@ -283,7 +283,7 @@ fm_backend_zellij_pane_exists() {  # <session> <pane_id>
 
 fm_backend_zellij_endpoint_state() {  # <target> [expected-label] [recorded-tab-id]
   local target=$1 expected_label=${2:-} recorded_tab_id=${3:-}
-  local sessions panes tabs pane_tab_id exact_tab_id= scoped exact_title bare_count
+  local sessions panes tabs pane_tab_id exact_tab_id='' scoped exact_title bare_count
   fm_backend_zellij_parse_target "$target" || { printf 'unreadable'; return 0; }
   sessions=$(zellij list-sessions --short --no-formatting 2>/dev/null) \
     || { printf 'unreadable'; return 0; }

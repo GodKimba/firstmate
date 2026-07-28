@@ -49,9 +49,11 @@ trap cleanup_promote EXIT
 ORIGINAL=$(mktemp "$STATE/.fm-promote-original.XXXXXXXX")
 cp "$META" "$ORIGINAL"
 
-[ "$(grep -c '^kind=' "$ORIGINAL" 2>/dev/null || true)" = 1 ] \
-  && grep -qx 'kind=scout' "$ORIGINAL" \
-  || { echo "error: task $ID is not an unambiguous scout task" >&2; exit 1; }
+if [ "$(grep -c '^kind=' "$ORIGINAL" 2>/dev/null || true)" != 1 ] \
+   || ! grep -qx 'kind=scout' "$ORIGINAL"; then
+  echo "error: task $ID is not an unambiguous scout task" >&2
+  exit 1
+fi
 ACQUISITION_COUNT=$(grep -c '^acquisition_branch=' "$ORIGINAL" 2>/dev/null || true)
 [ "$ACQUISITION_COUNT" -le 1 ] \
   || { echo "error: task $ID has ambiguous acquisition provenance" >&2; exit 1; }
@@ -126,7 +128,7 @@ else
 fi
 [ "$STATUS" = 1 ] \
   || { echo "error: cannot prove recorded scout worktree is detached" >&2; exit 1; }
-PROMOTION_HEAD=$(git -C "$WT" rev-parse --verify HEAD^{commit} 2>/dev/null) \
+PROMOTION_HEAD=$(git -C "$WT" rev-parse --verify "HEAD^{commit}" 2>/dev/null) \
   || { echo "error: cannot resolve recorded scout worktree HEAD" >&2; exit 1; }
 
 if git -C "$PROJ" show-ref --verify --quiet "$BRANCH_REF"; then
@@ -142,15 +144,19 @@ TMP=$(mktemp "$STATE/.fm-promote.XXXXXXXX")
 awk '!/^kind=/ && !/^acquisition_branch=/' "$ORIGINAL" > "$TMP"
 printf 'kind=ship\nacquisition_branch=%s\n' "$BRANCH" >> "$TMP"
 
-[ -f "$META" ] && [ ! -L "$META" ] && cmp -s "$ORIGINAL" "$META" \
-  || { echo "error: task $ID metadata changed during promotion" >&2; exit 1; }
+if [ ! -f "$META" ] || [ -L "$META" ] || ! cmp -s "$ORIGINAL" "$META"; then
+  echo "error: task $ID metadata changed during promotion" >&2
+  exit 1
+fi
 git -C "$WT" checkout -q -b "$BRANCH" "$PROMOTION_HEAD"
 BRANCH_CREATED=1
 [ "$(git -C "$WT" symbolic-ref --quiet --short HEAD 2>/dev/null || true)" = "$BRANCH" ] \
   && [ "$(git -C "$PROJ" rev-parse --verify "$BRANCH_REF^{commit}" 2>/dev/null || true)" = "$PROMOTION_HEAD" ] \
   || { echo "error: acquisition branch $BRANCH was not created at the proven scout HEAD" >&2; exit 1; }
-[ -f "$META" ] && [ ! -L "$META" ] && cmp -s "$ORIGINAL" "$META" \
-  || { echo "error: task $ID metadata changed during branch acquisition" >&2; exit 1; }
+if [ ! -f "$META" ] || [ -L "$META" ] || ! cmp -s "$ORIGINAL" "$META"; then
+  echo "error: task $ID metadata changed during branch acquisition" >&2
+  exit 1
+fi
 mv "$TMP" "$META"
 TMP=
 BRANCH_CREATED=0

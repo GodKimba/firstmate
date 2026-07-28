@@ -404,7 +404,7 @@ fm_backend_cmux_surface_exists() {  # <workspace_id> <surface_id>
 }
 
 fm_backend_cmux_endpoint_state() {  # <target> [expected-label]
-  local expected_label=${2:-} windows wid workspaces title= expected_title bare_count=0 count
+  local expected_label=${2:-} windows wid workspaces title='' expected_title bare_count=0 count
   fm_backend_cmux_parse_target "$1" || { printf 'unreadable'; return 0; }
   windows=$(fm_backend_cmux_cli list-windows --json --id-format uuids 2>/dev/null) \
     || { printf 'unreadable'; return 0; }
