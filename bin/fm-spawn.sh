@@ -89,6 +89,17 @@
 #   nested directory that a slow provider is still provisioning under is ignored
 #   and never normalized upward to its git root, so a launch cannot outrun
 #   acquisition.
+#   A Treehouse-provided scout is then made branchless before its worker starts,
+#   because kind=scout records acquisition_branch=- and guarded cleanup only
+#   returns a genuinely branchless worktree. Providers disagree about what they
+#   hand over: a generic provider leases a detached worktree, while a managed
+#   pool leases its slot attached to the pool's own structural branch. The step
+#   detaches HEAD only, so it moves no commit, deletes no branch, keeps every
+#   tracked and untracked file, and is an exact no-op on an already-detached
+#   copy and on a relaunch into the same copy. A scout whose invariant cannot be
+#   established refuses before launch rather than leaving cleanup to detect it
+#   after the worker is already closed. Ship spawns are untouched: they own
+#   branch fm/<id>, and no path here detaches or rewrites it.
 # Batch dispatch: pass one or more `id=repo` pairs instead of a single <id> <project>, e.g.
 #     fm-spawn.sh fix-a-k3=projects/foo add-b-q7=projects/bar [--scout]
 #   Each pair re-execs this script in single-task mode, so the single path stays the only
@@ -1346,6 +1357,31 @@ if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   fi
 
   validate_spawn_worktree "treehouse get" "$T"
+
+  # A scout is recorded below as acquisition_branch=- and guarded cleanup only
+  # returns such a worktree when it is genuinely branchless, so the invariant has
+  # to be established at acquisition rather than assumed. Providers disagree
+  # about that: a generic provider hands over an already-detached worktree, while
+  # a managed pool hands over a slot still attached to the pool's own structural
+  # branch. Recording the provenance without establishing it lets the mismatch
+  # survive until cleanup, which detects it only after the worker is already
+  # closed and then has to preserve the slot and records untouched.
+  # --detach moves no commit, deletes no branch, and keeps every tracked and
+  # untracked file, so this is an exact no-op on an already-detached worktree and
+  # is safe to repeat when the same task is relaunched in its existing copy. Ship
+  # tasks are deliberately untouched: they own branch fm/<id> and create it
+  # themselves, so no path here may detach or rewrite a ship branch.
+  if [ "$KIND" = scout ]; then
+    scout_head_branch=$(git -C "$WT" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
+    if [ -n "$scout_head_branch" ]; then
+      git -C "$WT" checkout --detach -q 2>/dev/null || true
+      scout_head_branch=$(git -C "$WT" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
+    fi
+    if [ -n "$scout_head_branch" ]; then
+      echo "error: scout worktree $WT is still attached to branch $scout_head_branch after detaching; refusing to launch a scout whose recorded branchless provenance guarded cleanup could never honor. Inspect target $T" >&2
+      exit 1
+    fi
+  fi
 fi
 
 # Per-task temp root: /tmp/fm-<id>/ with Go's build temp nested at gotmp/. Go won't

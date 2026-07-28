@@ -1581,6 +1581,83 @@ test_legacy_branchless_scout_metadata_remains_supported() {
   pass "legacy branchless scout metadata remains cleanup-compatible"
 }
 
+# Acquisition now establishes the branchless invariant, so a scout that reaches
+# cleanup still attached to a structural pool branch is a genuine mismatch
+# between the recorded provenance and the copy. That refusal is defense in depth
+# and must stay intact on both provider routes: it preserves the slot, the
+# branch, and the task records so the copy can be recovered rather than
+# discarded.
+test_attached_branchless_scout_refuses_on_both_routes() {
+  local case_dir rc route wt
+  for route in managed generic; do
+    case_dir=$(make_case "scout-attached-$route")
+    mkdir -p "$case_dir/data/task-x1"
+    printf '%s\n' 'scout result' > "$case_dir/data/task-x1/report.md"
+    write_meta "$case_dir" no-mistakes scout
+    printf '%s\n' 'decisions_reviewed=1' 'decision_keys=' >> "$case_dir/state/task-x1.meta"
+    # The historical shape: recorded branchless, but the copy is still on the
+    # managed pool's own structural branch.
+    git -C "$case_dir/wt" checkout -q -b fmlab/fmlab-pool-1
+    git -C "$case_dir/project" branch -D -- fm/task-x1 >/dev/null
+    [ "$route" != generic ] || configure_generic_pool_case "$case_dir"
+    wt=$(grep '^worktree=' "$case_dir/state/task-x1.meta" | cut -d= -f2-)
+    add_compatible_tasks_axi "$case_dir"
+
+    set +e
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+    rc=$?
+    set -e
+
+    expect_code 1 "$rc" \
+      "scout-attached-$route: an attached branchless scout must refuse cleanup"
+    assert_grep "branchless scout worktree is attached" "$case_dir/stderr" \
+      "scout-attached-$route: refusal did not cite the attached branchless scout"
+    [ -d "$wt" ] || fail "scout-attached-$route: refusal removed the worktree"
+    [ -f "$case_dir/state/task-x1.meta" ] \
+      || fail "scout-attached-$route: refusal cleared the task records"
+    [ "$(git -C "$wt" symbolic-ref --quiet --short HEAD)" = fmlab/fmlab-pool-1 ] \
+      || fail "scout-attached-$route: refusal changed the worktree's branch"
+    git -C "$case_dir/project" show-ref --verify --quiet refs/heads/fmlab/fmlab-pool-1 \
+      || fail "scout-attached-$route: refusal deleted the pool's structural branch"
+  done
+  pass "an attached branchless scout is refused on both provider routes, preserving the copy and records"
+}
+
+# The generic helper binds its own identities, so it must refuse the same
+# mismatch independently of teardown - reaching it directly changes nothing
+# about the slot, its provider state, or the structural branch.
+test_generic_helper_independently_refuses_attached_branchless_scout() {
+  local case_dir pool rc state wt
+  case_dir=$(make_case generic-helper-scout-attached)
+  write_meta "$case_dir" no-mistakes scout
+  git -C "$case_dir/wt" checkout -q -b fmlab/fmlab-pool-1
+  git -C "$case_dir/project" branch -D -- fm/task-x1 >/dev/null
+  configure_generic_pool_case "$case_dir"
+  wt=$(grep '^worktree=' "$case_dir/state/task-x1.meta" | cut -d= -f2-)
+  pool=$(dirname "$(dirname "$wt")")
+  state="$pool/treehouse-state.json"
+
+  set +e
+  FM_TREEHOUSE_RETURN_AUTHORIZED=1 \
+    "$GENERIC_RETURN" "$case_dir/project" "$wt" "$pool" - \
+      - discard "$case_dir/state/task-x1.meta" \
+      > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" \
+    "generic-helper-scout-attached: helper must refuse an attached branchless scout"
+  assert_grep "branchless scout worktree is attached to branch fmlab/fmlab-pool-1" \
+    "$case_dir/stderr" \
+    "generic-helper-scout-attached: refusal did not cite the independent disposition check"
+  [ -d "$wt" ] || fail "generic-helper-scout-attached: refusal removed the worktree"
+  [ "$(jq --arg path "$wt" '[.worktrees[]? | select(.path == $path)] | length' "$state")" = 1 ] \
+    || fail "generic-helper-scout-attached: refusal changed provider state"
+  git -C "$case_dir/project" show-ref --verify --quiet refs/heads/fmlab/fmlab-pool-1 \
+    || fail "generic-helper-scout-attached: refusal deleted the pool's structural branch"
+  pass "the generic provider independently refuses an attached branchless scout"
+}
+
 test_scout_promotion_records_exact_acquisition_branch() {
   local case_dir style rc
   for style in branchless absent legacy; do
@@ -2449,6 +2526,8 @@ test_router_failures_preserve_generic_worktrees
 test_generic_postcondition_failure_restores_worktree
 test_report_gated_scout_cleanup_remains_supported
 test_legacy_branchless_scout_metadata_remains_supported
+test_attached_branchless_scout_refuses_on_both_routes
+test_generic_helper_independently_refuses_attached_branchless_scout
 test_scout_promotion_records_exact_acquisition_branch
 test_scout_promotion_refuses_unproven_branch_identity
 test_scout_promotion_accepts_registered_symlink_project
