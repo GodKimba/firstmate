@@ -21,9 +21,10 @@
 # Logic, in order:
 #   1. Resolve worktree + backend target + kind from state/<id>.meta.
 #   2. Matching no-mistakes run for this crew's branch AND current code identity,
-#      active or terminal (from `axi status`, or the coarse `no-mistakes runs`
-#      fallback)? Branch name alone is not enough: a historical run on a reused
-#      branch whose head was rewritten or diverged must not be attributed.
+#      active from detailed `axi status`, or terminal from that status or the
+#      coarse `no-mistakes runs` fallback? Branch name alone is not enough: a
+#      historical run on a reused branch whose head was rewritten or diverged
+#      must not be attributed.
 #      A run matches when its head equals the worktree HEAD, or the worktree HEAD
 #      is an ancestor of the run head (pipeline fix commits advanced the run on
 #      the same line of history). A detailed active run whose isolated rebase/fix
@@ -393,10 +394,9 @@ nm_submission_head_matches_worktree() {  # <branch>
 # oriented text - no run id, no JSON/TOON, newest-first, columns
 # "<status> <branch> <short-sha> <date> [<pr-url>]" separated by runs of
 # spaces (verified: no quoting, so splitting on the first two whitespace runs
-# is exact) - but branch + coarse status is exactly what this predicate needs:
-# is a run for THIS branch active right now. Echoes the first (most recent)
-# matching row's status word (running/completed/cancelled/failed), or empty
-# when the branch has no run within FM_CREW_STATE_RUNS_LIMIT rows.
+# is exact). Echoes the first code-matched terminal row's status word
+# (completed/cancelled/failed), or empty when the newest row is running because
+# only detailed status can distinguish active work from a parked gate.
 nm_runs_status_for_branch() {  # <branch>
   local branch=$1 out row st rest br sha
   out=$(nm_run runs --limit "$FM_CREW_STATE_RUNS_LIMIT")
@@ -412,6 +412,7 @@ nm_runs_status_for_branch() {  # <branch>
     rest=$(trim "$rest")
     sha=${rest%% *}
     if [ "$br" = "$branch" ]; then
+      [ "$st" = running ] && return 0
       # Coarse rows have no gate detail, so current-code ancestry is required.
       nm_coarse_head_matches_worktree "$sha" || continue
       printf '%s' "$st"
@@ -516,15 +517,9 @@ if [ "$HAVE_RUN" = 1 ]; then
   CI_LOG_STATE=""
   RUN_STATUS=""
   if [ "$RUN_SOURCE" = coarse ]; then
-    # No step/gate detail is available from the plain runs list - only ever
-    # true/working, done, or failed. A crew genuinely parked at a gate still
-    # gets full detail once `axi status` reports its own branch again (e.g.
-    # once its own step is the most-recently-touched one), and its own
-    # needs-decision/blocked status-log append (a captain-relevant VERB) is
-    # surfaced through signal_reason_is_actionable regardless of this
-    # coarse-vs-full distinction, so a real gate is never silently missed.
+    # No step/gate detail is available from the plain runs list, so only
+    # terminal states reach this authoritative path.
     case "$COARSE_STATUS" in
-      running)   RUN_STATE=working; RUN_DETAIL="validating (background run)" ;;
       completed) RUN_STATE="done";  RUN_DETAIL="run completed" ;;
       failed)    RUN_STATE=failed;  RUN_DETAIL="run failed" ;;
       cancelled) RUN_STATE=failed;  RUN_DETAIL="run cancelled" ;;
