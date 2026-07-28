@@ -26,7 +26,7 @@ The workflow uses read-only contents permission, does not use `pull_request_targ
 |---|---|
 | Proven-isolated set (29 scripts) | `bin/fm-test-isolation-proof.sh --list` and `docs/fm-test-isolation-proof.md` |
 | Phase 1 serial durations | CI timing artifacts `fm-test-timing` from main after #825 / #832 / #834 |
-| Real-Herdr family | `bin/fm-test-run.sh --family real-herdr-gated` (dedicated required CI lane) |
+| Real-Herdr family | `bin/fm-test-run.sh --family real-herdr-gated` (dedicated nightly/manual complete-suite lane) |
 
 Phase 1 averages used for balance (mean of available serial `duration_ms` across those artifacts):
 
@@ -128,12 +128,10 @@ The exact commands were:
 ```sh
 gh-axi api GET /repos/GodKimba/firstmate/actions/permissions
 gh-axi api GET /repos/GodKimba/firstmate/actions/permissions/workflow
-gh-axi api GET '/repos/GodKimba/firstmate/actions/runs?event=pull_request&per_page=100' --jq '[.workflow_runs[] | select(.pull_requests[]?.number == 7)] | {count:length}'
-gh-axi api GET /repos/GodKimba/firstmate/commits/0f7d5b646b25a04a7c82c4a0141e73176a8252d3/check-runs --jq '{total_count}'
 ```
 
-The relevant output was `enabled: true`, `allowed_actions: all`, `default_workflow_permissions: read`, `can_approve_pull_request_reviews: false`, `count: 0`, and `total_count: 0`.
-This confirms the repository-level Actions switch is currently enabled while PR 7 still had no workflow runs and no check-runs at its inspected head.
+The relevant output was `enabled: true`, `allowed_actions: all`, `default_workflow_permissions: read`, and `can_approve_pull_request_reviews: false`.
+This confirms that the repository-level Actions settings were compatible with this read-only workflow at inspection time.
 Repository or organization settings remain outside this workflow change.
 
 ## Preserved boundaries
