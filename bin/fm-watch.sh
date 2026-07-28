@@ -533,7 +533,7 @@ heartbeat_scan_finds_actionable() {
   while IFS=$(printf '\t') read -r f task last; do
     [ -n "$f" ] || continue
     if [ "$(status_line_verb "$last")" = needs-decision ] \
-      && status_has_open_token_needs_decision "$f"; then
+      && status_latest_needs_decision_is_open_token_occurrence "$f"; then
       continue
     fi
     surfaced=$(cat "$(_hb_surfaced_path "$task")" 2>/dev/null || true)

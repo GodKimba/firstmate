@@ -1292,6 +1292,35 @@ test_retained_decision_surfaces_signal_and_heartbeat_once() {
   pass "retained decisions surface through signal and heartbeat once per occurrence while workers remain active"
 }
 
+test_malformed_decision_behind_open_decision_surfaces() {
+  local dir state fakebin out status_file instance marker pid queue
+  dir=$(make_case malformed-behind-open-decision); state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"
+  status_file="$state/malformed.status"
+  fm_decision_cutover_ensure_status "$status_file" \
+    || fail "could not establish malformed-decision signal fixture"
+  printf 'needs-decision [key=route]: captain must choose the route\n' >> "$status_file"
+  instance=$(status_open_token_needs_decisions "$status_file" | awk -F '\t' 'NR == 1 { print $2 }')
+  [ -n "$instance" ] || fail "valid predecessor decision was not folded open"
+  marker="$state/.hb-surfaced-decision-$instance"
+  printf '%s' "$instance" > "$marker"
+  printf 'needs-decision: choose a fallback [key=fallback]\n' >> "$status_file"
+  status_latest_needs_decision_is_open_token_occurrence "$status_file" \
+    && fail "malformed latest opening matched an unrelated folded occurrence"
+  export FM_FAKE_CREW_STATE='state: working · source: run-step · worker active'
+  watch_bg "$state" "$fakebin" "$out"
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "active worker caused a malformed decision behind an open request to be absorbed"
+  grep -F "signal: $status_file" "$out" >/dev/null \
+    || fail "malformed decision did not surface through live signal notification"
+  queue=$(cat "$state/.wake-queue")
+  printf '%s' "$queue" | grep "$(printf '\tsignal\t')" >/dev/null \
+    || fail "malformed decision did not enqueue an ordinary signal wake"
+  printf '%s' "$queue" | grep "$(printf '\tdecision\t')" >/dev/null \
+    && fail "already-surfaced predecessor decision was re-enqueued"
+  unset FM_FAKE_CREW_STATE
+  pass "malformed decisions behind open occurrences still surface while workers remain active"
+}
+
 # --- beacon stays fresh while absorbing -------------------------------------
 
 test_beacon_stays_fresh_while_absorbing() {
@@ -1413,6 +1442,7 @@ test_triage_log_size_cap_accepts_spaced_wc_counts
 test_heartbeat_no_change_absorbed
 test_heartbeat_backstop_surfaces_unsurfaced_status
 test_retained_decision_surfaces_signal_and_heartbeat_once
+test_malformed_decision_behind_open_decision_surfaces
 test_beacon_stays_fresh_while_absorbing
 test_afk_present_reverts_watcher_to_one_shot
 test_afk_paused_changed_pane_hands_off_plain_stale

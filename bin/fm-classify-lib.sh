@@ -560,6 +560,35 @@ EOF
   return 1
 }
 
+status_latest_needs_decision_is_open_token_occurrence() {  # <status-file>
+  local f=$1 line marker stripped latest='' position=0 latest_position=0
+  local stream='' latest_stream='' key instance open_key open_instance _summary
+  fm_decision_stream_id "$f" >/dev/null || return 1
+  while IFS= read -r line || [ -n "$line" ]; do
+    position=$((position + 1))
+    if marker=$(fm_decision_marker_line_id "$line"); then
+      stream=$marker
+      continue
+    fi
+    stripped=${line//[[:space:]]/}
+    [ -n "$stripped" ] || continue
+    latest=$line
+    latest_position=$position
+    latest_stream=$stream
+  done < "$f"
+  [ "$(status_line_verb "$latest")" = needs-decision ] || return 1
+  key=$(_fm_decision_key "$latest") || return 1
+  instance=$(fm_decision_instance_id "$latest_position" "$latest_stream") || return 1
+  while IFS=$'\t' read -r open_key open_instance _summary || [ -n "$open_key" ]; do
+    [ "$open_key" = "$key" ] || continue
+    [ "$open_instance" = "$instance" ] || continue
+    return 0
+  done <<EOF
+$(status_open_needs_decisions "$f")
+EOF
+  return 1
+}
+
 status_has_open_needs_decision() {  # <status-file>
   local key _instance _summary
   while IFS=$'\t' read -r key _instance _summary || [ -n "$key" ]; do
@@ -649,7 +678,7 @@ signal_reason_is_actionable() {  # <file> ...
     last=$(last_status_line "$f")
     [ -n "$last" ] || continue
     if [ "$(status_line_verb "$last")" = needs-decision ] \
-      && status_has_open_token_needs_decision "$f"; then
+      && status_latest_needs_decision_is_open_token_occurrence "$f"; then
       continue
     fi
     status_is_captain_relevant "$last" && return 0
