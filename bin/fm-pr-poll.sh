@@ -97,10 +97,10 @@ case "$provider" in
     # comes from the validated record rather than glab's configured default.
     # It cannot take a merge request URL the way gh does: that form shells out
     # to git for the current repository, and the watcher runs in no repository.
-    # The state is read from glab's own field output rather than its JSON,
-    # because plain glab has no field selector and firstmate does not require a
-    # JSON processor; only an exact "merged" wakes, so a changed format or an
-    # unreadable merge request stays silent instead of reporting a merge.
+    # The state is read from glab's top-level plain-output field rather than
+    # projecting its full JSON; only an exact "merged" wakes, so a changed
+    # format or an unreadable merge request stays silent instead of reporting
+    # a merge.
     raw=$(glab mr view "$number" -R "https://$host/$path" 2>/dev/null) || exit 0
     state=$(printf '%s\n' "$raw" | sed -n 's/^state:[[:space:]]*//p' | head -1) || exit 0
     [ "$state" = merged ] && printf '%s\n' merged

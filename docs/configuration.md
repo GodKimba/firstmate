@@ -253,18 +253,18 @@ Secondmate homes inherit this file from the primary, so a secondmate's own crewm
 On session start the first mate detects what its required toolchain is missing or too old and lists each problem with either an exact install command or manual instructions.
 It installs automatically supported tools only after you say go; manual-only tools remain for you to install from the printed instructions.
 Required tools come in two parts: a universal toolchain every home needs regardless of backend, and a per-backend delta that follows the runtime backend actually resolved for this home.
-The universal toolchain is node, git, gh with GitHub auth via `gh auth login`, no-mistakes v1.31.2 or newer, gh-axi v0.1.28 or newer, chrome-devtools-axi, lavish-axi, compatible tasks-axi per "Backlog backend" above, and quota-axi.
+The universal toolchain is node, git, gh with GitHub auth via `gh auth login`, jq, no-mistakes v1.31.2 or newer, gh-axi v0.1.28 or newer, chrome-devtools-axi, lavish-axi, compatible tasks-axi per "Backlog backend" above, and quota-axi.
 This section is the single owner of that universal toolchain list; backend guides' prerequisites point here and add only their backend-specific tools.
 In that list, no-mistakes runs the validation pipeline, gh-axi, chrome-devtools-axi, and lavish-axi cover GitHub, browser, and rich-review operations, and tasks-axi plus quota-axi back backlog mutations and quota-aware array dispatch.
 An installed gh-axi is compatible only when it meets that version floor and its `api --help` advertises `--jq`; otherwise bootstrap reports the normal `MISSING` update command and waits for explicit approval.
 The per-backend delta is required only for the backend resolved from `FM_BACKEND`, then `config/backend`, then runtime auto-detection, then default `tmux`, so a home is never told to install a tool an inactive backend or feature would need.
-That delta is owned in code by `fm_backend_required_tools` in `bin/fm-backend.sh`: the resolved backend's own session-provider CLI (`tmux`, `herdr`, `zellij`, `orca`, or `cmux`), `jq` for the JSON-emitting experimental adapters (`herdr`, `zellij`, `cmux`) whose spawn and liveness paths parse the backend's JSON output, and the `treehouse` worktree provider for every session-provider-only backend (`tmux`, `herdr`, `zellij`, `cmux`).
+That delta is owned in code by `fm_backend_required_tools` in `bin/fm-backend.sh`: the resolved backend's own session-provider CLI (`tmux`, `herdr`, `zellij`, `orca`, or `cmux`) and the `treehouse` worktree provider for every session-provider-only backend (`tmux`, `herdr`, `zellij`, `cmux`).
 Backend tool availability uses the adapter's own executable resolver, so bootstrap and spawn agree on supported non-`PATH` locations such as cmux's bundled CLI.
 An unknown resolved backend emits `BACKEND_INVALID` and blocks dispatch instead of silently dropping its dependency delta or falling back to tmux.
 Orca provides both the task worktree and terminal endpoint (see "Runtime backend" above), so `backend=orca` requires only `orca` on top of the universal toolchain and skips both `treehouse` and every other backend's session CLI.
 A herdr, zellij, or cmux home is therefore never told `tmux` is missing, and the `treehouse` durable-lease upgrade check runs only for the backends that actually use treehouse.
-When `config/crew-dispatch.json` exists, bootstrap also requires `jq` for dispatch profile validation.
-When X mode is opted in, bootstrap also requires `curl` and `jq` before arming the relay poll shim.
+When `config/crew-dispatch.json` exists, bootstrap uses the universal `jq` dependency for dispatch profile validation.
+When X mode is opted in, bootstrap also requires `curl` and uses the universal `jq` dependency before arming the relay poll shim.
 `tasks-axi` and `quota-axi` are required bootstrap tools in every profile, the same class as `lavish-axi`.
 An absent or incompatible `tasks-axi` reports `MISSING: tasks-axi (install: npm install -g tasks-axi)`; when `config/backlog-backend` is not `manual` and compatible `tasks-axi` is on `PATH`, bootstrap stays silent and firstmate uses its verbs for routine backlog mutations, otherwise it hand-edits `data/backlog.md` until installation is approved and completed.
 An absent `quota-axi` reports `MISSING: quota-axi (install: npm install -g quota-axi)`; firstmate cannot resolve a profile array until current quota output is available for every candidate.
@@ -288,6 +288,39 @@ When an allowlisted config item changes for an already-running home, it sends th
 The locked bootstrap inheritance pass uses the same per-home changed-set and reread path for already-running homes; see `secondmate-provisioning` for the single contract owner.
 That live discovery starts from `state/*.meta` records with `kind=secondmate`; `data/secondmates.md` only backfills `home=` for older or incomplete meta records.
 Skipped items, such as a destination checkout that does not yet gitignore the item, are visible warnings but not hard failures.
+
+## Subscription pool quota view (`/poolquota`)
+
+`/poolquota` reports how much subscription capacity the local account pool has left and whether every account is answering.
+It is read-only and display-only: it changes no dispatch profile, account selection, or proxy routing, and it never writes to the pool.
+
+Activation is deliberately minimal, so that a capacity question never becomes a reason to loosen the proxy's own security posture:
+
+- `quota-axi` must be installed, from the universal toolchain in "Toolchain" above.
+  It remains the sole owner of provider quota semantics; the view only presents what it reports per account.
+- The pool's account directory must be readable by the firstmate home's user.
+  It defaults to `~/.cli-proxy-api` and is overridable with `FM_POOL_QUOTA_DIR`.
+- Nothing else is required.
+  The adapter never contacts the proxy service or its Management API, so the proxy does not need to be running and its management interface does not need to be enabled.
+  A capacity read that fails is reported as a failed read, never as a reason to enable a management route or restart the service.
+
+Account discovery is generic.
+Every `*.json` directory entry is a candidate, each file's own type field selects the provider, and an account the pool has disabled is skipped and reported as skipped.
+The `disabled` field must be a boolean; malformed or missing values are refused before the account can be measured.
+No account identity, file name, or account count is assumed, so adding or retiring a pooled account needs no configuration change.
+
+Account files are treated as hostile input.
+A candidate that is a symlink, is not a regular file, is empty, exceeds `FM_POOL_QUOTA_MAX_BYTES`, or does not parse into the expected shape is refused with a reason rather than read further.
+Credentials are copied file-to-file into a private per-account workspace that is removed on every exit path, never appear on a command line or in the environment, and never reach output, the panel, or the shared quota cache.
+Account identity uses a stable masked label across runs, and a full address is never printed or written.
+
+`bin/fm-pool-quota.sh --help` owns the exact flags, bounds, environment overrides, and output contract.
+
+Every `/poolquota` invocation regenerates the private local panel from its fresh read and opens it through the supported local path.
+The panel artifact is private local operational detail about paid subscriptions.
+Open it only with `lavish-axi <path>`; it carries no credential and no full account address, but it must not be published, shared, or attached to an issue, a pull request, or a commit.
+
+GitHub stays with `gh-axi`; this view is subscription quota only.
 
 ## X mode (.env)
 
@@ -451,6 +484,11 @@ FM_FLEET_SYNC_PACKED_REFS_LOCK_AGE_SECS=30       # min mtime age before fm-fleet
 FM_BUSY_REGEX=          # optional global override for every harness-scoped busy-pane matcher; unset uses each recorded harness's verified signature
 FM_COMPOSER_IDLE_RE=    # optional empty-composer regex, applied after ghost and border stripping
 FM_COMPOSER_GHOST_LUMA_MAX=128   # fleet-wide: max perceived luminance (0.299R+0.587G+0.114B, 0-255) for a TRUECOLOR foreground to count as de-emphasised ghost/placeholder text and be stripped; dim/faint (SGR 2) is stripped regardless. Assumes a dark terminal theme (bin/fm-composer-lib.sh's fm_composer_strip_ghost, shared by the tmux and herdr composer readers)
+FM_POOL_QUOTA_DIR=~/.cli-proxy-api   # subscription-pool account directory read by /poolquota
+FM_POOL_QUOTA_MAX_BYTES=65536        # per-file size bound; a larger account file is refused before JSON parsing
+FM_POOL_QUOTA_TIMEOUT=25             # seconds allowed per account quota read
+FM_POOL_QUOTA_NOW=                   # optional epoch pin for deterministic /poolquota output, mainly for tests
+FM_POOL_QUOTA_BIN=quota-axi          # quota-axi command name; it owns provider quota semantics
 GROK_HOME=              # optional Grok config home for firstmate's global grok turn-end hook; defaults to ~/.grok
 FM_SEND_RETRIES=3       # fm-send Enter-retry attempts after typing the line once
 FM_SEND_SLEEP=0.4       # seconds between fm-send submit checks

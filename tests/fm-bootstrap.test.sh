@@ -4,9 +4,10 @@
 # Bootstrap prints one block or line per actionable problem, optional verbose
 # BOOTSTRAP_INFO fact, or completed bootstrap no-action fact and is silent when
 # all is well. firstmate consumes the exact 'MISSING: treehouse (install: ...)',
-# 'MISSING: gh-axi (install: ...)', 'MISSING: tasks-axi (install: ...)',
-# 'MISSING: quota-axi (install: ...)', and 'BOOTSTRAP_INFO: ...' lines, so those
-# contracts are pinned verbatim. The cases are table-driven over the inputs that
+# 'MISSING: jq (install: ...)', 'MISSING: gh-axi (install: ...)',
+# 'MISSING: tasks-axi (install: ...)', 'MISSING: quota-axi (install: ...)', and
+# 'BOOTSTRAP_INFO: ...' lines, so those contracts are pinned verbatim. The cases
+# are table-driven over the inputs that
 # vary: whether `treehouse get --help` advertises --lease, which gh-axi version
 # and api --jq capability is on PATH, which (if any) tasks-axi version is on
 # PATH, whether tasks-axi update advertises --archive-body, whether its mv help
@@ -39,7 +40,7 @@ unset TMUX TMUX_PANE HERDR_ENV HERDR_PANE_ID HERDR_SESSION HERDR_SOCKET_PATH \
 make_fake_toolchain() {
   local dir=$1 fakebin
   fakebin=$(fm_fakebin "$dir")
-  fm_fake_exit0 "$fakebin" tmux node gh-axi chrome-devtools-axi lavish-axi
+  fm_fake_exit0 "$fakebin" tmux node jq gh-axi chrome-devtools-axi lavish-axi
   cat > "$fakebin/gh" <<'SH'
 #!/usr/bin/env bash
 if [ "${1:-}" = auth ] && [ "${2:-}" = status ]; then
@@ -409,8 +410,8 @@ test_orca_backend_gates_orca_tool_only_when_selected() {
   pass "bootstrap: backend=orca gates the Orca CLI without requiring it on the default backend"
 }
 
-# Build a fake toolchain with tmux REMOVED and the named backend session CLI(s)
-# plus jq added, so a backend that must NOT require tmux can be proven silent
+# Build a fake universal toolchain with tmux REMOVED and the named backend
+# session CLI(s), so a backend that must NOT require tmux can be proven silent
 # with tmux absent. Echoes the fakebin dir. The removed tmux is what makes these
 # cases catch the old "everything but orca demands tmux" bug: with the buggy
 # TOOLS list a herdr/zellij/cmux home would report MISSING: tmux here.
@@ -419,15 +420,15 @@ make_fake_toolchain_no_tmux() {  # <case-dir> <extra-cli...>
   shift
   fakebin=$(make_fake_toolchain "$dir")
   rm -f "$fakebin/tmux"
-  fm_fake_exit0 "$fakebin" jq "$@"
+  fm_fake_exit0 "$fakebin" "$@"
   printf '%s\n' "$fakebin"
 }
 
 test_session_provider_backends_do_not_require_tmux() {
   local backend cli case_dir fakebin out
-  # herdr/zellij/cmux are session providers only: they require their own CLI, jq,
-  # and treehouse, never tmux. With all genuine deps present and tmux absent,
-  # bootstrap must be silent.
+  # herdr/zellij/cmux are session providers only: beyond the universal toolchain
+  # they require their own CLI and treehouse, never tmux. With all genuine deps
+  # present and tmux absent, bootstrap must be silent.
   while IFS='^' read -r backend cli; do
     [ -n "$backend" ] || continue
     case_dir="$TMP_ROOT/$backend-no-tmux"
@@ -443,7 +444,7 @@ herdr^herdr
 zellij^zellij
 cmux^cmux
 ROWS
-  pass "bootstrap: session-provider backends require their own CLI + jq + treehouse, never tmux"
+  pass "bootstrap: session-provider backends require their own CLI plus treehouse, never tmux"
 }
 
 test_session_provider_backends_gate_own_cli_not_tmux() {
@@ -456,7 +457,8 @@ test_session_provider_backends_gate_own_cli_not_tmux() {
     mkdir -p "$case_dir/home/config"
     printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
     printf '%s\n' "$backend" > "$case_dir/home/config/backend"
-    # Toolchain has jq + treehouse but NOT the session CLI and NOT tmux.
+    # The universal toolchain and treehouse are present, but the session CLI and
+    # tmux are absent.
     fakebin=$(make_fake_toolchain_no_tmux "$case_dir")
     out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
       FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
@@ -519,22 +521,23 @@ test_unknown_backend_reports_invalid_configuration() {
   pass "bootstrap: unknown resolved backends fail closed with an actionable diagnostic"
 }
 
-test_json_backends_require_jq_not_tmux() {
-  local backend case_dir fakebin bash_env out
-  # herdr/zellij/cmux parse their backend's JSON output, so jq is a genuine dep.
+test_all_backends_require_universal_jq() {
+  local backend cli case_dir fakebin bash_env out count
   # jq lives in a system BASE_PATH dir on many hosts, so force it missing with a
-  # command()/jq() override (the same technique the git-required case uses) to keep
-  # the assertion host-independent.
-  while IFS='^' read -r backend; do
+  # command()/jq() override (the same technique the git-required case uses) to
+  # keep the assertion host-independent.
+  while IFS='^' read -r backend cli; do
     [ -n "$backend" ] || continue
     case_dir="$TMP_ROOT/$backend-missing-jq"
     mkdir -p "$case_dir/home/config"
     printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
     printf '%s\n' "$backend" > "$case_dir/home/config/backend"
-    # Session CLI present, tmux absent, jq deliberately NOT stubbed and masked below.
+    printf '%s\n' '{"default":[{"harness":"codex"}]}' > "$case_dir/home/config/crew-dispatch.json"
     fakebin=$(make_fake_toolchain "$case_dir")
-    rm -f "$fakebin/tmux"
-    fm_fake_exit0 "$fakebin" "$backend"
+    if [ "$backend" != tmux ]; then
+      rm -f "$fakebin/tmux"
+      fm_fake_exit0 "$fakebin" "$cli"
+    fi
     bash_env="$case_dir/no-jq.bash"
     cat > "$bash_env" <<'SH'
 command() {
@@ -549,14 +552,19 @@ jq() {
 SH
     out=$(PATH="$fakebin:$BASE_PATH" BASH_ENV="$bash_env" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
       FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
-    assert_contains "$out" "MISSING: jq" "backend=$backend must fail closed on missing jq"
+    assert_contains "$out" "MISSING: jq (install: brew install jq  # or the platform's package manager)" \
+      "backend=$backend must fail closed on the universal jq dependency"
+    count=$(printf '%s\n' "$out" | awk '/^MISSING: jq / { n++ } END { print n + 0 }')
+    [ "$count" -eq 1 ] || fail "backend=$backend should report missing universal jq once, got: $out"
     assert_not_contains "$out" "MISSING: tmux" "backend=$backend must not demand tmux when jq is missing"
   done <<'ROWS'
-herdr
-zellij
-cmux
+tmux^tmux
+herdr^herdr
+zellij^zellij
+orca^orca
+cmux^cmux
 ROWS
-  pass "bootstrap: JSON-emitting backends require jq (their genuine dep), never tmux"
+  pass "bootstrap: every backend requires universal jq exactly once"
 }
 
 test_treehouse_lease_check_follows_resolved_backend() {
@@ -851,7 +859,7 @@ test_session_provider_backends_gate_own_cli_not_tmux
 test_herdr_install_requires_manual_action
 test_cmux_bundled_cli_satisfies_dependency
 test_unknown_backend_reports_invalid_configuration
-test_json_backends_require_jq_not_tmux
+test_all_backends_require_universal_jq
 test_treehouse_lease_check_follows_resolved_backend
 test_fleet_sync_timeout_scales_with_origin_backed_project_count
 test_fleet_sync_timeout_floor_preserves_small_fleets
