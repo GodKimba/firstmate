@@ -2,9 +2,10 @@
 # Remove one explicitly authorized Firstmate task worktree from a generic
 # Treehouse pool without forcing Git worktree removal. The helper independently
 # binds canonical project, repository, pool-slot, task-meta, branch/disposition,
-# clean-state, and applicable landed-head identities before removal, updates
-# provider state under its lock, and reports failed removal or postconditions
-# as non-zero.
+# clean-state, and applicable landed-head identities before removal. Clean-state
+# excludes standard Git-ignored infrastructure but refuses tracked changes and
+# untracked non-ignored paths. The helper updates provider state under its lock
+# and reports failed removal or postconditions as non-zero.
 # Usage:
 #   fm-treehouse-generic-return.sh <project> <worktree> <pool> <branch> <validated-head|-> <landed|discard> <task-meta>
 set -eu
@@ -213,7 +214,7 @@ fi
 
 tracked=$(git -C "$WORKTREE" status --porcelain --untracked-files=no 2>/dev/null) \
   || die "cannot inspect tracked worktree state"
-untracked=$(git -C "$WORKTREE" ls-files --others 2>/dev/null) \
+untracked=$(git -C "$WORKTREE" ls-files --others --exclude-standard 2>/dev/null) \
   || die "cannot inspect untracked worktree state"
 [ -z "$tracked" ] && [ -z "$untracked" ] \
   || die "generic Treehouse worktree is not clean"
