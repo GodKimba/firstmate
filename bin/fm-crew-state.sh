@@ -397,7 +397,7 @@ CI_EVIDENCE=""
 # shellcheck disable=SC2016  # jq expression: $c is jq's binding, not a shell variable
 CI_CHECKS_QUERY='(.statusCheckRollup // []) as $c
 | if ($c|length) == 0 then "none"
-  elif any($c[]; (.conclusion // .state // "") as $s | ($s=="FAILURE" or $s=="ERROR" or $s=="TIMED_OUT" or $s=="CANCELLED" or $s=="ACTION_REQUIRED")) then "failing"
+  elif any($c[]; (.conclusion // .state // "") as $s | ($s=="FAILURE" or $s=="ERROR" or $s=="TIMED_OUT" or $s=="CANCELLED" or $s=="ACTION_REQUIRED" or $s=="STARTUP_FAILURE" or $s=="STALE")) then "failing"
   elif any($c[]; ((.status // "") != "COMPLETED") and ((.state // "") != "SUCCESS")) then "pending"
   else "passing" end'
 
@@ -471,6 +471,17 @@ ci_note_withheld() {
   else
     RUN_DETAIL=$(ci_withheld_note)
   fi
+}
+
+CI_READY_LOG_DETAIL=""
+ci_ready_log_allowed() {  # [suffix]
+  CI_READY_LOG_DETAIL=$(status_line_note "$LOG_LINE")
+  if [ -n "${1:-}" ]; then
+    CI_READY_LOG_DETAIL="$CI_READY_LOG_DETAIL${SEP}$1"
+  fi
+  ci_green_ready_allowed && return 0
+  CI_READY_LOG_DETAIL="$CI_READY_LOG_DETAIL${SEP}$(ci_withheld_note)"
+  return 1
 }
 
 # Coarse fallback for cross-branch attribution. `no-mistakes axi status` (bare)
@@ -725,8 +736,8 @@ if [ "$HAVE_RUN" = 1 ]; then
   # with the same forge corroboration every other green-ready path needs.
   if [ "$RUN_STATE" = working ] && log_reports_ci_ready; then
     if [ "$RUN_SOURCE" = coarse ]; then
-      if ci_green_ready_allowed; then
-        emit "done" status-log "$(status_line_note "$LOG_LINE")${SEP}run still monitoring PR"
+      if ci_ready_log_allowed "run still monitoring PR"; then
+        emit "done" status-log "$CI_READY_LOG_DETAIL"
       fi
       ci_note_withheld
     else
@@ -739,8 +750,8 @@ if [ "$HAVE_RUN" = 1 ]; then
         CI_LOG_STATE=not-ready
       fi
       if [ "$CI_LOG_STATE" != not-ready ]; then
-        if ci_green_ready_allowed; then
-          emit "done" status-log "$(status_line_note "$LOG_LINE")${SEP}run still monitoring PR"
+        if ci_ready_log_allowed "run still monitoring PR"; then
+          emit "done" status-log "$CI_READY_LOG_DETAIL"
         fi
         ci_note_withheld
       fi
@@ -792,6 +803,12 @@ fi
 if [ -n "$LOG_VERB" ]; then
   LOG_STATE=$(map_log_state "$LOG_LINE")
   if [ "$LOG_STATE" != unknown ]; then
+    if [ "$LOG_STATE" = "done" ] && log_reports_ci_ready; then
+      if ci_ready_log_allowed; then
+        emit "done" status-log "$CI_READY_LOG_DETAIL"
+      fi
+      emit working status-log "$CI_READY_LOG_DETAIL"
+    fi
     emit "$LOG_STATE" status-log "$(status_line_note "$LOG_LINE")"
   fi
 fi

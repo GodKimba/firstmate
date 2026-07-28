@@ -126,15 +126,22 @@ exit 0
 SH
   # Fake `gh` for the forge check-run probe behind every green-ready verdict.
   # Mirrors the real surface the helper uses - `gh pr view <url> --json
-  # statusCheckRollup -q <jq>` with gh's builtin jq evaluating the classifier -
-  # by serving the already-classified token FM_FAKE_GH_CHECKS. Empty means the
-  # probe itself fails (auth, network, an unknown PR), which the helper must
-  # read as unreadable rather than green.
+  # statusCheckRollup -q <jq>` with gh's builtin jq evaluating the classifier.
+  # FM_FAKE_GH_CONCLUSION verifies that the query classifies one raw conclusion;
+  # otherwise FM_FAKE_GH_CHECKS serves an already-classified token. Empty means
+  # the probe itself fails, which must read as unreadable rather than green.
   cat > "$fb/gh" <<'SH'
 #!/usr/bin/env bash
 set -u
 printf '%s\n' "$*" >> "${FM_FAKE_GH_CALLS:-/dev/null}"
 [ "${FM_FAKE_GH_SLEEP:-0}" = 1 ] && sleep 30
+if [ -n "${FM_FAKE_GH_CONCLUSION:-}" ]; then
+  case "$*" in
+    *"$FM_FAKE_GH_CONCLUSION"*) printf 'failing\n' ;;
+    *) printf 'passing\n' ;;
+  esac
+  exit 0
+fi
 [ -n "${FM_FAKE_GH_CHECKS:-}" ] || exit 1
 printf '%s\n' "$FM_FAKE_GH_CHECKS"
 SH
@@ -184,9 +191,10 @@ reset_fakes() {
   FM_FAKE_GH_CHECKS=passing
   FM_FAKE_GH_CALLS=""
   FM_FAKE_GH_SLEEP=0
+  FM_FAKE_GH_CONCLUSION=""
   export FM_FAKE_AXI_STATUS FM_FAKE_AXI_STATUS_RUN FM_FAKE_RUNS_LIST FM_FAKE_BUSY FM_FAKE_TMUX_MISSING
   export FM_FAKE_HERDR_BUSY FM_FAKE_HERDR_MISSING FM_FAKE_HERDR_AGENT_STATUS FM_FAKE_CI_LOGS
-  export FM_FAKE_GH_CHECKS FM_FAKE_GH_CALLS FM_FAKE_GH_SLEEP
+  export FM_FAKE_GH_CHECKS FM_FAKE_GH_CALLS FM_FAKE_GH_SLEEP FM_FAKE_GH_CONCLUSION
 }
 
 # --- run-object fixtures (TOON, as `no-mistakes axi status` emits) -----------
@@ -599,6 +607,38 @@ test_ci_green_marker_with_failing_checks_stays_working() {
   pass "a green ci marker with a failing forge check stays working"
 }
 
+test_ci_green_marker_with_startup_failure_stays_working() {
+  reset_fakes
+  local d; d=$(new_case ci-green-startup-failure)
+  make_repo_on_branch "$d/wt" fm/feat-cistartupfailure
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-cistartupfailure.meta" "window=fm:fm-feat-cistartupfailure" "worktree=$d/wt" "kind=ship" "mode=no-mistakes"
+  FM_FAKE_AXI_STATUS="$(run_ci_monitoring fm/feat-cistartupfailure)"
+  FM_FAKE_CI_LOGS="all CI checks passed - still monitoring until merged or closed"
+  FM_FAKE_GH_CONCLUSION=STARTUP_FAILURE
+  local out; out=$(run_crew_state "$d" feat-cistartupfailure)
+  assert_contains "$out" "state: working" "startup-failed check -> working"
+  assert_not_contains "$out" "state: done" "startup-failed check must not read as done"
+  assert_contains "$out" "a check failed" "startup-failed check names the failure"
+  pass "a startup-failed forge check stays working"
+}
+
+test_ci_green_marker_with_stale_check_stays_working() {
+  reset_fakes
+  local d; d=$(new_case ci-green-stale)
+  make_repo_on_branch "$d/wt" fm/feat-cistale
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-cistale.meta" "window=fm:fm-feat-cistale" "worktree=$d/wt" "kind=ship" "mode=no-mistakes"
+  FM_FAKE_AXI_STATUS="$(run_ci_monitoring fm/feat-cistale)"
+  FM_FAKE_CI_LOGS="all CI checks passed - still monitoring until merged or closed"
+  FM_FAKE_GH_CONCLUSION=STALE
+  local out; out=$(run_crew_state "$d" feat-cistale)
+  assert_contains "$out" "state: working" "stale check -> working"
+  assert_not_contains "$out" "state: done" "stale check must not read as done"
+  assert_contains "$out" "a check failed" "stale check names the failure"
+  pass "a stale forge check stays working"
+}
+
 # An unreadable probe (auth expired, network down, the PR gone) is not evidence
 # either. Absence of a verdict must never become a green one.
 test_ci_green_marker_with_unreadable_checks_stays_working() {
@@ -658,6 +698,41 @@ EOF
   assert_not_contains "$out" "state: done" "coarse path must not claim green from the log alone"
   assert_contains "$out" "no check runs reported" "coarse withheld report names the missing evidence"
   pass "the coarse ready path also requires forge evidence"
+}
+
+test_no_run_ci_ready_done_log_with_zero_check_runs_stays_working() {
+  reset_fakes
+  local d; d=$(new_case no-run-ready-zero-runs)
+  make_repo_on_branch "$d/wt" fm/feat-norunzero
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-norunzero.meta" "window=fm:fm-feat-norunzero" "worktree=$d/wt" "kind=ship" "mode=no-mistakes"
+  printf 'done: PR https://github.com/o/r/pull/5 checks green\n' > "$d/state/feat-norunzero.status"
+  FM_FAKE_GH_CHECKS=none
+  local out; out=$(run_crew_state "$d" feat-norunzero)
+  assert_contains "$out" "state: working" "no-run checks-green report with zero check runs -> working"
+  assert_contains "$out" "source: status-log" "no-run withheld report stays status-log sourced"
+  assert_not_contains "$out" "state: done" "no-run status line must not claim green without evidence"
+  assert_contains "$out" "no check runs reported" "no-run withheld report names the missing evidence"
+  pass "the no-run ready path also requires forge evidence"
+}
+
+test_no_run_direct_pr_mode_keeps_its_ready_signal() {
+  reset_fakes
+  local d calls; d=$(new_case no-run-direct-pr-ready)
+  make_repo_on_branch "$d/wt" fm/feat-norundirectpr
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-norundirectpr.meta" "window=fm:fm-feat-norundirectpr" "worktree=$d/wt" "kind=ship" "mode=direct-PR"
+  printf 'done: PR https://github.com/o/r/pull/5 checks green\n' > "$d/state/feat-norundirectpr.status"
+  FM_FAKE_GH_CHECKS=none
+  FM_FAKE_GH_CALLS="$d/gh.calls"
+  : > "$FM_FAKE_GH_CALLS"
+  local out; out=$(run_crew_state "$d" feat-norundirectpr)
+  assert_contains "$out" "state: done" "no-run direct-PR ready signal is unchanged"
+  assert_contains "$out" "source: status-log" "no-run direct-PR remains status-log sourced"
+  assert_contains "$out" "checks green" "no-run direct-PR keeps its reported detail"
+  calls=$(awk 'END { print NR + 0 }' "$FM_FAKE_GH_CALLS" 2>/dev/null || echo 0)
+  [ "$calls" -eq 0 ] || fail "no-run direct-PR mode probed the forge for checks ($calls calls)"
+  pass "no-run direct-PR keeps its ready signal and makes no forge call"
 }
 
 # The pipeline's own terminal "validated, CI green, not merged yet" outcome is
@@ -1662,9 +1737,13 @@ test_ci_monitoring_no_checks_marker_stays_working
 test_ci_green_marker_with_zero_check_runs_stays_working
 test_ci_green_marker_with_pending_checks_stays_working
 test_ci_green_marker_with_failing_checks_stays_working
+test_ci_green_marker_with_startup_failure_stays_working
+test_ci_green_marker_with_stale_check_stays_working
 test_ci_green_marker_with_unreadable_checks_stays_working
 test_ci_ready_done_log_with_zero_check_runs_stays_working
 test_coarse_ci_ready_done_log_with_zero_check_runs_stays_working
+test_no_run_ci_ready_done_log_with_zero_check_runs_stays_working
+test_no_run_direct_pr_mode_keeps_its_ready_signal
 test_checks_passed_outcome_with_zero_check_runs_stays_working
 test_checks_passed_outcome_with_green_checks_surfaces_done
 test_direct_pr_mode_keeps_its_ready_signal
