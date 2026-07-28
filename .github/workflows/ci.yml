@@ -13,9 +13,8 @@ permissions:
   contents: read
 
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
-  # Manual full-suite runs may represent distinct sensitive-change proofs, so
-  # serialize rather than cancel them. Routine runs keep only the newest ref.
+  group: ci-${{ github.workflow }}-${{ github.event_name }}-${{ github.event_name == 'workflow_dispatch' && github.run_id || github.event.pull_request.number || github.ref }}
+  # Manual full-suite runs use per-run groups; routine runs coalesce by PR or ref.
   cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' }}
 
 jobs:

@@ -32,11 +32,13 @@ test_triggers_permissions_and_concurrency() {
   assert_regex '^  contents: read$' "$WORKFLOW" "workflow must retain read-only contents permission"
   assert_not_regex 'secrets\.' "$WORKFLOW" "workflow must not consume repository secrets"
   assert_regex '^concurrency:$' "$WORKFLOW" "workflow concurrency control is missing"
-  assert_regex 'github\.workflow.*github\.event_name.*github\.event\.pull_request\.number \|\| github\.ref' \
-    "$WORKFLOW" "concurrency group is not scoped by workflow, event, and ref or PR"
+  assert_regex "group:.*github\\.event_name == 'workflow_dispatch' && github\\.run_id" \
+    "$WORKFLOW" "manual full-suite runs do not have run-specific concurrency groups"
+  assert_regex 'group:.*github\.run_id \|\| github\.event\.pull_request\.number \|\| github\.ref' \
+    "$WORKFLOW" "routine concurrency does not fall back to PR or ref grouping"
   assert_regex "cancel-in-progress:.*github.event_name != 'workflow_dispatch'" \
     "$WORKFLOW" "superseded routine runs are not cancelled safely"
-  pass "CI triggers, public-PR permissions, and ref-scoped cancellation stay constrained"
+  pass "CI triggers, permissions, routine cancellation, and distinct manual proofs stay constrained"
 }
 
 test_fast_proof() {

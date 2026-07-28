@@ -15,7 +15,7 @@ The production shard evidence totals about 65 seconds of serial script time per 
 The complete suite runs nightly at the cron declared in the workflow and on `workflow_dispatch` for sensitive changes and deliberate full validation.
 It retains both portable parallel shards, the portable serial remainder, the real-Herdr family, stock macOS Bash compatibility, lint, repository invariants, and the complete-partition guard.
 Routine runs are grouped by workflow, event, and ref or pull request and cancel older superseded runs.
-Manual complete-suite runs share the same concurrency grouping but are serialized rather than cancelled because two invocations may represent distinct requested proofs.
+Manual complete-suite runs include their run ID in the concurrency group so overlapping invocations remain distinct requested proofs.
 
 All jobs use GitHub-hosted standard `ubuntu-latest` or `macos-latest` runners.
 The workflow uses read-only contents permission, does not use `pull_request_target`, and does not consume secrets.
