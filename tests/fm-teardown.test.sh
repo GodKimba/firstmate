@@ -39,17 +39,21 @@
 #   (p) fm-pr-check when local HEAD lags                        -> record remote PR head
 #   (q) no-mistakes + NO pr= recorded, PR discovered by branch  -> ALLOW  (yolo/no-CI merge)
 #   (r) no-mistakes + open PR with auto-merge enabled           -> REFUSE (not landed)
+#   (s) landed + ignored files from standard Git exclude sources -> ALLOW (ignore fix)
+#   (t) landed + untracked non-ignored file                      -> REFUSE (safety)
 #
+# The cleanliness helper runs before runtime endpoint closure and provider routing,
+# so these cases cover every non-forced ordinary ship path that reaches cleanup.
 # Also covers backlog teardown-lock-race: a git index.lock left in the worktree by a
 # killed crew process (bin/fm-teardown.sh's teardown_treehouse_return).
-#   (s) provably-stale index.lock (old mtime, no live holder) -> lock removed, ALLOW
-#   (t) index.lock with a live holder, any age                -> lock kept, REFUSE
-#   (u) lsof error while checking index.lock                  -> lock kept, REFUSE
-#   (v) dirty worktree after stale lock cleanup               -> lock removed, REFUSE
-#   (w) non-linked repo index.lock                            -> lock removed, ALLOW
-#   (x) index.lock mtime read failure                         -> lock kept, REFUSE
-#   (y) transient lock cleared after first failed return      -> retry ALLOW
-#   (z) persistent lock (never clears, not provably stale)    -> REFUSE loudly
+#   (u) provably-stale index.lock (old mtime, no live holder) -> lock removed, ALLOW
+#   (v) index.lock with a live holder, any age                -> lock kept, REFUSE
+#   (w) lsof error while checking index.lock                  -> lock kept, REFUSE
+#   (x) dirty worktree after stale lock cleanup               -> lock removed, REFUSE
+#   (y) non-linked repo index.lock                            -> lock removed, ALLOW
+#   (z) index.lock mtime read failure                         -> lock kept, REFUSE
+#   (aa) transient lock cleared after first failed return     -> retry ALLOW
+#   (ab) persistent lock (never clears, not provably stale)   -> REFUSE loudly
 set -u
 
 # shellcheck source=tests/lib.sh disable=SC1091
@@ -1001,6 +1005,79 @@ test_content_fallback_refreshes_stale_origin_ref() {
   expect_code 0 "$rc" "content-stale-ref: teardown should use the freshly fetched default branch"
   ! grep -q REFUSED "$case_dir/stderr" || fail "content-stale-ref: teardown printed a REFUSED line"
   pass "content fallback refreshes origin default before comparing trees"
+}
+
+test_ignored_infrastructure_from_standard_excludes_allows() {
+  local case_dir rc source
+  for source in gitignore info-exclude global-excludes; do
+    case_dir=$(make_case "ignored-$source")
+    write_meta "$case_dir" no-mistakes ship
+    wt_commit "$case_dir" "landed ignored-infrastructure work"
+    git -C "$case_dir/wt" push -q origin fm/task-x1
+    git -C "$case_dir/project" fetch -q origin
+
+    case "$source" in
+      gitignore)
+        printf '%s\n' '.env' '.eslintcache' 'node_modules/' > "$case_dir/wt/.gitignore"
+        git -C "$case_dir/wt" add .gitignore
+        git -C "$case_dir/wt" -c user.email=t@t -c user.name=t commit -q -m 'ignore runtime infrastructure'
+        git -C "$case_dir/wt" push -q origin fm/task-x1
+        git -C "$case_dir/project" fetch -q origin
+        ;;
+      info-exclude)
+        printf '%s\n' '.env' '.eslintcache' 'node_modules/' >> "$case_dir/project/.git/info/exclude"
+        ;;
+      global-excludes)
+        printf '%s\n' '.env' '.eslintcache' 'node_modules/' > "$case_dir/global-excludes"
+        git -C "$case_dir/wt" config core.excludesFile "$case_dir/global-excludes"
+        ;;
+    esac
+    printf '%s\n' 'runtime secret' > "$case_dir/wt/.env"
+    printf '%s\n' 'cache' > "$case_dir/wt/.eslintcache"
+    mkdir -p "$case_dir/wt/node_modules/package"
+    printf '%s\n' 'dependency' > "$case_dir/wt/node_modules/package/index.js"
+
+    [ -z "$(git -C "$case_dir/wt" status --porcelain)" ] \
+      || fail "ignored-$source: fixture is not clean under ordinary git status"
+    [ -z "$(git -C "$case_dir/wt" ls-files --others --exclude-standard)" ] \
+      || fail "ignored-$source: standard excludes did not hide fixture infrastructure"
+    [ -n "$(git -C "$case_dir/wt" ls-files --others)" ] \
+      || fail "ignored-$source: counterfactual did not expose ignored files without exclude handling"
+
+    set +e
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+    rc=$?
+    set -e
+
+    expect_code 0 "$rc" "ignored-$source: standard Git excludes should not make a clean worktree dirty"
+    ! grep -q REFUSED "$case_dir/stderr" \
+      || fail "ignored-$source: teardown printed a REFUSED line"
+  done
+  pass "ignored runtime infrastructure from every standard Git exclude source does not block cleanup"
+}
+
+test_untracked_non_ignored_file_refuses() {
+  local case_dir rc
+  case_dir=$(make_case untracked-non-ignored)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit "$case_dir" "landed before untracked file"
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  git -C "$case_dir/project" fetch -q origin
+  printf '%s\n' 'uncommitted work' > "$case_dir/wt/notes.txt"
+
+  [ "$(git -C "$case_dir/wt" ls-files --others --exclude-standard)" = notes.txt ] \
+    || fail "untracked-non-ignored: fixture file was unexpectedly excluded"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "untracked-non-ignored: teardown must refuse an untracked non-ignored file"
+  assert_grep "uncommitted changes" "$case_dir/stderr" \
+    "untracked-non-ignored: refusal did not cite uncommitted changes"
+  [ -f "$case_dir/wt/notes.txt" ] || fail "untracked-non-ignored: refusal discarded the file"
+  pass "untracked non-ignored files remain protected from cleanup"
 }
 
 test_dirty_worktree_refuses() {
@@ -2174,6 +2251,8 @@ test_pr_check_does_not_refresh_stale_pr_head
 test_pr_check_records_remote_head_when_local_lags
 test_content_in_default_fallback_allows
 test_content_fallback_refreshes_stale_origin_ref
+test_ignored_infrastructure_from_standard_excludes_allows
+test_untracked_non_ignored_file_refuses
 test_dirty_worktree_refuses
 test_provider_refusal_preserves_task_records
 test_late_dirty_mutation_after_quiesce_refuses

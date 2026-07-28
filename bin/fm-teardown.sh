@@ -21,7 +21,10 @@
 # by itself causes a false refusal of landed work.
 # A gh lookup error falls back to the content check; if that is also inconclusive,
 # teardown refuses rather than risk discarding unlanded work.
-# Uncommitted changes are never landed.
+# Uncommitted tracked files and untracked non-ignored files are never landed.
+# Standard Git exclude sources remain ordinary worktree infrastructure and do not
+# make an otherwise clean worktree unsafe to remove. Firstmate-owned generated
+# control artifacts keep their narrower exact-path handling below.
 # local-only projects additionally accept work merged into the local default
 # branch (firstmate performs that merge after configured approval) as a fallback
 # for the common case where there is no remote at all.
@@ -907,7 +910,7 @@ teardown_treehouse_return() {
 worktree_safety_status() {
   local allow_generated=${1:-0} tracked untracked
   tracked=$(git -C "$WT" status --porcelain --untracked-files=no 2>/dev/null) || return 1
-  untracked=$(git -C "$WT" ls-files --others 2>/dev/null) || return 1
+  untracked=$(git -C "$WT" ls-files --others --exclude-standard 2>/dev/null) || return 1
   if [ "$allow_generated" = 1 ]; then
     untracked=$(printf '%s\n' "$untracked" | grep -vE \
       '^(\.claude/settings\.local\.json|\.opencode/plugins/fm-turn-end\.js|\.fm-grok-turnend|\.fm-kimi-turnend)$' \
