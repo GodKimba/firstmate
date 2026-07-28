@@ -394,8 +394,13 @@ test_ci_and_docs_call_the_owner() {
     || fail "Herdr CI job must install via bin/fm-install-treehouse.sh"
   grep -Fq 'bin/fm-herdr-ci-cleanup.sh' "$CI" \
     || fail "Herdr CI job must use bounded lab cleanup"
-  grep -Fq 'tests-timing-aggregate:' "$CI" \
-    || fail "CI must aggregate per-lane timing artifacts"
+  [ "$(grep -F -c 'bin/fm-test-run.sh --lane portable-parallel-1' "$CI")" -eq 2 ] \
+    || fail "routine and complete CI must both use portable shard 1"
+  [ "$(grep -F -c 'bin/fm-test-run.sh --lane portable-parallel-2' "$CI")" -eq 2 ] \
+    || fail "routine and complete CI must both use portable shard 2"
+  if grep -Fq 'tests-timing-aggregate:' "$CI"; then
+    fail "CI must not retain routine cross-job timing aggregation"
+  fi
   grep -Fq 'timeout-minutes: 20' "$CI" \
     || fail "portable serial hang tripwire must be timeout-minutes: 20"
   grep -Fq 'timeout-minutes: 10' "$CI" \
@@ -412,8 +417,12 @@ test_ci_and_docs_call_the_owner() {
   if grep -Eqi 'retry:|max-attempts:|continue-on-error:\s*true' "$CI"; then
     fail "CI must not use retries or continue-on-error as a green strategy"
   fi
-  grep -Fq 'fm-test-timing' "$CI" \
-    || fail "CI must upload timing artifacts"
+  [ "$(grep -F -c 'uses: actions/upload-artifact@v4' "$CI")" -eq 1 ] \
+    || fail "CI must retain only one failure-diagnostic artifact upload"
+  grep -Fq 'if: failure()' "$CI" \
+    || fail "CI diagnostic artifact must upload only on failure"
+  grep -Fq 'retention-days: 1' "$CI" \
+    || fail "CI diagnostic artifact must use one-day retention"
   grep -Fq 'bin/fm-test-run.sh --all' "$CONTRIB" \
     || fail "CONTRIBUTING must document bin/fm-test-run.sh --all"
   grep -Fq 'bin/fm-test-run.sh --family' "$CONTRIB" \

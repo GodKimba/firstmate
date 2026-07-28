@@ -184,7 +184,7 @@ git -C "$PROJECT" worktree list --porcelain \
   | grep -Fx "worktree $WORKTREE" >/dev/null \
   || die "worktree is not registered to the recorded project"
 
-current_head=$(git -C "$WORKTREE" rev-parse --verify HEAD^{commit} 2>/dev/null) \
+current_head=$(git -C "$WORKTREE" rev-parse --verify "HEAD^{commit}" 2>/dev/null) \
   || die "cannot resolve worktree HEAD"
 current_branch=$(git -C "$WORKTREE" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
 branch_head=

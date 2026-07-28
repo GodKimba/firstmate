@@ -1412,7 +1412,7 @@ fi
 TREEHOUSE_ENDPOINT_QUIESCED=0
 
 quiesce_treehouse_task_endpoint() {
-  local attempt=0 expected_label="fm-$ID" focus_lock= focus_lock_held=0 focus_attempt=0
+  local attempt=0 expected_label="fm-$ID" focus_lock='' focus_lock_held=0 focus_attempt=0
   local endpoint_state recorded_tab_id
   [ -n "$T" ] || {
     echo "REFUSED: task $ID has no recorded runtime endpoint; cannot prove the worktree is quiescent." >&2
@@ -1496,7 +1496,7 @@ if [ -d "$WT" ] && [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
     validate_worktree_teardown_safety_with_lock_recovery || exit 1
   fi
   if [ "$FORCE" != "--force" ] && [ "$KIND" != scout ]; then
-    TREEHOUSE_RETURN_VALIDATED_HEAD=$(git -C "$WT" rev-parse --verify HEAD^{commit} 2>/dev/null) || {
+    TREEHOUSE_RETURN_VALIDATED_HEAD=$(git -C "$WT" rev-parse --verify "HEAD^{commit}" 2>/dev/null) || {
       echo "REFUSED: cannot bind landed-work authorization to the final worktree HEAD." >&2
       exit 1
     }
