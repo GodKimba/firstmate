@@ -57,6 +57,7 @@ set -u
 fm_git_identity fmtest fmtest@example.invalid
 
 TEARDOWN="$ROOT/bin/fm-teardown.sh"
+PROMOTE="$ROOT/bin/fm-promote.sh"
 PR_CHECK="$ROOT/bin/fm-pr-check.sh"
 TMP_ROOT=$(fm_test_tmproot fm-teardown-tests)
 REAL_GIT_FOR_TEST=$(command -v git)
@@ -74,17 +75,54 @@ make_case() {
   case_dir="$TMP_ROOT/$name"
   fakebin="$case_dir/fakebin"
   mkdir -p "$case_dir/state" "$case_dir/config" "$fakebin"
+  case_dir=$(cd "$case_dir" && pwd -P)
+  fakebin="$case_dir/fakebin"
 
   # Mocks for the post-check teardown steps. Refuse logic exits before these
   # run; the ALLOW cases need them so the script can complete cleanly.
   cat > "$fakebin/treehouse" <<'SH'
 #!/usr/bin/env bash
-# `treehouse return --force <wt>`: succeed silently.
+if [ "${1:-}" = firstmate-return-route ]; then
+  printf 'managed'
+  exit 0
+fi
 exit 0
 SH
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
-# tmux kill-window etc.: succeed silently.
+set -u
+case "${1:-}" in
+  kill-window)
+    : > "${FM_FAKE_TMUX_STATE:?}"
+    case "${FM_FAKE_TMUX_ON_KILL:-}" in
+      dirty)
+        printf '%s\n' 'late mutation' > "${FM_FAKE_TMUX_WT:?}/late-mutation.txt"
+        ;;
+      commit)
+        printf '%s\n' 'late commit' > "${FM_FAKE_TMUX_WT:?}/late-commit.txt"
+        git -C "${FM_FAKE_TMUX_WT:?}" add late-commit.txt
+        git -C "${FM_FAKE_TMUX_WT:?}" -c user.email=t@t -c user.name=t commit -q -m 'late unlanded commit'
+        ;;
+    esac
+    exit 0
+    ;;
+  list-windows)
+    if [ -e "${FM_FAKE_TMUX_STATE:?}" ]; then
+      echo "can't find session: firstmate" >&2
+      exit 1
+    fi
+    printf '%s\n' 'fm-task-x1'
+    exit 0
+    ;;
+  display-message)
+    [ ! -e "${FM_FAKE_TMUX_STATE:?}" ] || exit 1
+    case "${@: -1}" in
+      '#{pane_current_command}') printf '%s\n' 'codex' ;;
+      *) printf '%s\n' '%%1' ;;
+    esac
+    exit 0
+    ;;
+esac
 exit 0
 SH
   # Default gh-axi mock: no PR is associated with the branch, and viewing any PR
@@ -147,6 +185,10 @@ if [ "${1:-}" = mv ] && [ "${2:-}" = --help ]; then
   printf '%s\n' 'usage: tasks-axi mv <id> [<id>...] --to <path-or-dir>'
   exit 0
 fi
+if [ "${1:-}" = hold ] && [ "${2:-}" = --help ]; then
+  printf '%s\n' 'usage: tasks-axi hold <id> --kind captain'
+  exit 0
+fi
 exit 0
 SH
   chmod +x "$case_dir/fakebin/tasks-axi"
@@ -154,11 +196,13 @@ SH
 
 # Write a meta file for the task. Args: case_dir mode kind
 write_meta() {
-  local case_dir=$1 mode=$2 kind=$3
+  local case_dir=$1 mode=$2 kind=$3 acquisition_branch="fm/task-x1"
+  [ "$kind" != scout ] || acquisition_branch=-
   fm_write_meta "$case_dir/state/task-x1.meta" \
-    "window=fm-task-x1" \
+    "window=firstmate:fm-task-x1" \
     "worktree=$case_dir/wt" \
     "project=$case_dir/project" \
+    "acquisition_branch=$acquisition_branch" \
     "kind=$kind" \
     "mode=$mode"
 }
@@ -330,6 +374,10 @@ add_lock_aware_treehouse() {
   local case_dir=$1
   cat > "$case_dir/fakebin/treehouse" <<'SH'
 #!/usr/bin/env bash
+if [ "${1:-}" = firstmate-return-route ]; then
+  printf 'managed'
+  exit 0
+fi
 if [ "${1:-}" = return ]; then
   shift
   wt=""
@@ -364,6 +412,10 @@ add_transient_lock_treehouse() {
   local case_dir=$1
   cat > "$case_dir/fakebin/treehouse" <<'SH'
 #!/usr/bin/env bash
+if [ "${1:-}" = firstmate-return-route ]; then
+  printf 'managed'
+  exit 0
+fi
 if [ "${1:-}" = return ]; then
   shift
   wt=""
@@ -409,6 +461,10 @@ add_persistent_lock_treehouse() {
   local case_dir=$1
   cat > "$case_dir/fakebin/treehouse" <<'SH'
 #!/usr/bin/env bash
+if [ "${1:-}" = firstmate-return-route ]; then
+  printf 'managed'
+  exit 0
+fi
 if [ "${1:-}" = return ]; then
   shift
   wt=""
@@ -526,12 +582,59 @@ SH
 
 # Run teardown with PATH mocking. Args: case_dir [extra args...]
 run_teardown() {
-  local case_dir=$1; shift
+  local case_dir=$1 wt generic_state=; shift
+  wt=$(grep '^worktree=' "$case_dir/state/task-x1.meta" | tail -1 | cut -d= -f2-)
+  [ ! -f "$case_dir/config/fake-generic-state" ] \
+    || generic_state=$(cat "$case_dir/config/fake-generic-state")
   FM_ROOT_OVERRIDE="$ROOT" \
   FM_STATE_OVERRIDE="$case_dir/state" \
+  FM_DATA_OVERRIDE="$case_dir/data" \
   FM_CONFIG_OVERRIDE="$case_dir/config" \
+  FM_FAKE_TMUX_STATE="$case_dir/tmux-killed" \
+  FM_FAKE_TMUX_WT="$wt" \
+  FM_FAKE_GENERIC_STATE="$generic_state" \
+  FM_FAKE_GENERIC_WT="$wt" \
+  FM_FAKE_GENERIC_MV_COUNT="$case_dir/generic-mv-count" \
+  FM_FAKE_TREEHOUSE_LOG="$case_dir/treehouse.log" \
   PATH="$case_dir/fakebin:$PATH" \
     "$TEARDOWN" task-x1 "$@"
+}
+
+configure_generic_pool_case() {
+  local case_dir=$1 pool target old
+  old="$case_dir/wt"
+  pool="$case_dir/.treehouse/project-pool"
+  target="$pool/1/project"
+  mkdir -p "$pool/1"
+  git -C "$case_dir/project" worktree move "$old" "$target"
+  sed "s|^worktree=.*|worktree=$target|" "$case_dir/state/task-x1.meta" \
+    > "$case_dir/state/task-x1.meta.tmp"
+  mv "$case_dir/state/task-x1.meta.tmp" "$case_dir/state/task-x1.meta"
+  jq -n --arg path "$target" \
+    '{worktrees: [{name: "1", path: $path, created_at: "2026-07-27T00:00:00Z"}]}' \
+    > "$pool/treehouse-state.json"
+  printf '%s\n' "$pool/treehouse-state.json" > "$case_dir/config/fake-generic-state"
+  cat > "$case_dir/fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "${FM_FAKE_TREEHOUSE_LOG:?}"
+case "${1:-}" in
+  firstmate-return-route)
+    printf 'generic'
+    ;;
+  status)
+    tmp="${FM_FAKE_GENERIC_STATE:?}.tmp"
+    jq --arg path "${FM_FAKE_GENERIC_WT:?}" \
+      '.worktrees |= map(select(.path != $path))' \
+      "${FM_FAKE_GENERIC_STATE:?}" > "$tmp"
+    mv "$tmp" "${FM_FAKE_GENERIC_STATE:?}"
+    ;;
+  return)
+    echo "generic route must not call treehouse return" >&2
+    exit 91
+    ;;
+esac
+SH
+  chmod +x "$case_dir/fakebin/treehouse"
 }
 
 test_local_only_fork_remote_allows() {
@@ -925,6 +1028,607 @@ test_dirty_worktree_refuses() {
   pass "dirty worktree is refused even when its committed work has landed (dirty always wins)"
 }
 
+test_provider_refusal_preserves_task_records() {
+  local case_dir rc
+  case_dir=$(make_case provider-refusal)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit "$case_dir" "landed provider-refusal work"
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  git -C "$case_dir/project" fetch -q origin
+  cat > "$case_dir/fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = firstmate-return-route ]; then
+  printf 'managed'
+  exit 0
+fi
+[ "${FM_TREEHOUSE_RETURN_AUTHORIZED:-}" = 1 ] || exit 9
+[ "${FM_TREEHOUSE_RETURN_PROJECT:-}" = "${FM_EXPECTED_PROJECT:?}" ] || exit 8
+exit 1
+SH
+  chmod +x "$case_dir/fakebin/treehouse"
+
+  set +e
+  FM_EXPECTED_PROJECT="$case_dir/project" run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "provider-refusal: teardown must fail when treehouse refuses return"
+  [ -f "$case_dir/state/task-x1.meta" ] || fail "provider-refusal: task metadata was cleared after provider refusal"
+  [ -d "$case_dir/wt" ] || fail "provider-refusal: worktree disappeared despite provider refusal"
+  git -C "$case_dir/project" show-ref --verify --quiet refs/heads/fm/task-x1 \
+    || fail "provider-refusal: acquisition branch was deleted before provider success"
+  [ "$(git -C "$case_dir/wt" symbolic-ref --quiet --short HEAD)" = "fm/task-x1" ] \
+    || fail "provider-refusal: worktree was detached before provider success"
+  assert_grep "treehouse return failed" "$case_dir/stderr" \
+    "provider-refusal: teardown did not report the provider refusal"
+  pass "provider refusal preserves task records and the worktree"
+}
+
+test_late_dirty_mutation_after_quiesce_refuses() {
+  local case_dir rc
+  case_dir=$(make_case late-dirty)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit "$case_dir" "landed before late dirty mutation"
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  git -C "$case_dir/project" fetch -q origin
+
+  set +e
+  FM_FAKE_TMUX_ON_KILL=dirty run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "late-dirty: final safety check must refuse mutation after endpoint close"
+  [ -f "$case_dir/state/task-x1.meta" ] || fail "late-dirty: task metadata was cleared"
+  [ -f "$case_dir/wt/late-mutation.txt" ] || fail "late-dirty: fixture did not create the late mutation"
+  assert_grep "uncommitted changes" "$case_dir/stderr" \
+    "late-dirty: final safety refusal did not cite uncommitted changes"
+  pass "final quiesced safety check preserves a late dirty mutation"
+}
+
+test_late_unlanded_commit_after_quiesce_refuses() {
+  local case_dir rc
+  case_dir=$(make_case late-commit)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit "$case_dir" "landed before late commit"
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  git -C "$case_dir/project" fetch -q origin
+
+  set +e
+  FM_FAKE_TMUX_ON_KILL=commit run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "late-commit: final safety check must refuse a new unlanded commit"
+  [ -f "$case_dir/state/task-x1.meta" ] || fail "late-commit: task metadata was cleared"
+  [ -f "$case_dir/wt/late-commit.txt" ] || fail "late-commit: fixture did not create the late commit"
+  assert_grep "not on any remote and not landed" "$case_dir/stderr" \
+    "late-commit: final safety refusal did not cite unlanded work"
+  pass "final quiesced safety check preserves a late unlanded commit"
+}
+
+test_endpoint_close_must_be_confirmed_before_return() {
+  local case_dir rc
+  case_dir=$(make_case endpoint-still-live)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit "$case_dir" "landed endpoint-close work"
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  git -C "$case_dir/project" fetch -q origin
+  cat > "$case_dir/fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  list-windows) printf '%s\n' 'fm-task-x1'; exit 0 ;;
+  display-message) printf '%s\n' 'codex'; exit 0 ;;
+  kill-window) exit 0 ;;
+esac
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/tmux"
+
+  set +e
+  FM_ENDPOINT_QUIESCE_RETRIES=0 run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "endpoint-still-live: teardown must refuse while the endpoint remains"
+  [ -f "$case_dir/state/task-x1.meta" ] || fail "endpoint-still-live: task metadata was cleared"
+  assert_grep "still present after close" "$case_dir/stderr" \
+    "endpoint-still-live: refusal did not explain the live endpoint"
+  pass "treehouse return waits for confirmed exact-endpoint closure"
+}
+
+test_endpoint_query_error_preserves_worktree() {
+  local case_dir rc
+  case_dir=$(make_case endpoint-unreadable)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit "$case_dir" "landed endpoint-query work"
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  git -C "$case_dir/project" fetch -q origin
+  cat > "$case_dir/fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  kill-window) exit 0 ;;
+  list-windows) echo "tmux transport unavailable" >&2; exit 1 ;;
+esac
+exit 1
+SH
+  chmod +x "$case_dir/fakebin/tmux"
+
+  set +e
+  FM_ENDPOINT_QUIESCE_RETRIES=0 run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "endpoint-unreadable: teardown must refuse an unreadable endpoint query"
+  [ -f "$case_dir/state/task-x1.meta" ] || fail "endpoint-unreadable: task metadata was cleared"
+  [ -d "$case_dir/wt" ] || fail "endpoint-unreadable: worktree was removed"
+  assert_grep "could not be authoritatively queried" "$case_dir/stderr" \
+    "endpoint-unreadable: refusal did not distinguish an unreadable query"
+  pass "unreadable endpoint queries preserve task records and worktrees"
+}
+
+test_only_exact_generated_artifacts_are_exempt() {
+  local case_dir rc
+  case_dir=$(make_case generated-artifact-scope)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit "$case_dir" "landed generated-artifact work"
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  git -C "$case_dir/project" fetch -q origin
+  mkdir -p "$case_dir/wt/.claude"
+  printf '%s\n' '{}' > "$case_dir/wt/.claude/settings.local.json"
+  printf '%s\n' 'keep me' > "$case_dir/wt/.claude/notes"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "generated-artifact-scope: unrelated .claude content must be dirty"
+  [ -f "$case_dir/wt/.claude/notes" ] || fail "generated-artifact-scope: unrelated file was removed"
+  [ ! -e "$case_dir/tmux-killed" ] || fail "generated-artifact-scope: endpoint closed before dirty refusal"
+  pass "cleanliness exempts only exact Firstmate-generated artifact paths"
+}
+
+test_exact_generated_artifact_is_removed_before_final_validation() {
+  local case_dir rc
+  case_dir=$(make_case exact-generated-artifact)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit "$case_dir" "landed exact-artifact work"
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  git -C "$case_dir/project" fetch -q origin
+  mkdir -p "$case_dir/wt/.claude"
+  printf '%s\n' '{}' > "$case_dir/wt/.claude/settings.local.json"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "exact-generated-artifact: exact generated hook should not block cleanup"
+  [ ! -e "$case_dir/wt/.claude/settings.local.json" ] \
+    || fail "exact-generated-artifact: generated hook remained after cleanup"
+  pass "exact generated artifacts are removed before the final clean-state proof"
+}
+
+test_switched_branch_refuses_without_deleting_acquisition_branch() {
+  local case_dir rc
+  case_dir=$(make_case switched-branch)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit "$case_dir" "landed acquisition-branch work"
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  git -C "$case_dir/project" fetch -q origin
+  git -C "$case_dir/wt" checkout -q -b unrelated-branch
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "switched-branch: teardown must bind safety to the acquisition branch"
+  git -C "$case_dir/project" show-ref --verify --quiet refs/heads/fm/task-x1 \
+    || fail "switched-branch: acquisition branch was deleted"
+  git -C "$case_dir/project" show-ref --verify --quiet refs/heads/unrelated-branch \
+    || fail "switched-branch: current unrelated branch was deleted"
+  assert_grep "not its acquisition branch" "$case_dir/stderr" \
+    "switched-branch: refusal did not name the provenance mismatch"
+  pass "branch cleanup remains bound to the exact acquisition branch"
+}
+
+test_generic_return_removes_exact_worktree_without_force() {
+  local case_dir rc wt state
+  case_dir=$(make_case generic-return)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit "$case_dir" "landed generic-return work"
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  git -C "$case_dir/project" fetch -q origin
+  configure_generic_pool_case "$case_dir"
+  wt=$(grep '^worktree=' "$case_dir/state/task-x1.meta" | cut -d= -f2-)
+  state=$(cat "$case_dir/config/fake-generic-state")
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "generic-return: exact generic worktree removal should succeed"
+  [ ! -e "$wt" ] || fail "generic-return: generic worktree still exists"
+  [ "$(jq --arg path "$wt" '[.worktrees[]? | select(.path == $path)] | length' "$state")" = 0 ] \
+    || fail "generic-return: Treehouse state retained the removed worktree"
+  git -C "$case_dir/project" show-ref --verify --quiet refs/heads/fm/task-x1 \
+    && fail "generic-return: acquisition branch remains after verified removal"
+  grep -F 'return --force' "$case_dir/treehouse.log" >/dev/null \
+    && fail "generic-return: generic route called treehouse return --force"
+  pass "generic return removes only the exact authorized worktree without forcing Git"
+}
+
+test_explicit_current_main_capability_gap_preserves_managed_return() {
+  local case_dir rc
+  case_dir=$(make_case staged-managed-route)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit "$case_dir" "landed staged-route work"
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  git -C "$case_dir/project" fetch -q origin
+  cat > "$case_dir/fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "${FM_FAKE_TREEHOUSE_LOG:?}"
+case "${1:-}" in
+  firstmate-return-route)
+    printf 'firstmate-return-route: unsupported-current-main'
+    exit 2
+    ;;
+  return) exit 0 ;;
+esac
+exit 90
+SH
+  chmod +x "$case_dir/fakebin/treehouse"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "staged-managed-route: explicit current-main capability gap must retain managed return"
+  grep -F 'return --force' "$case_dir/treehouse.log" >/dev/null \
+    || fail "staged-managed-route: explicit capability gap did not preserve managed return"
+  pass "managed compatibility requires an explicit current-main capability-gap result"
+}
+
+test_router_failures_preserve_generic_worktrees() {
+  local case_dir mode rc wt state
+  for mode in error empty false-capability; do
+    case_dir=$(make_case "route-failure-$mode")
+    write_meta "$case_dir" no-mistakes ship
+    wt_commit "$case_dir" "landed route-failure work"
+    git -C "$case_dir/wt" push -q origin fm/task-x1
+    git -C "$case_dir/project" fetch -q origin
+    configure_generic_pool_case "$case_dir"
+    wt=$(grep '^worktree=' "$case_dir/state/task-x1.meta" | cut -d= -f2-)
+    state=$(cat "$case_dir/config/fake-generic-state")
+    cat > "$case_dir/fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "${FM_FAKE_TREEHOUSE_LOG:?}"
+case "${1:-}" in
+  firstmate-return-route)
+    case "${FM_FAKE_ROUTE_MODE:?}" in
+      error)
+        echo "router transport unavailable" >&2
+        exit 75
+        ;;
+      empty)
+        exit 0
+        ;;
+      false-capability)
+        printf 'firstmate-return-route: unsupported-current-main'
+        exit 1
+        ;;
+    esac
+    ;;
+  return)
+    : > "${FM_FAKE_UNSAFE_RETURN:?}"
+    exit 0
+    ;;
+esac
+exit 90
+SH
+    chmod +x "$case_dir/fakebin/treehouse"
+
+    set +e
+    FM_FAKE_ROUTE_MODE="$mode" FM_FAKE_UNSAFE_RETURN="$case_dir/unsafe-return" \
+      run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+    rc=$?
+    set -e
+
+    expect_code 1 "$rc" "route-failure-$mode: unsafe route result must refuse teardown"
+    [ -d "$wt" ] || fail "route-failure-$mode: generic worktree was removed"
+    [ -f "$case_dir/state/task-x1.meta" ] \
+      || fail "route-failure-$mode: task metadata was cleared"
+    [ ! -e "$case_dir/unsafe-return" ] \
+      || fail "route-failure-$mode: managed return ran after an unproven route"
+    git -C "$case_dir/project" show-ref --verify --quiet refs/heads/fm/task-x1 \
+      || fail "route-failure-$mode: acquisition branch was deleted"
+    [ "$(jq --arg path "$wt" '[.worktrees[]? | select(.path == $path)] | length' "$state")" = 1 ] \
+      || fail "route-failure-$mode: generic provider state changed"
+  done
+  pass "router errors and ambiguous capability results preserve generic worktrees"
+}
+
+test_generic_postcondition_failure_restores_worktree() {
+  local case_dir rc wt
+  case_dir=$(make_case generic-postcondition)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit "$case_dir" "landed generic-postcondition work"
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  git -C "$case_dir/project" fetch -q origin
+  configure_generic_pool_case "$case_dir"
+  wt=$(grep '^worktree=' "$case_dir/state/task-x1.meta" | cut -d= -f2-)
+  cat > "$case_dir/fakebin/mv" <<'SH'
+#!/usr/bin/env bash
+if [ "${*: -1}" = "${FM_FAKE_GENERIC_STATE:?}" ]; then
+  count=0
+  [ ! -f "${FM_FAKE_GENERIC_MV_COUNT:?}" ] \
+    || count=$(cat "$FM_FAKE_GENERIC_MV_COUNT")
+  count=$((count + 1))
+  printf '%s\n' "$count" > "$FM_FAKE_GENERIC_MV_COUNT"
+  [ "$count" -ne 2 ] || exit 73
+fi
+exec /bin/mv "$@"
+SH
+  chmod +x "$case_dir/fakebin/mv"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "generic-postcondition: stale provider state must fail"
+  [ -d "$wt" ] || fail "generic-postcondition: worktree was not restored"
+  [ -f "$case_dir/state/task-x1.meta" ] || fail "generic-postcondition: task metadata was cleared"
+  git -C "$case_dir/project" show-ref --verify --quiet refs/heads/fm/task-x1 \
+    || fail "generic-postcondition: acquisition branch was deleted"
+  [ "$(jq --arg path "$wt" '[.worktrees[]? | select(.path == $path and ((.destroying // false) == false))] | length' \
+      "$case_dir/.treehouse/project-pool/treehouse-state.json")" = 1 ] \
+    || fail "generic-postcondition: Treehouse state was not restored"
+  assert_grep "state commit failed" "$case_dir/stderr" \
+    "generic-postcondition: failed provider postcondition was not reported"
+  pass "generic provider postcondition failures restore recovery state"
+}
+
+test_report_gated_scout_cleanup_remains_supported() {
+  local case_dir rc wt state
+  case_dir=$(make_case scout-report-gated)
+  mkdir -p "$case_dir/data/task-x1"
+  printf '%s\n' 'scout result' > "$case_dir/data/task-x1/report.md"
+  write_meta "$case_dir" no-mistakes scout
+  printf '%s\n' 'decisions_reviewed=1' 'decision_keys=' >> "$case_dir/state/task-x1.meta"
+  git -C "$case_dir/wt" checkout -q --detach main
+  git -C "$case_dir/project" branch -D -- fm/task-x1 >/dev/null
+  configure_generic_pool_case "$case_dir"
+  wt=$(grep '^worktree=' "$case_dir/state/task-x1.meta" | cut -d= -f2-)
+  state=$(cat "$case_dir/config/fake-generic-state")
+  add_compatible_tasks_axi "$case_dir"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "scout-report-gated: completed scout cleanup should remain supported"
+  [ ! -f "$case_dir/state/task-x1.meta" ] || fail "scout-report-gated: task metadata remains after successful cleanup"
+  [ ! -e "$wt" ] || fail "scout-report-gated: branchless scout worktree remains"
+  [ "$(jq --arg path "$wt" '[.worktrees[]? | select(.path == $path)] | length' "$state")" = 0 ] \
+    || fail "scout-report-gated: generic state retained the branchless scout"
+  git -C "$case_dir/project" show-ref --verify --quiet refs/heads/fm/task-x1 \
+    && fail "scout-report-gated: branchless scout gained a task branch"
+  pass "report-gated disposable scout cleanup remains explicit and supported"
+}
+
+test_legacy_branchless_scout_metadata_remains_supported() {
+  local case_dir rc style
+  for style in absent recorded; do
+    case_dir=$(make_case "scout-legacy-$style")
+    mkdir -p "$case_dir/data/task-x1"
+    printf '%s\n' 'scout result' > "$case_dir/data/task-x1/report.md"
+    write_meta "$case_dir" no-mistakes scout
+    if [ "$style" = absent ]; then
+      grep -v '^acquisition_branch=' "$case_dir/state/task-x1.meta" \
+        > "$case_dir/state/task-x1.meta.tmp"
+      mv "$case_dir/state/task-x1.meta.tmp" "$case_dir/state/task-x1.meta"
+    else
+      sed 's|^acquisition_branch=.*|acquisition_branch=fm/task-x1|' \
+        "$case_dir/state/task-x1.meta" > "$case_dir/state/task-x1.meta.tmp"
+      mv "$case_dir/state/task-x1.meta.tmp" "$case_dir/state/task-x1.meta"
+    fi
+    printf '%s\n' 'decisions_reviewed=1' 'decision_keys=' >> "$case_dir/state/task-x1.meta"
+    git -C "$case_dir/wt" checkout -q --detach main
+    git -C "$case_dir/project" branch -D -- fm/task-x1 >/dev/null
+    add_compatible_tasks_axi "$case_dir"
+
+    set +e
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+    rc=$?
+    set -e
+
+    expect_code 0 "$rc" "scout-legacy-$style: branchless scout cleanup should remain supported"
+    [ ! -f "$case_dir/state/task-x1.meta" ] \
+      || fail "scout-legacy-$style: task metadata remains after successful cleanup"
+  done
+  pass "legacy branchless scout metadata remains cleanup-compatible"
+}
+
+test_scout_promotion_records_exact_acquisition_branch() {
+  local case_dir style rc
+  for style in branchless absent legacy; do
+    case_dir=$(make_case "scout-promotion-$style")
+    write_meta "$case_dir" no-mistakes scout
+    case "$style" in
+      absent)
+        grep -v '^acquisition_branch=' "$case_dir/state/task-x1.meta" \
+          > "$case_dir/state/task-x1.meta.tmp"
+        mv "$case_dir/state/task-x1.meta.tmp" "$case_dir/state/task-x1.meta"
+        ;;
+      legacy)
+        sed 's|^acquisition_branch=.*|acquisition_branch=fm/task-x1|' \
+          "$case_dir/state/task-x1.meta" > "$case_dir/state/task-x1.meta.tmp"
+        mv "$case_dir/state/task-x1.meta.tmp" "$case_dir/state/task-x1.meta"
+        ;;
+    esac
+    git -C "$case_dir/wt" checkout -q --detach main
+    git -C "$case_dir/project" branch -D -- fm/task-x1 >/dev/null
+
+    FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$case_dir" \
+      FM_STATE_OVERRIDE="$case_dir/state" "$PROMOTE" task-x1 \
+      > "$case_dir/promote.stdout" 2> "$case_dir/promote.stderr" \
+      || fail "scout-promotion-$style: promotion failed"
+
+    [ "$(grep -c '^kind=ship$' "$case_dir/state/task-x1.meta")" = 1 ] \
+      || fail "scout-promotion-$style: ship kind was not recorded exactly once"
+    [ "$(grep -c '^acquisition_branch=fm/task-x1$' "$case_dir/state/task-x1.meta")" = 1 ] \
+      || fail "scout-promotion-$style: exact acquisition branch was not recorded once"
+    [ "$(grep -c '^kind=' "$case_dir/state/task-x1.meta")" = 1 ] \
+      || fail "scout-promotion-$style: ambiguous kind metadata remains"
+    [ "$(grep -c '^acquisition_branch=' "$case_dir/state/task-x1.meta")" = 1 ] \
+      || fail "scout-promotion-$style: ambiguous acquisition metadata remains"
+    [ "$(git -C "$case_dir/wt" symbolic-ref --quiet --short HEAD)" = fm/task-x1 ] \
+      || fail "scout-promotion-$style: worktree was not attached to its acquired branch"
+    git -C "$case_dir/project" show-ref --verify --quiet refs/heads/fm/task-x1 \
+      || fail "scout-promotion-$style: exact acquisition branch was not created"
+
+    if [ "$style" = branchless ]; then
+      set +e
+      run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr"
+      rc=$?
+      set -e
+      expect_code 0 "$rc" "scout-promotion-$style: promoted ship teardown should accept its exact branch"
+    fi
+  done
+  pass "scout promotion atomically records exact ship branch provenance"
+}
+
+test_scout_promotion_refuses_unproven_branch_identity() {
+  local case_dir style rc branch_before
+  for style in attached stale; do
+    case_dir=$(make_case "scout-promotion-refuse-$style")
+    write_meta "$case_dir" no-mistakes scout
+    cp "$case_dir/state/task-x1.meta" "$case_dir/state/task-x1.before"
+    branch_before=$(git -C "$case_dir/project" rev-parse refs/heads/fm/task-x1)
+    if [ "$style" = stale ]; then
+      git -C "$case_dir/wt" checkout -q --detach main
+    fi
+
+    set +e
+    FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$case_dir" \
+      FM_STATE_OVERRIDE="$case_dir/state" "$PROMOTE" task-x1 \
+      > "$case_dir/promote.stdout" 2> "$case_dir/promote.stderr"
+    rc=$?
+    set -e
+
+    expect_code 1 "$rc" "scout-promotion-refuse-$style: unproven branch identity must refuse promotion"
+    cmp -s "$case_dir/state/task-x1.before" "$case_dir/state/task-x1.meta" \
+      || fail "scout-promotion-refuse-$style: metadata changed after refusal"
+    [ "$(git -C "$case_dir/project" rev-parse refs/heads/fm/task-x1)" = "$branch_before" ] \
+      || fail "scout-promotion-refuse-$style: existing branch changed after refusal"
+    [ -d "$case_dir/wt" ] \
+      || fail "scout-promotion-refuse-$style: scout worktree was removed after refusal"
+    if [ "$style" = stale ]; then
+      [ -z "$(git -C "$case_dir/wt" symbolic-ref --quiet --short HEAD 2>/dev/null || true)" ] \
+        || fail "scout-promotion-refuse-$style: detached worktree was changed after refusal"
+    fi
+  done
+  pass "scout promotion refuses attached copies and stale acquisition branches"
+}
+
+test_scout_promotion_failure_preserves_metadata() {
+  local case_dir rc
+  case_dir=$(make_case scout-promotion-atomic-failure)
+  write_meta "$case_dir" no-mistakes scout
+  git -C "$case_dir/wt" checkout -q --detach main
+  git -C "$case_dir/project" branch -D -- fm/task-x1 >/dev/null
+  cp "$case_dir/state/task-x1.meta" "$case_dir/state/task-x1.before"
+  cat > "$case_dir/fakebin/mv" <<'SH'
+#!/usr/bin/env bash
+exit 73
+SH
+  chmod +x "$case_dir/fakebin/mv"
+
+  set +e
+  PATH="$case_dir/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$case_dir" \
+    FM_STATE_OVERRIDE="$case_dir/state" "$PROMOTE" task-x1 \
+    > "$case_dir/promote.stdout" 2> "$case_dir/promote.stderr"
+  rc=$?
+  set -e
+
+  expect_code 73 "$rc" "scout-promotion-atomic-failure: publication failure must propagate"
+  cmp -s "$case_dir/state/task-x1.before" "$case_dir/state/task-x1.meta" \
+    || fail "scout-promotion-atomic-failure: partial metadata update escaped"
+  [ -z "$(find "$case_dir/state" -maxdepth 1 -name '.fm-promote.*' -print -quit)" ] \
+    || fail "scout-promotion-atomic-failure: temporary metadata remains"
+  [ -z "$(git -C "$case_dir/wt" symbolic-ref --quiet --short HEAD 2>/dev/null || true)" ] \
+    || fail "scout-promotion-atomic-failure: worktree remained attached after rollback"
+  git -C "$case_dir/project" show-ref --verify --quiet refs/heads/fm/task-x1 \
+    && fail "scout-promotion-atomic-failure: incomplete acquisition branch remains"
+  pass "scout promotion publication failure preserves original metadata"
+}
+
+test_generic_return_retries_guarded_branch_cleanup() {
+  local case_dir first_rc second_rc wt state route_count
+  case_dir=$(make_case generic-branch-retry)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit "$case_dir" "landed generic retry work"
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  git -C "$case_dir/project" fetch -q origin
+  configure_generic_pool_case "$case_dir"
+  wt=$(grep '^worktree=' "$case_dir/state/task-x1.meta" | cut -d= -f2-)
+  state=$(cat "$case_dir/config/fake-generic-state")
+  cat > "$case_dir/fakebin/git" <<'SH'
+#!/usr/bin/env bash
+case " $* " in
+  *" update-ref -d refs/heads/fm/task-x1 "*)
+    if [ ! -e "${FM_FAKE_BRANCH_DELETE_FAILED:?}" ]; then
+      : > "$FM_FAKE_BRANCH_DELETE_FAILED"
+      exit 73
+    fi
+    ;;
+esac
+exec "${REAL_GIT_FOR_TEST:?}" "$@"
+SH
+  chmod +x "$case_dir/fakebin/git"
+
+  set +e
+  FM_FAKE_BRANCH_DELETE_FAILED="$case_dir/branch-delete-failed" \
+    run_teardown "$case_dir" > "$case_dir/first.stdout" 2> "$case_dir/first.stderr"
+  first_rc=$?
+  set -e
+
+  expect_code 1 "$first_rc" "generic-branch-retry: first branch deletion failure must preserve recovery state"
+  [ ! -e "$wt" ] || fail "generic-branch-retry: provider did not remove the worktree"
+  [ -f "$case_dir/state/task-x1.meta" ] || fail "generic-branch-retry: metadata was cleared after branch deletion failure"
+  [ -f "$case_dir/state/task-x1.treehouse-return" ] \
+    || fail "generic-branch-retry: provider-complete journal was not retained"
+  grep -Fx 'state=provider-complete' "$case_dir/state/task-x1.treehouse-return" >/dev/null \
+    || fail "generic-branch-retry: journal did not preserve provider completion"
+  git -C "$case_dir/project" show-ref --verify --quiet refs/heads/fm/task-x1 \
+    || fail "generic-branch-retry: acquisition branch disappeared despite injected deletion failure"
+  [ "$(jq --arg path "$wt" '[.worktrees[]? | select(.path == $path)] | length' "$state")" = 0 ] \
+    || fail "generic-branch-retry: provider state retained the removed worktree"
+
+  set +e
+  FM_FAKE_BRANCH_DELETE_FAILED="$case_dir/branch-delete-failed" \
+    run_teardown "$case_dir" > "$case_dir/second.stdout" 2> "$case_dir/second.stderr"
+  second_rc=$?
+  set -e
+
+  expect_code 0 "$second_rc" "generic-branch-retry: retry should finish guarded branch cleanup"
+  [ ! -e "$case_dir/state/task-x1.treehouse-return" ] \
+    || fail "generic-branch-retry: completed return journal remains after retry"
+  [ ! -e "$case_dir/state/task-x1.meta" ] \
+    || fail "generic-branch-retry: metadata remains after retry"
+  git -C "$case_dir/project" show-ref --verify --quiet refs/heads/fm/task-x1 \
+    && fail "generic-branch-retry: exact acquisition branch remains after retry"
+  route_count=$(grep -c '^firstmate-return-route ' "$case_dir/treehouse.log" || true)
+  [ "$route_count" = 1 ] \
+    || fail "generic-branch-retry: retry invoked provider routing again"
+  pass "generic return retries exact branch cleanup from durable provider state"
+}
+
 test_gh_error_and_content_absent_refuses() {
   local case_dir rc
   case_dir=$(make_case gh-error)
@@ -1302,7 +2006,7 @@ test_local_only_force_overrides_unpushed() {
 }
 
 test_herdr_teardown_clears_escalation_marker() {
-  local case_dir marker
+  local case_dir marker closed
   case_dir=$(make_case herdr-marker-cleanup)
   write_meta "$case_dir" local-only ship
   sed -i.bak 's/^window=.*/window=default:wG:pQ/' "$case_dir/state/task-x1.meta"
@@ -1310,13 +2014,27 @@ test_herdr_teardown_clears_escalation_marker() {
   printf '%s\n' 'backend=herdr' >> "$case_dir/state/task-x1.meta"
   cat > "$case_dir/fakebin/herdr" <<'SH'
 #!/usr/bin/env bash
+case "${1:-} ${2:-}" in
+  "status --json") printf '%s\n' '{"server":{"running":true}}'; exit 0 ;;
+  "session list") printf '%s\n' '{"sessions":[{"name":"default","running":true,"socket_path":"/tmp/default.sock"}]}'; exit 0 ;;
+  "pane close") : > "${FM_FAKE_HERDR_CLOSED:?}"; exit 0 ;;
+  "pane get")
+    if [ -e "${FM_FAKE_HERDR_CLOSED:?}" ]; then
+      printf '%s\n' '{"error":{"code":"pane_not_found"}}' >&2
+      exit 1
+    fi
+    printf '%s\n' '{"result":{"pane":{"pane_id":"wG:pQ"}}}'
+    exit 0
+    ;;
+esac
 exit 0
 SH
   chmod +x "$case_dir/fakebin/herdr"
   marker="$case_dir/state/.herdr-escalated-default_wG_pQ"
+  closed="$case_dir/herdr-closed"
   : > "$marker"
 
-  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" \
+  FM_FAKE_HERDR_CLOSED="$closed" run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" \
     || fail "herdr-marker-cleanup: forced teardown failed"
   [ ! -e "$marker" ] || fail "herdr-marker-cleanup: teardown left the pane's escalation marker behind"
   pass "herdr teardown removes pane-owned escalation dedupe state"
@@ -1412,19 +2130,24 @@ test_herdr_projection_teardown_retires_journal_only_after_confirmed_close() {
 }
 
 test_herdr_projection_teardown_retains_journal_when_close_unconfirmed() {
-  local case_dir log closed restored
+  local case_dir log closed restored rc
   case_dir=$(make_case herdr-projection-unconfirmed-close)
   write_meta "$case_dir" local-only ship
   configure_herdr_projection_teardown_case "$case_dir"
   log="$case_dir/herdr.log"; closed="$case_dir/closed"; restored="$case_dir/restored"; : > "$log"
 
-  FM_FAKE_HERDR_LOG="$log" FM_FAKE_HERDR_CLOSED="$closed" FM_FAKE_HERDR_RESTORED="$restored" FM_FAKE_HERDR_CLOSE_FAIL=1 \
-    run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" \
-    || fail "herdr-projection-unconfirmed-close: teardown should preserve best-effort endpoint semantics"
+  set +e
+  FM_ENDPOINT_QUIESCE_RETRIES=0 FM_FAKE_HERDR_LOG="$log" FM_FAKE_HERDR_CLOSED="$closed" FM_FAKE_HERDR_RESTORED="$restored" FM_FAKE_HERDR_CLOSE_FAIL=1 \
+    run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "herdr-projection-unconfirmed-close: teardown must refuse an unconfirmed endpoint close"
   [ -e "$case_dir/state/task-x1.herdr-presentation" ] \
     || fail "unconfirmed task-pane close incorrectly retired the presentation journal"
-  assert_grep "close could not be confirmed" "$case_dir/stderr" \
-    "unconfirmed projected close did not explain why the journal was retained"
+  [ -f "$case_dir/state/task-x1.meta" ] \
+    || fail "unconfirmed task-pane close incorrectly cleared task metadata"
+  assert_grep "still present after close" "$case_dir/stderr" \
+    "unconfirmed projected close did not preserve work on a live endpoint"
   assert_not_contains "$(cat "$log")" "workspace close" \
     "unconfirmed projected close must not escalate to workspace cleanup"
   pass "herdr projection teardown retains the stale journal and attempts no workspace cleanup when exact-pane close is unconfirmed"
@@ -1452,6 +2175,24 @@ test_pr_check_records_remote_head_when_local_lags
 test_content_in_default_fallback_allows
 test_content_fallback_refreshes_stale_origin_ref
 test_dirty_worktree_refuses
+test_provider_refusal_preserves_task_records
+test_late_dirty_mutation_after_quiesce_refuses
+test_late_unlanded_commit_after_quiesce_refuses
+test_endpoint_close_must_be_confirmed_before_return
+test_endpoint_query_error_preserves_worktree
+test_only_exact_generated_artifacts_are_exempt
+test_exact_generated_artifact_is_removed_before_final_validation
+test_switched_branch_refuses_without_deleting_acquisition_branch
+test_generic_return_removes_exact_worktree_without_force
+test_explicit_current_main_capability_gap_preserves_managed_return
+test_router_failures_preserve_generic_worktrees
+test_generic_postcondition_failure_restores_worktree
+test_report_gated_scout_cleanup_remains_supported
+test_legacy_branchless_scout_metadata_remains_supported
+test_scout_promotion_records_exact_acquisition_branch
+test_scout_promotion_refuses_unproven_branch_identity
+test_scout_promotion_failure_preserves_metadata
+test_generic_return_retries_guarded_branch_cleanup
 test_gh_error_and_content_absent_refuses
 test_stale_index_lock_cleared_and_teardown_succeeds
 test_live_index_lock_is_never_removed_and_teardown_refuses

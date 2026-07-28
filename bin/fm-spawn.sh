@@ -1441,13 +1441,20 @@ META_WINDOW=$T
   echo "kind=$KIND"
   echo "mode=$MODE"
   echo "yolo=$YOLO"
+  if [ "$KIND" = scout ]; then
+    echo "acquisition_branch=-"
+  elif [ "$KIND" != secondmate ]; then
+    echo "acquisition_branch=fm/$ID"
+  fi
   echo "tasktmp=$TASK_TMP"
   echo "model=${MODEL:-default}"
   echo "effort=${EFFORT:-default}"
   # backend= is written only for a non-default (non-tmux) backend, so the
-  # default path's meta stays byte-identical (absent backend= means tmux;
-  # data/fm-backend-design-d7's P1 compatibility contract).
+  # default path preserves the absent-backend routing contract (absent
+  # backend= means tmux; data/fm-backend-design-d7's P1 compatibility
+  # contract).
   [ "$BACKEND" = tmux ] || echo "backend=$BACKEND"
+  [ "$BACKEND" != tmux ] || echo "tmux_window_id=$WID"
   if [ "$BACKEND" = herdr ]; then
     echo "herdr_session=$HERDR_SES"
     echo "herdr_workspace_id=$HERDR_WORKSPACE_ID"

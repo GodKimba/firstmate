@@ -966,6 +966,37 @@ test_kill_recovers_stale_target_by_label() {
   pass "fm_backend_cmux_kill: recovers stale workspace/surface ids by expected label"
 }
 
+test_recorded_kill_never_recovers_to_a_different_workspace() {
+  local dir fb title
+  dir="$TMP_ROOT/kill-recorded-exact"; mkdir -p "$dir/responses"
+  title=$(cmux_expected_scoped_title fm-label)
+  cmux_windows_response "$dir" 1 "eeeeeeee-0000-0000-0000-000000000000" 2
+  cmux_workspace_list_response "$dir" 2 \
+    "aaaaaaaa-0000-0000-0000-000000000000" "$title" \
+    "ffffffff-0000-0000-0000-000000000000" "other"
+  cmux_windows_response "$dir" 3 "eeeeeeee-0000-0000-0000-000000000000" 2
+  cmux_workspace_list_response "$dir" 4 \
+    "aaaaaaaa-0000-0000-0000-000000000000" "$title" \
+    "ffffffff-0000-0000-0000-000000000000" "other"
+  fb=$(make_cmux_fakebin "$dir")
+  PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
+    bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_kill_recorded "aaaaaaaa-0000-0000-0000-000000000000:bbbbbbbb-1111-1111-1111-111111111111" "" fm-label' "$ROOT"
+  assert_contains "$(cat "$dir/log")" $'\x1f''close-workspace'$'\x1f''--workspace'$'\x1f''aaaaaaaa-0000-0000-0000-000000000000' \
+    "recorded kill did not close the exact matching workspace"
+
+  dir="$TMP_ROOT/kill-recorded-reused-id"; mkdir -p "$dir/responses"
+  cmux_windows_response "$dir" 1 "eeeeeeee-0000-0000-0000-000000000000" 2
+  cmux_workspace_list_response "$dir" 2 \
+    "aaaaaaaa-0000-0000-0000-000000000000" "foreign-task" \
+    "cccccccc-2222-2222-2222-222222222222" "$title"
+  fb=$(make_cmux_fakebin "$dir")
+  PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
+    bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_kill_recorded "aaaaaaaa-0000-0000-0000-000000000000:bbbbbbbb-1111-1111-1111-111111111111" "" fm-label' "$ROOT"
+  assert_not_contains "$(cat "$dir/log")" $'\x1f''close-workspace' \
+    "recorded kill recovered by label and closed a different workspace"
+  pass "fm_backend_cmux_kill_recorded: closes only the exact recorded task workspace"
+}
+
 # --- list_live: label-based orphan discovery ---------------------------------
 
 test_list_live_filters_by_title_prefix() {
@@ -1059,5 +1090,6 @@ test_kill_closes_workspace_directly_when_not_last
 test_kill_adds_sibling_when_last_in_window
 test_kill_is_best_effort_when_close_workspace_fails
 test_kill_recovers_stale_target_by_label
+test_recorded_kill_never_recovers_to_a_different_workspace
 test_list_live_filters_by_title_prefix
 test_secondmate_spawn_refuses_cmux_backend

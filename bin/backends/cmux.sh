@@ -403,6 +403,46 @@ fm_backend_cmux_surface_exists() {  # <workspace_id> <surface_id>
     | jq -e --arg s "$sfid" '[.panes[]? | select(.surface_ids // [] | index($s))] | length > 0' >/dev/null 2>&1
 }
 
+fm_backend_cmux_endpoint_state() {  # <target> [expected-label]
+  local expected_label=${2:-} windows wid workspaces title= expected_title bare_count=0 count
+  fm_backend_cmux_parse_target "$1" || { printf 'unreadable'; return 0; }
+  windows=$(fm_backend_cmux_cli list-windows --json --id-format uuids 2>/dev/null) \
+    || { printf 'unreadable'; return 0; }
+  printf '%s' "$windows" \
+    | jq -e 'type == "array" and all(.[]; (.id | type == "string" and length > 0))' \
+      >/dev/null 2>&1 \
+    || { printf 'unreadable'; return 0; }
+  while IFS= read -r wid; do
+    [ -n "$wid" ] || continue
+    workspaces=$(fm_backend_cmux_cli workspace list --json --id-format uuids --window "$wid" 2>/dev/null) \
+      || { printf 'unreadable'; return 0; }
+    printf '%s' "$workspaces" | jq -e '.workspaces | type == "array"' >/dev/null 2>&1 \
+      || { printf 'unreadable'; return 0; }
+    if [ -z "$title" ]; then
+      title=$(printf '%s' "$workspaces" \
+        | jq -r --arg id "$FM_BACKEND_CMUX_WORKSPACE" \
+          '.workspaces[]? | select(.id == $id) | .title' 2>/dev/null \
+        | head -1)
+    fi
+    if [ -n "$expected_label" ]; then
+      count=$(printf '%s' "$workspaces" \
+        | jq -r --arg want "$expected_label" \
+          '[.workspaces[]? | select(.title == $want)] | length' 2>/dev/null)
+      case "$count" in ''|*[!0-9]*) printf 'unreadable'; return 0 ;; esac
+      bare_count=$((bare_count + count))
+    fi
+  done < <(printf '%s' "$windows" | jq -r '.[].id' 2>/dev/null)
+  [ -n "$title" ] || { printf 'missing'; return 0; }
+  if [ -n "$expected_label" ]; then
+    expected_title=$(fm_backend_cmux_scoped_title "$expected_label")
+    if [ "$title" != "$expected_title" ]; then
+      [ "$title" = "$expected_label" ] && [ "$bare_count" = 1 ] \
+        || { printf 'unreadable'; return 0; }
+    fi
+  fi
+  printf 'present'
+}
+
 # fm_backend_cmux_target_ready: parse the target and verify it is live via
 # fm_backend_cmux_surface_exists (never read-screen - see that function's
 # header for the fresh-surface pitfall this avoids). When the caller knows
@@ -651,6 +691,13 @@ fm_backend_cmux_kill() {  # <target> [unused] [expected-label]
     fm_backend_cmux_cli new-workspace --window "$win" --focus false --id-format uuids >/dev/null 2>&1 || true
   fi
   fm_backend_cmux_cli close-workspace --workspace "$wsid" >/dev/null 2>&1 || true
+}
+
+fm_backend_cmux_kill_recorded() {  # <target> [unused] [expected-label]
+  local state
+  state=$(fm_backend_cmux_endpoint_state "$1" "${3:-}")
+  [ "$state" = present ] || return 0
+  fm_backend_cmux_kill "$1"
 }
 
 # fm_backend_cmux_list_live: recovery/orphan discovery. Lists every workspace
