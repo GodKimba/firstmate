@@ -747,10 +747,10 @@ ABORT_FOCUS_START=$(focus_audit_line_count)
 # serialized cleanup and focus restoration around that refusal, not the bound
 # itself, so they run with a short bound; tests/fm-spawn-worktree-settle.test.sh
 # owns the settle behavior and its production defaults.
-FM_WORKTREE_SETTLE_POLLS=3 FM_WORKTREE_SETTLE_INTERVAL=0 \
+FM_WORKTREE_SETTLE_POLLS=3 FM_WORKTREE_SETTLE_INTERVAL=0.01 \
   spawn_task abort-a "$HOME_DIR" "$PROJECT_DIR" > "$TMP_ROOT/abort-a.out" 2> "$TMP_ROOT/abort-a.err" &
 ABORT_A_PID=$!
-FM_WORKTREE_SETTLE_POLLS=3 FM_WORKTREE_SETTLE_INTERVAL=0 \
+FM_WORKTREE_SETTLE_POLLS=3 FM_WORKTREE_SETTLE_INTERVAL=0.01 \
   spawn_task abort-b "$HOME_DIR" "$PROJECT_DIR" > "$TMP_ROOT/abort-b.out" 2> "$TMP_ROOT/abort-b.err" &
 ABORT_B_PID=$!
 if wait "$ABORT_A_PID"; then fail "post-create abort fixture A unexpectedly succeeded"; fi

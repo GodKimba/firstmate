@@ -1297,18 +1297,22 @@ if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   #
   # The bound is the production default of 60 polls one second apart. The two
   # knobs exist so a test can cover the exhausted-bound path in under a second
-  # without waiting out a live provisioning window; an unset, blank, or invalid
-  # value uses the default, exactly like the other bounded-retry knobs in
+  # without waiting out a live provisioning window; an unset, blank, zero, or
+  # invalid value uses the default, exactly like the other bounded-retry knobs in
   # docs/configuration.md.
   candidate=""
   observed=""
   settle_polls=${FM_WORKTREE_SETTLE_POLLS:-60}
   settle_interval=${FM_WORKTREE_SETTLE_INTERVAL:-1}
   case "$settle_polls" in
-    ''|*[!0-9]*|0) settle_polls=60 ;;
+    ''|*[!0-9]*) settle_polls=60 ;;
+    *[1-9]*) ;;
+    *) settle_polls=60 ;;
   esac
   case "$settle_interval" in
     ''|*[!0-9.]*|.|*.*.*) settle_interval=1 ;;
+    *[1-9]*) ;;
+    *) settle_interval=1 ;;
   esac
   settle_i=0
   while [ "$settle_i" -lt "$settle_polls" ]; do

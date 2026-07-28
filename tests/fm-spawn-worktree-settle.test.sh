@@ -243,7 +243,7 @@ test_stable_nested_path_waits_for_the_exact_root() {
   printf '%s\n%s\n%s\n%s\n' \
     "$WT_DIR/nutri-anamnese" "$WT_DIR/nutri-anamnese" "$WT_DIR" "$WT_DIR" > "$SEQFILE"
 
-  out=$(run_nested_spawn "$id" FM_WORKTREE_SETTLE_INTERVAL=0)
+  out=$(run_nested_spawn "$id" FM_WORKTREE_SETTLE_INTERVAL=0.01)
   status=$?
   expect_code 0 "$status" "spawn should succeed once the provider reports the worktree root"
   assert_contains "$out" "spawned $id" "spawn did not report success"
@@ -266,7 +266,7 @@ test_permanently_nested_path_times_out_without_launching() {
   read_nested_record "$rec"
   printf '%s\n' "$WT_DIR/nutri-anamnese" > "$SEQFILE"
 
-  out=$(run_nested_spawn "$id" FM_WORKTREE_SETTLE_POLLS=3 FM_WORKTREE_SETTLE_INTERVAL=0)
+  out=$(run_nested_spawn "$id" FM_WORKTREE_SETTLE_POLLS=3 FM_WORKTREE_SETTLE_INTERVAL=0.01)
   status=$?
   expect_code 1 "$status" "a permanently nested provisioning cwd must refuse the launch"
   assert_contains "$out" "did not yield an isolated worktree" \
@@ -276,9 +276,86 @@ test_permanently_nested_path_times_out_without_launching() {
   pass "a provider that never reaches the exact root times out without metadata or a launch"
 }
 
+test_settle_interval_validation() {
+  local rec seed_id id out status n=0 label value expected sleep_log actual
+  seed_id=settle-interval-seed-z5
+  rec=$(make_nested_case settle-interval-validation "$seed_id")
+  read_nested_record "$rec"
+  printf '%s\n' "$WT_DIR/nutri-anamnese" > "$SEQFILE"
+  sleep_log="$TMP_ROOT/settle-interval-sleeps"
+  cat > "$FAKEBIN_DIR/sleep" <<'SH'
+#!/usr/bin/env bash
+set -u
+printf '%s\n' "${1:-}" >> "${FM_FAKE_SLEEP_LOG:?FM_FAKE_SLEEP_LOG unset}"
+SH
+  chmod +x "$FAKEBIN_DIR/sleep"
+
+  while IFS='|' read -r label value expected; do
+    n=$((n + 1))
+    id="settle-interval-$n-z5"
+    mkdir -p "$HOME_DIR/data/$id"
+    printf 'brief for %s\n' "$id" > "$HOME_DIR/data/$id/brief.md"
+    rm -f "$COUNTFILE"
+    : > "$sleep_log"
+    if [ "$label" = unset ]; then
+      out=$(unset FM_WORKTREE_SETTLE_INTERVAL; run_nested_spawn "$id" \
+        FM_WORKTREE_SETTLE_POLLS=2 FM_FAKE_SLEEP_LOG="$sleep_log")
+    else
+      out=$(run_nested_spawn "$id" FM_WORKTREE_SETTLE_POLLS=2 \
+        "FM_WORKTREE_SETTLE_INTERVAL=$value" FM_FAKE_SLEEP_LOG="$sleep_log")
+    fi
+    status=$?
+    expect_code 1 "$status" "$label interval case should exhaust the settle bound"
+    actual=$(cat "$sleep_log")
+    [ "$actual" = "$expected" ] || \
+      fail "$label interval case slept '$actual', expected '$expected'"
+    assert_contains "$out" "2 polls ${expected}s apart" \
+      "$label interval case reported the wrong effective interval"
+  done <<'ROWS'
+unset||1
+blank||1
+zero|0|1
+decimal-zero|0.0|1
+leading-decimal-zero|.0|1
+trailing-decimal-zero|0.|1
+zero-equivalent|00.000|1
+invalid|nope|1
+positive|0.01|0.01
+ROWS
+
+  pass "settle intervals use one second by default and preserve positive overrides"
+}
+
+test_zero_equivalent_poll_count_uses_production_default() {
+  local rec id out status reads sleep_log
+  id=settle-zero-equivalent-polls-z6
+  rec=$(make_nested_case settle-zero-equivalent-polls "$id")
+  read_nested_record "$rec"
+  printf '%s\n' "$WT_DIR/nutri-anamnese" > "$SEQFILE"
+  sleep_log="$TMP_ROOT/settle-poll-sleeps"
+  cat > "$FAKEBIN_DIR/sleep" <<'SH'
+#!/usr/bin/env bash
+set -u
+printf '%s\n' "${1:-}" >> "${FM_FAKE_SLEEP_LOG:?FM_FAKE_SLEEP_LOG unset}"
+SH
+  chmod +x "$FAKEBIN_DIR/sleep"
+
+  out=$(run_nested_spawn "$id" FM_WORKTREE_SETTLE_POLLS=00 \
+    FM_WORKTREE_SETTLE_INTERVAL=0.01 FM_FAKE_SLEEP_LOG="$sleep_log")
+  status=$?
+  expect_code 1 "$status" "an all-zero poll count should exhaust the production bound"
+  assert_contains "$out" "within 60 polls 0.01s apart" \
+    "an all-zero poll count did not use the production default"
+  reads=$(cat "$COUNTFILE")
+  [ "$reads" = 60 ] || fail "an all-zero poll count made $reads reads, expected 60"
+  pass "an all-zero settle poll count uses the production default"
+}
+
 test_single_stale_first_read_is_not_accepted
 test_already_settled_pane_costs_one_confirm_sleep
 test_stable_nested_path_waits_for_the_exact_root
 test_permanently_nested_path_times_out_without_launching
+test_settle_interval_validation
+test_zero_equivalent_poll_count_uses_production_default
 
 echo "# all fm-spawn-worktree-settle tests passed"
