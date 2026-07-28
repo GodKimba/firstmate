@@ -301,18 +301,18 @@ Activation is deliberately minimal, so that a capacity question never becomes a 
 - The pool's account directory must be readable by the firstmate home's user.
   It defaults to `~/.cli-proxy-api` and is overridable with `FM_POOL_QUOTA_DIR`.
 - Nothing else is required.
-  The proxy service does not need to be running, its management interface does not need to be enabled, and no additional network access is used.
+  The adapter never contacts the proxy service or its Management API, so the proxy does not need to be running and its management interface does not need to be enabled.
   A capacity read that fails is reported as a failed read, never as a reason to enable a management route or restart the service.
 
 Account discovery is generic.
-Every regular `*.json` file in that directory is a candidate, each file's own type field selects the provider, and an account the pool has disabled is skipped and reported as skipped.
+Every `*.json` directory entry is a candidate, each file's own type field selects the provider, and an account the pool has disabled is skipped and reported as skipped.
 The `disabled` field must be a boolean; malformed or missing values are refused before the account can be measured.
 No account identity, file name, or account count is assumed, so adding or retiring a pooled account needs no configuration change.
 
 Account files are treated as hostile input.
 A candidate that is a symlink, is not a regular file, is empty, exceeds `FM_POOL_QUOTA_MAX_BYTES`, or does not parse into the expected shape is refused with a reason rather than read further.
 Credentials are copied file-to-file into a private per-account workspace that is removed on every exit path, never appear on a command line or in the environment, and never reach output, the panel, or the shared quota cache.
-Account identity is always masked, and a full address is never printed or written.
+Account identity uses a stable masked label across runs, and a full address is never printed or written.
 
 `bin/fm-pool-quota.sh --help` owns the exact flags, bounds, environment overrides, and output contract.
 
@@ -485,7 +485,7 @@ FM_BUSY_REGEX=          # optional global override for every harness-scoped busy
 FM_COMPOSER_IDLE_RE=    # optional empty-composer regex, applied after ghost and border stripping
 FM_COMPOSER_GHOST_LUMA_MAX=128   # fleet-wide: max perceived luminance (0.299R+0.587G+0.114B, 0-255) for a TRUECOLOR foreground to count as de-emphasised ghost/placeholder text and be stripped; dim/faint (SGR 2) is stripped regardless. Assumes a dark terminal theme (bin/fm-composer-lib.sh's fm_composer_strip_ghost, shared by the tmux and herdr composer readers)
 FM_POOL_QUOTA_DIR=~/.cli-proxy-api   # subscription-pool account directory read by /poolquota
-FM_POOL_QUOTA_MAX_BYTES=65536        # per-file size bound; a larger account file is refused unread
+FM_POOL_QUOTA_MAX_BYTES=65536        # per-file size bound; a larger account file is refused before JSON parsing
 FM_POOL_QUOTA_TIMEOUT=25             # seconds allowed per account quota read
 FM_POOL_QUOTA_NOW=                   # optional epoch pin for deterministic /poolquota output, mainly for tests
 FM_POOL_QUOTA_BIN=quota-axi          # quota-axi command name; it owns provider quota semantics

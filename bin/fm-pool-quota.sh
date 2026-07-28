@@ -12,8 +12,8 @@
 # API, never writes to the pool directory, and never changes dispatch, account
 # selection, or routing. It only reads.
 #
-# Account discovery is generic: every regular `*.json` file in the pool directory
-# is a candidate, and each file's own `type` field selects the provider. No
+# Account discovery is generic: every `*.json` directory entry is a candidate,
+# and each file's own `type` field selects the provider. No
 # identity, account count, or file name is assumed.
 #
 # Credential files are treated as hostile input. Every candidate must be a
