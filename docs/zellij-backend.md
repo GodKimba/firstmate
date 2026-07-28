@@ -11,7 +11,6 @@ Pick Zellij when you already use it as a terminal multiplexer and accept its cur
 Prerequisites:
 
 - Zellij 0.44 or newer.
-- `jq` for JSON responses.
 - The universal harness and toolchain requirements in [`configuration.md`](configuration.md#toolchain).
 
 Select it with local `config/backend` containing `zellij`, `FM_BACKEND=zellij` for one launch, or an explicit request to Firstmate.
