@@ -29,9 +29,9 @@ open_set() {  # <status-file> -> fold output with tabs made visible
 
 # Mint through the same owner fm-send uses, against an already-open occurrence.
 mint_for() {  # <status-file> <key> -> token
-  local f=$1 key=$2 token instance d_key d_verb d_instance d_summary
+  local f=$1 key=$2 token instance d_key d_verb d_instance _d_summary
   instance=''
-  while IFS=$'\t' read -r d_key d_verb d_instance d_summary || [ -n "$d_key" ]; do
+  while IFS=$'\t' read -r d_key d_verb d_instance _d_summary || [ -n "$d_key" ]; do
     [ "$d_key" = "$key" ] || continue
     [ "$d_verb" = needs-decision ] || continue
     instance=$d_instance
@@ -167,10 +167,12 @@ test_identical_reopen_rejects_old_duplicate_and_retry_delivery() {
   retry=$(mint_for "$f" scope)
   printf 'resolved [key=scope] [ans=%s]: retry delivery answered the first occurrence\n' "$retry" >> "$f"
   [ -z "$(open_set "$f")" ] || fail "a retry token for the current occurrence did not close it"
-  printf 'resolved [key=scope] [ans=%s]: duplicate resolution delivery\n' "$retry" >> "$f"
-  printf 'needs-decision [key=scope]: ship the narrow fix?\n' >> "$f"
-  printf 'resolved [key=scope] [ans=%s]: delayed first response\n' "$first" >> "$f"
-  printf 'resolved [key=scope] [ans=%s]: delayed retry response\n' "$retry" >> "$f"
+  {
+    printf 'resolved [key=scope] [ans=%s]: duplicate resolution delivery\n' "$retry"
+    printf 'needs-decision [key=scope]: ship the narrow fix?\n'
+    printf 'resolved [key=scope] [ans=%s]: delayed first response\n' "$first"
+    printf 'resolved [key=scope] [ans=%s]: delayed retry response\n' "$retry"
+  } >> "$f"
   out=$(open_set "$f")
   assert_contains "$out" "scope|needs-decision|ship the narrow fix?" \
     "an old response closed an identical reopened decision"
