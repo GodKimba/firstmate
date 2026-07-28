@@ -1428,9 +1428,12 @@ test_scout_promotion_records_exact_acquisition_branch() {
       || fail "scout-promotion-$style: ambiguous kind metadata remains"
     [ "$(grep -c '^acquisition_branch=' "$case_dir/state/task-x1.meta")" = 1 ] \
       || fail "scout-promotion-$style: ambiguous acquisition metadata remains"
+    [ "$(git -C "$case_dir/wt" symbolic-ref --quiet --short HEAD)" = fm/task-x1 ] \
+      || fail "scout-promotion-$style: worktree was not attached to its acquired branch"
+    git -C "$case_dir/project" show-ref --verify --quiet refs/heads/fm/task-x1 \
+      || fail "scout-promotion-$style: exact acquisition branch was not created"
 
     if [ "$style" = branchless ]; then
-      git -C "$case_dir/wt" checkout -q -b fm/task-x1
       set +e
       run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr"
       rc=$?
@@ -1441,10 +1444,45 @@ test_scout_promotion_records_exact_acquisition_branch() {
   pass "scout promotion atomically records exact ship branch provenance"
 }
 
+test_scout_promotion_refuses_unproven_branch_identity() {
+  local case_dir style rc branch_before
+  for style in attached stale; do
+    case_dir=$(make_case "scout-promotion-refuse-$style")
+    write_meta "$case_dir" no-mistakes scout
+    cp "$case_dir/state/task-x1.meta" "$case_dir/state/task-x1.before"
+    branch_before=$(git -C "$case_dir/project" rev-parse refs/heads/fm/task-x1)
+    if [ "$style" = stale ]; then
+      git -C "$case_dir/wt" checkout -q --detach main
+    fi
+
+    set +e
+    FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$case_dir" \
+      FM_STATE_OVERRIDE="$case_dir/state" "$PROMOTE" task-x1 \
+      > "$case_dir/promote.stdout" 2> "$case_dir/promote.stderr"
+    rc=$?
+    set -e
+
+    expect_code 1 "$rc" "scout-promotion-refuse-$style: unproven branch identity must refuse promotion"
+    cmp -s "$case_dir/state/task-x1.before" "$case_dir/state/task-x1.meta" \
+      || fail "scout-promotion-refuse-$style: metadata changed after refusal"
+    [ "$(git -C "$case_dir/project" rev-parse refs/heads/fm/task-x1)" = "$branch_before" ] \
+      || fail "scout-promotion-refuse-$style: existing branch changed after refusal"
+    [ -d "$case_dir/wt" ] \
+      || fail "scout-promotion-refuse-$style: scout worktree was removed after refusal"
+    if [ "$style" = stale ]; then
+      [ -z "$(git -C "$case_dir/wt" symbolic-ref --quiet --short HEAD 2>/dev/null || true)" ] \
+        || fail "scout-promotion-refuse-$style: detached worktree was changed after refusal"
+    fi
+  done
+  pass "scout promotion refuses attached copies and stale acquisition branches"
+}
+
 test_scout_promotion_failure_preserves_metadata() {
   local case_dir rc
   case_dir=$(make_case scout-promotion-atomic-failure)
   write_meta "$case_dir" no-mistakes scout
+  git -C "$case_dir/wt" checkout -q --detach main
+  git -C "$case_dir/project" branch -D -- fm/task-x1 >/dev/null
   cp "$case_dir/state/task-x1.meta" "$case_dir/state/task-x1.before"
   cat > "$case_dir/fakebin/mv" <<'SH'
 #!/usr/bin/env bash
@@ -1464,6 +1502,10 @@ SH
     || fail "scout-promotion-atomic-failure: partial metadata update escaped"
   [ -z "$(find "$case_dir/state" -maxdepth 1 -name '.fm-promote.*' -print -quit)" ] \
     || fail "scout-promotion-atomic-failure: temporary metadata remains"
+  [ -z "$(git -C "$case_dir/wt" symbolic-ref --quiet --short HEAD 2>/dev/null || true)" ] \
+    || fail "scout-promotion-atomic-failure: worktree remained attached after rollback"
+  git -C "$case_dir/project" show-ref --verify --quiet refs/heads/fm/task-x1 \
+    && fail "scout-promotion-atomic-failure: incomplete acquisition branch remains"
   pass "scout promotion publication failure preserves original metadata"
 }
 
@@ -2088,6 +2130,7 @@ test_generic_postcondition_failure_restores_worktree
 test_report_gated_scout_cleanup_remains_supported
 test_legacy_branchless_scout_metadata_remains_supported
 test_scout_promotion_records_exact_acquisition_branch
+test_scout_promotion_refuses_unproven_branch_identity
 test_scout_promotion_failure_preserves_metadata
 test_generic_return_retries_guarded_branch_cleanup
 test_gh_error_and_content_absent_refuses
