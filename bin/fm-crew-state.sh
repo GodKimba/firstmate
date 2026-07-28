@@ -26,12 +26,12 @@
 #      branch whose head was rewritten or diverged must not be attributed.
 #      A run matches when its head equals the worktree HEAD, or the worktree HEAD
 #      is an ancestor of the run head (pipeline fix commits advanced the run on
-#      the same line of history). An active run whose isolated rebase/fix head is
-#      not comparable in the invoking repository also matches when the exact
-#      no-mistakes submission ref still equals the worktree HEAD. This second
-#      proof is active-only; terminal and historical runs still require run-head
-#      ancestry. Local work that advanced past the submitted or run head, or
-#      diverged from it, invalidates attribution.
+#      the same line of history). A detailed active run whose isolated rebase/fix
+#      head is not comparable in the invoking repository also matches when the
+#      exact no-mistakes submission ref still equals the worktree HEAD. This
+#      second proof requires full gate state; coarse, terminal, and historical
+#      runs still require run-head ancestry. Local work that advanced past the
+#      submitted or run head, or diverged from it, invalidates attribution.
 #      The run-step is AUTHORITATIVE: running/fixing -> working, ci -> working,
 #      awaiting_approval/fix_review -> parked (with gate findings), terminal
 #      passed/checks-passed -> done, failed/cancelled -> failed. EXCEPT: while
@@ -412,15 +412,8 @@ nm_runs_status_for_branch() {  # <branch>
     rest=$(trim "$rest")
     sha=${rest%% *}
     if [ "$br" = "$branch" ]; then
-      # Prefer the run head. During a healthy synchronous run, an isolated
-      # rebase/fix can make that head unavailable or divergent here; only a
-      # running row may then use the exact submission-ref proof. Terminal,
-      # failed, cancelled, stale, or code-mismatched rows remain rejected.
-      if ! nm_coarse_head_matches_worktree "$sha"; then
-        if [ "$st" != running ] || ! nm_submission_head_matches_worktree "$branch"; then
-          continue
-        fi
-      fi
+      # Coarse rows have no gate detail, so current-code ancestry is required.
+      nm_coarse_head_matches_worktree "$sha" || continue
       printf '%s' "$st"
       return 0
     fi

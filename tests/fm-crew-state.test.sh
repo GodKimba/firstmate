@@ -805,15 +805,16 @@ test_active_rebased_run_precedes_all_backend_fallbacks() {
   pass "active rebased run remains authoritative across every supported session backend"
 }
 
-# The same proof must survive concurrent activity when bare axi status reports
-# another branch and this run is found only through the repository runs list.
-test_cross_branch_active_rebased_run_uses_submission_ref() {
+# The coarse runs list cannot distinguish active work from a parked gate, so a
+# matching submission ref alone must not make its running row authoritative.
+test_cross_branch_coarse_submission_ref_requires_detailed_state() {
   reset_fakes
   local d; d=$(new_case crossbranch-active-rebased)
   make_repo_on_branch "$d/wt" fm/feat-cross-rebased
   set_no_mistakes_submission_ref "$d/wt" fm/feat-cross-rebased
   make_fakebin "$d" >/dev/null
   fm_write_meta "$d/state/feat-cross-rebased.meta" "window=fm:fm-feat-cross-rebased" "worktree=$d/wt" "kind=ship"
+  printf 'needs-decision: review gate requires approval\n' > "$d/state/feat-cross-rebased.status"
   FM_FAKE_AXI_STATUS="$(run_running fm/other-crew)"
   FM_FAKE_RUNS_LIST=$(cat <<'EOF'
   running    fm/other-crew aaaaaaa  2026-07-28 16:00
@@ -822,10 +823,12 @@ EOF
 )
   FM_FAKE_BUSY=0
   local out; out=$(run_crew_state "$d" feat-cross-rebased)
-  assert_contains "$out" "state: working" "cross-branch active rebased run -> working"
-  assert_contains "$out" "source: run-step" "cross-branch active rebased run -> run-step source"
-  assert_contains "$out" "background run" "cross-branch fallback retains coarse-run detail"
-  pass "cross-branch active rebased run uses the exact submission ref"
+  assert_contains "$out" "state: parked" "coarse running row retains the parked fallback state"
+  assert_contains "$out" "source: status-log" "coarse running row falls back without detailed gate state"
+  assert_not_contains "$out" "source: run-step" "submission ref alone does not attribute the coarse row"
+  PATH="$d/fakebin:$PATH" FM_STATE_OVERRIDE="$d/state" crew_is_provably_working feat-cross-rebased \
+    && fail "a coarse running row with only submission-ref identity was treated as provably working"
+  pass "coarse submission-ref identity requires detailed run state"
 }
 
 # The submission ref is exact code identity, not a branch-only escape hatch.
@@ -1394,7 +1397,7 @@ test_cross_branch_attribution_picks_most_recent_row
 test_coarse_run_does_not_probe_other_branch_ci_log_for_ready_status
 test_active_rebased_run_uses_exact_submission_ref
 test_active_rebased_run_precedes_all_backend_fallbacks
-test_cross_branch_active_rebased_run_uses_submission_ref
+test_cross_branch_coarse_submission_ref_requires_detailed_state
 test_active_rebased_run_rejects_mismatched_submission_ref
 test_parked_unresolved_run_head_not_classified_active
 test_terminal_unresolved_run_head_not_revived_by_submission_ref
