@@ -712,6 +712,7 @@ make_routine_bootstrap_fixture() {
     printf 'harness=codex\n'
     printf 'home=%s\n' "$sm"
   } > "$home/state/sm.meta"
+  fm_test_attest_secondmate_decision_cutover "$home/state" sm "$sm" "$c1"
   fakebin=$(make_fake_toolchain "$case_dir")
   add_real_jq "$fakebin"
   cat > "$fakebin/tmux" <<'SH'

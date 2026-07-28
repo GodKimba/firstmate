@@ -75,6 +75,7 @@ FM_PAUSE_RESURFACE_SECS_DEFAULT=3600
 FM_CLASSIFY_RESOLVE_VERB_DEFAULT='resolved'
 FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT='captain-held'
 FM_CLASSIFY_DECISION_CUTOVER_MARK_DEFAULT='[fm-decision-answer-cutover:v1]'
+FM_CLASSIFY_SECONDMATE_CUTOVER_DIR_DEFAULT='.secondmate-decision-cutover-v1'
 
 # The verb firstmate uses when it issues a correlated answer to an open decision.
 # It names the decision-answer message shape owned by bin/fm-send.sh --decision;
@@ -401,6 +402,59 @@ EOF
     && [ "$(cat "$complete" 2>/dev/null)" = "$marker" ]
 }
 
+fm_secondmate_decision_cutover_dir() {  # <state-dir>
+  printf '%s/%s' "$1" "$FM_CLASSIFY_SECONDMATE_CUTOVER_DIR_DEFAULT"
+}
+
+fm_secondmate_decision_cutover_path() {  # <state-dir> <id> <quarantine|reload|ready>
+  local state=$1 id=$2 kind=$3
+  case "$id" in ''|.*|*[!A-Za-z0-9._-]*) return 1 ;; esac
+  case "$kind" in quarantine|reload|ready) ;; *) return 1 ;; esac
+  printf '%s/%s.%s' "$(fm_secondmate_decision_cutover_dir "$state")" "$id" "$kind"
+}
+
+fm_secondmate_decision_cutover_dir_is_safe() {  # <state-dir>
+  local dir
+  dir=$(fm_secondmate_decision_cutover_dir "$1")
+  [ ! -e "$dir" ] && [ ! -L "$dir" ] && return 0
+  [ -d "$dir" ] && [ ! -L "$dir" ]
+}
+
+fm_secondmate_decision_cutover_is_ready() {  # <state-dir> <id> <home>
+  local path version id home complete
+  path=$(fm_secondmate_decision_cutover_path "$1" "$2" ready) || return 1
+  [ -f "$path" ] && [ ! -L "$path" ] || return 1
+  version=$(grep '^version=' "$path" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+  id=$(grep '^id=' "$path" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+  home=$(grep '^home=' "$path" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+  complete="$3/state/.decision-answer-cutover-v1"
+  [ "$version" = "$FM_CLASSIFY_DECISION_CUTOVER_MARK_DEFAULT" ] \
+    && [ "$id" = "$2" ] && [ "$home" = "$3" ] \
+    && [ -f "$complete" ] && [ ! -L "$complete" ] \
+    && [ "$(cat "$complete" 2>/dev/null)" = "$FM_CLASSIFY_DECISION_CUTOVER_MARK_DEFAULT" ]
+}
+
+fm_secondmate_decision_cutover_is_quarantined() {  # <state-dir> <id>
+  local path
+  path=$(fm_secondmate_decision_cutover_path "$1" "$2" quarantine) || return 1
+  [ -f "$path" ] && [ ! -L "$path" ]
+}
+
+fm_secondmate_decision_cutover_reload_bypass_is_valid() {  # <state-dir> <id> <corr>
+  local state=$1 id=$2 corr=$3 path record_id record_corr
+  case "$corr" in
+    [A-Fa-f0-9][A-Fa-f0-9][A-Fa-f0-9][A-Fa-f0-9][A-Fa-f0-9][A-Fa-f0-9][A-Fa-f0-9][A-Fa-f0-9][A-Fa-f0-9][A-Fa-f0-9][A-Fa-f0-9][A-Fa-f0-9][A-Fa-f0-9][A-Fa-f0-9][A-Fa-f0-9][A-Fa-f0-9]) ;;
+    *) return 1 ;;
+  esac
+  fm_secondmate_decision_cutover_dir_is_safe "$state" || return 1
+  fm_secondmate_decision_cutover_is_quarantined "$state" "$id" || return 1
+  path=$(fm_secondmate_decision_cutover_path "$state" "$id" reload) || return 1
+  [ -f "$path" ] && [ ! -L "$path" ] || return 1
+  record_id=$(grep '^id=' "$path" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+  record_corr=$(grep '^corr=' "$path" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+  [ "$record_id" = "$id" ] && [ "$record_corr" = "$corr" ]
+}
+
 # Drop the record for <key> from a newline-terminated
 # "<key>\t<verb>\t<instance>\t<authority>\t<note>" set.
 # Portable (no associative arrays) so the fold runs on bash 3.2 as well as 4+.
@@ -518,6 +572,26 @@ $open
 EOF
 }
 
+status_open_needs_decisions() {  # <status-file>
+  local f=$1 key verb instance summary
+  while IFS=$'\t' read -r key verb instance summary || [ -n "$key" ]; do
+    [ "$verb" = needs-decision ] || continue
+    printf '%s\t%s\t%s\n' "$key" "$instance" "$summary"
+  done <<EOF
+$(status_open_decisions "$f" --with-instance)
+EOF
+}
+
+status_has_open_needs_decision() {  # <status-file>
+  local key _instance _summary
+  while IFS=$'\t' read -r key _instance _summary || [ -n "$key" ]; do
+    [ -n "$key" ] && return 0
+  done <<EOF
+$(status_open_needs_decisions "$1")
+EOF
+  return 1
+}
+
 # Fold material routed-work phases in the same keyed event stream.
 # A working or declared-pause event opens or replaces one phase for its key.
 # A later done, failed, needs-decision, blocked, or resolved event carrying that
@@ -583,16 +657,18 @@ window_to_task() {
 }
 
 # 0 (actionable) if ANY status file listed in a "signal:" wake carries a
-# captain-relevant last line; 1 otherwise. Pass the space-separated file list that
-# follows the "signal:" prefix. Non-.status arguments (e.g. .turn-ended markers,
-# which never carry a verb) are skipped. A 1 here is NOT "benign" on its own: a
-# no-verb signal (a bare turn-end, a working: note) is only benign when the crew is
-# also provably working (signal_crew_provably_working below); otherwise it surfaces.
+# captain-relevant last line or a folded open needs-decision occurrence; 1
+# otherwise. Pass the space-separated file list that follows the "signal:"
+# prefix. Non-.status arguments (e.g. .turn-ended markers, which never carry a
+# verb) are skipped. A 1 here is NOT "benign" on its own: a no-verb signal (a
+# bare turn-end, a working: note) is only benign when the crew is also provably
+# working (signal_crew_provably_working below); otherwise it surfaces.
 signal_reason_is_actionable() {  # <file> ...
   local f last
   for f in "$@"; do
     [ -e "$f" ] || continue
     case "$f" in *.status) ;; *) continue ;; esac
+    status_has_open_needs_decision "$f" && return 0
     last=$(last_status_line "$f")
     [ -n "$last" ] || continue
     status_is_captain_relevant "$last" && return 0
@@ -671,13 +747,16 @@ signal_crew_provably_working() {  # <file> ...
   return 0
 }
 
-# 0 (terminal/actionable) if a stale window's last status line is
-# captain-relevant; 1 otherwise, including the no-status case. A 1 only means
-# "non-terminal"; the always-on watcher then applies crew_is_provably_working,
-# while the away-mode daemon applies its persistence recheck.
+# 0 (terminal/actionable) if a stale window has a folded open needs-decision or
+# its last status line is captain-relevant; 1 otherwise, including the no-status
+# case. A 1 only means "non-terminal"; the always-on watcher then applies
+# crew_is_provably_working, while the away-mode daemon applies its persistence
+# recheck.
 stale_is_terminal() {  # <window> <state>
-  local win=$1 state=$2 last
-  last=$(last_status_line "$state/$(window_to_task "$win" "$state").status")
+  local win=$1 state=$2 last f
+  f="$state/$(window_to_task "$win" "$state").status"
+  status_has_open_needs_decision "$f" && return 0
+  last=$(last_status_line "$f")
   [ -n "$last" ] && status_is_captain_relevant "$last"
 }
 
@@ -694,6 +773,23 @@ scan_captain_relevant_statuses() {  # <state>
     status_is_captain_relevant "$last" || continue
     task=$(basename "$f"); task="${task%.status}"
     printf '%s\t%s\t%s\n' "$f" "$task" "$last"
+  done
+  return 0
+}
+
+# Print one row per folded open needs-decision occurrence:
+# "<file>\t<task>\t<instance>\t<key>\t<summary>".
+scan_open_needs_decisions() {  # <state>
+  local state=$1 f task key instance summary
+  for f in "$state"/*.status; do
+    [ -e "$f" ] || continue
+    task=$(basename "$f"); task="${task%.status}"
+    while IFS=$'\t' read -r key instance summary || [ -n "$key" ]; do
+      [ -n "$key" ] || continue
+      printf '%s\t%s\t%s\t%s\t%s\n' "$f" "$task" "$instance" "$key" "$summary"
+    done <<EOF
+$(status_open_needs_decisions "$f")
+EOF
   done
   return 0
 }

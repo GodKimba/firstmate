@@ -575,6 +575,44 @@ test_heartbeat_scan_dedup() {
   pass "catch-all scan escalates a missed terminal once, not twice"
 }
 
+test_retained_decision_signal_and_scan_dedup() {
+  local dir state status_file out instance key marker
+  dir=$(make_supercase retained-decision-dedup)
+  state="$dir/state"
+  status_file="$state/retained.status"
+  fm_decision_cutover_ensure_status "$status_file" || fail "could not establish daemon retained-decision fixture"
+  printf '%s\n' \
+    'needs-decision [key=route]: captain must choose the route' \
+    'resolved [key=route]: queued generic command was not authority' \
+    'working: worker resumed after consuming the queue' >> "$status_file"
+  instance=$(status_open_needs_decisions "$status_file" | awk -F '\t' 'NR == 1 { print $2 }')
+  out=$(FM_STATE_OVERRIDE="$state" classify_signal "$status_file" "$state")
+  case "$out" in
+    escalate\|*occurrence="$instance"*) ;;
+    *) fail "daemon signal classifier hid the retained decision behind working: $out" ;;
+  esac
+  FM_STATE_OVERRIDE="$state" handle_wake "signal: $status_file" "$state"
+  key=$(printf '%s' retained | tr ':/.' '___')
+  marker="$state/.subsuper-seen-decision-$key-$instance"
+  [ "$(cat "$marker" 2>/dev/null || true)" = "$instance" ] \
+    || fail "daemon signal path did not mark the retained decision occurrence seen"
+  : > "$state/.subsuper-escalations"
+  rm -f "$state/.subsuper-last-scan"
+  FM_STATE_OVERRIDE="$state" housekeeping "$state"
+  [ ! -s "$state/.subsuper-escalations" ] \
+    || fail "daemon catch-all re-fired a retained decision already surfaced by signal"
+  rm -f "$marker" "$state/.subsuper-last-scan"
+  FM_STATE_OVERRIDE="$state" housekeeping "$state"
+  grep -F "occurrence=$instance" "$state/.subsuper-escalations" >/dev/null \
+    || fail "daemon catch-all omitted an unsurfaced retained decision occurrence"
+  : > "$state/.subsuper-escalations"
+  rm -f "$state/.subsuper-last-scan"
+  FM_STATE_OVERRIDE="$state" housekeeping "$state"
+  [ ! -s "$state/.subsuper-escalations" ] \
+    || fail "daemon catch-all re-fired the same retained decision occurrence"
+  pass "daemon signal and catch-all surface retained decisions once per occurrence"
+}
+
 test_handle_wake_routes_self_and_escalate() {
   local dir state
   dir=$(make_supercase handle)
@@ -1795,6 +1833,7 @@ test_housekeeping_orca_persistent_stale_resolves_terminal
 test_escalate_batches_into_one_digest
 test_escalate_batch_age_uses_first_append
 test_heartbeat_scan_dedup
+test_retained_decision_signal_and_scan_dedup
 test_handle_wake_routes_self_and_escalate
 test_inject_skip_forces_self
 test_is_wake_reason_distinguishes_status_stdout

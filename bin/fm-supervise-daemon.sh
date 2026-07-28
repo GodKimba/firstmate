@@ -330,20 +330,30 @@ _collapse_newlines() {  # <text>
 
 classify_signal() {  # <reason-after-colon> <state>
   local reason=$1 state=$2 f last distilled="" rel="" all_seen=1 task seen
+  local key instance summary
   for f in $reason; do
     [ -e "$f" ] || continue
     last=$(last_status_line "$f")
     [ -n "$last" ] || continue
     distilled="${distilled}$(basename "$f"): ${last} | "
-    status_is_captain_relevant "$last" || continue
-    rel=1
-    # Dedupe against the catch-all scan: if this status was already escalated
-    # (seen marker matches), skip escalating again. The seen marker is the
-    # single source of truth shared between the per-wake signal path and the
-    # heartbeat scan. all_seen stays 1 only if EVERY relevant file was seen.
     task=$(basename "$f"); task="${task%.status}"
-    seen="$state/.subsuper-seen-status-$(_stale_key "$task")"
-    [ "$(cat "$seen" 2>/dev/null || true)" = "$last" ] || all_seen=0
+    if status_is_captain_relevant "$last"; then
+      if [ "$(status_line_verb "$last")" != needs-decision ] \
+        || ! status_has_open_needs_decision "$f"; then
+        rel=1
+        seen="$state/.subsuper-seen-status-$(_stale_key "$task")"
+        [ "$(cat "$seen" 2>/dev/null || true)" = "$last" ] || all_seen=0
+      fi
+    fi
+    while IFS=$'\t' read -r key instance summary || [ -n "$key" ]; do
+      [ -n "$key" ] || continue
+      rel=1
+      distilled="${distilled}$(basename "$f"): open needs-decision [key=$key] [occurrence=$instance]: $summary | "
+      seen="$state/.subsuper-seen-decision-$(_stale_key "$task")-$instance"
+      [ "$(cat "$seen" 2>/dev/null || true)" = "$instance" ] || all_seen=0
+    done <<EOF
+$(status_open_needs_decisions "$f")
+EOF
   done
   # strip a trailing " | " separator so the distilled line is clean
   distilled="${distilled% | }"
@@ -362,8 +372,25 @@ classify_signal() {  # <reason-after-colon> <state>
 # first sight of a non-terminal stale it returns "self" and the caller records a
 # timestamp marker; persistence is escalated by housekeeping's recheck, not here.
 classify_stale() {  # <window> <state>
-  local win=$1 state=$2 task last seen
+  local win=$1 state=$2 task last seen key instance summary rel="" all_seen=1 distilled=""
   task=$(window_to_task "$win" "$state")
+  while IFS=$'\t' read -r key instance summary || [ -n "$key" ]; do
+    [ -n "$key" ] || continue
+    rel=1
+    distilled="${distilled}${distilled:+ | }open needs-decision [key=$key] [occurrence=$instance]: $summary"
+    seen="$state/.subsuper-seen-decision-$(_stale_key "$task")-$instance"
+    [ "$(cat "$seen" 2>/dev/null || true)" = "$instance" ] || all_seen=0
+  done <<EOF
+$(status_open_needs_decisions "$state/$task.status")
+EOF
+  if [ -n "$rel" ]; then
+    if [ "$all_seen" = 1 ]; then
+      printf 'self|stale + open decision already escalated: %s' "$distilled"
+    else
+      printf 'escalate|stale + %s' "$distilled"
+    fi
+    return
+  fi
   last=$(last_status_line "$state/$task.status")
   if [ -n "$last" ] && status_is_paused "$last"; then
     # A DECLARED external-wait pause (fm-classify-lib.sh): an idle pane is EXPECTED,
@@ -521,6 +548,17 @@ mark_status_seen() {  # <state> <task> <last-line>
   printf '%s' "$line" > "$state/.subsuper-seen-status-$(_stale_key "$task")"
 }
 
+mark_open_decisions_seen() {  # <state> <status-file>
+  local state=$1 f=$2 task key instance _summary
+  task=$(basename "$f"); task="${task%.status}"
+  while IFS=$'\t' read -r key instance _summary || [ -n "$key" ]; do
+    [ -n "$key" ] || continue
+    printf '%s' "$instance" > "$state/.subsuper-seen-decision-$(_stale_key "$task")-$instance"
+  done <<EOF
+$(status_open_needs_decisions "$f")
+EOF
+}
+
 # Mark every captain-relevant status line a per-wake classification escalated as
 # seen, so the catch-all scan does not re-escalate the same line within
 # HEARTBEAT_SCAN_SECS. Mirrors classify_signal/classify_stale's relevance test.
@@ -530,16 +568,24 @@ mark_escalated_seen() {  # <kind> <arg> <state>
     signal)
       for f in $arg; do
         [ -e "$f" ] || continue
+        mark_open_decisions_seen "$state" "$f"
         last=$(last_status_line "$f")
         [ -n "$last" ] || continue
         status_is_captain_relevant "$last" || continue
+        if [ "$(status_line_verb "$last")" = needs-decision ] \
+          && status_has_open_needs_decision "$f"; then
+          continue
+        fi
         task=$(basename "$f"); task="${task%.status}"
         mark_status_seen "$state" "$task" "$last"
       done ;;
     stale)
       task=$(window_to_task "$arg" "$state")
+      mark_open_decisions_seen "$state" "$state/$task.status"
       last=$(last_status_line "$state/$task.status")
       [ -n "$last" ] && status_is_captain_relevant "$last" \
+        && { [ "$(status_line_verb "$last")" != needs-decision ] \
+          || ! status_has_open_needs_decision "$state/$task.status"; } \
         && mark_status_seen "$state" "$task" "$last" ;;
   esac
 }
@@ -1043,9 +1089,20 @@ housekeeping() {  # <state>
   #     scan_captain_relevant_statuses; the daemon layers its digest dedup on top.
   if [ "$(_file_age "$state/.subsuper-last-scan")" -ge "${FM_HEARTBEAT_SCAN_SECS:-$HEARTBEAT_SCAN_SECS_DEFAULT}" ]; then
     _now > "$state/.subsuper-last-scan"
-    local seen
+    local seen instance key summary
+    while IFS="$(printf '\t')" read -r f task instance key summary; do
+      [ -n "$f" ] || continue
+      seen="$state/.subsuper-seen-decision-$(_stale_key "$task")-$instance"
+      [ "$(cat "$seen" 2>/dev/null || true)" = "$instance" ] && continue
+      escalate_add "$state" "$(basename "$f"): open needs-decision [key=$key] [occurrence=$instance]: $summary (catch-all scan)"
+      printf '%s' "$instance" > "$seen"
+    done < <(scan_open_needs_decisions "$state")
     while IFS="$(printf '\t')" read -r f task last; do
       [ -n "$f" ] || continue
+      if [ "$(status_line_verb "$last")" = needs-decision ] \
+        && status_has_open_needs_decision "$f"; then
+        continue
+      fi
       seen="$state/.subsuper-seen-status-$(_stale_key "$task")"
       [ "$(cat "$seen" 2>/dev/null || true)" = "$last" ] && continue
       escalate_add "$state" "$(basename "$f"): $last (catch-all scan)"

@@ -1211,6 +1211,63 @@ test_heartbeat_backstop_surfaces_unsurfaced_status() {
   pass "heartbeat backstop fail-safe surfaces a captain-relevant status the per-wake path missed"
 }
 
+test_retained_decision_surfaces_signal_and_heartbeat_once() {
+  local dir state fakebin out status_file instance marker pid sig out2
+  dir=$(make_case retained-decision-signal); state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"
+  status_file="$state/retained.status"
+  fm_decision_cutover_ensure_status "$status_file" || fail "could not establish retained-decision signal fixture"
+  printf '%s\n' \
+    'needs-decision [key=route]: captain must choose the route' \
+    'resolved [key=route]: queued generic command was not authority' \
+    'working: worker resumed after consuming the queue' >> "$status_file"
+  signal_reason_is_actionable "$status_file" \
+    || fail "folded open decision was not actionable after a later working line"
+  instance=$(status_open_needs_decisions "$status_file" | awk -F '\t' 'NR == 1 { print $2 }')
+  [ -n "$instance" ] || fail "retained-decision occurrence was not folded open"
+  export FM_FAKE_CREW_STATE='state: working · source: run-step · worker active'
+  watch_bg "$state" "$fakebin" "$out"
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "active worker's retained decision was absorbed on the signal path"
+  grep -F "signal: $status_file" "$out" >/dev/null \
+    || fail "retained decision did not surface through live signal notification"
+  marker="$state/.hb-surfaced-decision-retained-$instance"
+  [ "$(cat "$marker" 2>/dev/null || true)" = "$instance" ] \
+    || fail "signal path did not deduplicate the retained decision by occurrence"
+
+  dir=$(make_case retained-decision-heartbeat); state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"
+  status_file="$state/retained.status"
+  fm_decision_cutover_ensure_status "$status_file" || fail "could not establish retained-decision heartbeat fixture"
+  printf '%s\n' \
+    'needs-decision [key=route]: captain must choose the route' \
+    'resolved [key=route]: queued generic command was not authority' \
+    'working: worker resumed after consuming the queue' >> "$status_file"
+  instance=$(status_open_needs_decisions "$status_file" | awk -F '\t' 'NR == 1 { print $2 }')
+  sig=$(seen_sig "$status_file"); printf '%s' "$sig" > "$state/.seen-retained_status"
+  PATH="$fakebin:$PATH" FM_FAKE_CREW_STATE='state: working · source: run-step · worker active' \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=1 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "heartbeat did not surface an active worker's retained decision"
+  grep -Fx heartbeat "$out" >/dev/null || fail "retained decision did not surface through heartbeat notification"
+  marker="$state/.hb-surfaced-decision-retained-$instance"
+  [ "$(cat "$marker" 2>/dev/null || true)" = "$instance" ] \
+    || fail "heartbeat did not deduplicate the retained decision by occurrence"
+
+  out2="$dir/watch-second.out"
+  rm -f "$state/.last-heartbeat"
+  PATH="$fakebin:$PATH" FM_FAKE_CREW_STATE='state: working · source: run-step · worker active' \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=1 "$WATCH" > "$out2" &
+  pid=$!
+  if ! wait_live "$pid" 30; then
+    reap "$pid"
+    fail "retained decision re-surfaced after its occurrence marker was recorded: $(cat "$out2")"
+  fi
+  reap "$pid"
+  unset FM_FAKE_CREW_STATE
+  pass "retained decisions surface through signal and heartbeat once per occurrence while workers remain active"
+}
+
 # --- beacon stays fresh while absorbing -------------------------------------
 
 test_beacon_stays_fresh_while_absorbing() {
@@ -1331,6 +1388,7 @@ test_nonterminal_stale_repairs_missing_or_corrupt_timer
 test_triage_log_size_cap_accepts_spaced_wc_counts
 test_heartbeat_no_change_absorbed
 test_heartbeat_backstop_surfaces_unsurfaced_status
+test_retained_decision_surfaces_signal_and_heartbeat_once
 test_beacon_stays_fresh_while_absorbing
 test_afk_present_reverts_watcher_to_one_shot
 test_afk_paused_changed_pane_hands_off_plain_stale

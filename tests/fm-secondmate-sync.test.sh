@@ -69,6 +69,7 @@ add_sm_worktree() {
   local w=$1 id=$2 commit=$3
   git -C "$w/main" worktree add -q --detach "$w/$id" "$commit"
   printf '%s\n' "$id" > "$w/$id/.fm-secondmate-home"
+  fm_test_attest_secondmate_decision_cutover "$w/home/state" "$id" "$w/$id" "$commit"
   {
     printf 'window=firstmate:fm-%s\n' "$id"
     printf 'kind=secondmate\n'
@@ -413,8 +414,10 @@ test_bootstrap_nudge_send_uses_state_override() {
   add_sm_worktree "$w" sm-instr "$c1"
   bump_primary "$w" instr
   override_state="$w/override-state"
-  mkdir -p "$override_state"
+  mkdir -p "$override_state/.secondmate-decision-cutover-v1"
   mv "$w/home/state/sm-instr.meta" "$override_state/sm-instr.meta"
+  mv "$w/home/state/.secondmate-decision-cutover-v1/sm-instr.ready" \
+    "$override_state/.secondmate-decision-cutover-v1/sm-instr.ready"
   touch "$override_state/.last-watcher-beat"
   fakebin=$(make_fake_toolchain "$w")
   log="$w/tmux.log"
@@ -672,26 +675,102 @@ SH
 
 # --- T9: bootstrap surfaces a skipped dirty live secondmate home --------------
 test_bootstrap_sweep_surfaces_skipped_home() {
-  local w c1 base before fakebin out skip_line
+  local w c1 base before fakebin out skip_line quarantine send_out send_rc decision_out decision_rc log
   w=$(new_world boot-skip)
   c1=$(head_of "$w/main")
   add_sm_worktree "$w" sm-dirty "$c1"
+  rm -f "$w/home/state/.secondmate-decision-cutover-v1/sm-dirty.ready" \
+    "$w/sm-dirty/state/.decision-answer-cutover-v1"
   bump_primary "$w" instr
   base=$(primary_head_commit "$w/main")
   printf 'uncommitted local edit\n' >> "$w/sm-dirty/AGENTS.md"
   before=$(head_of "$w/sm-dirty")
 
   fakebin=$(make_fake_toolchain "$w")
+  log="$w/tmux.log"
   out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" \
-    "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null)
+    FM_FAKE_TMUX_LOG="$log" "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null)
 
   skip_line=$(printf '%s\n' "$out" | grep '^SECONDMATE_SYNC: secondmate sm-dirty: skipped:' || true)
   [ -n "$skip_line" ] || fail "no SECONDMATE_SYNC skip line emitted (got: $out)"
   assert_contains "$skip_line" "dirty working tree" "dirty skipped home reports the actionable reason"
+  assert_contains "$out" "SECONDMATE_SYNC: secondmate sm-dirty: quarantined:" \
+    "dirty pre-cutover home did not report its dispatch quarantine"
+  assert_contains "$out" "repair owner: firstmate" \
+    "dirty pre-cutover quarantine did not declare its repair owner"
+  quarantine="$w/home/state/.secondmate-decision-cutover-v1/sm-dirty.quarantine"
+  assert_present "$quarantine" "dirty pre-cutover home was not durably quarantined"
+  assert_absent "$w/sm-dirty/state/.decision-answer-cutover-v1" \
+    "dirty home published its decision boundary before compatible code loaded"
+  send_out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" \
+    FM_SEND_SETTLE=0 "$ROOT/bin/fm-send.sh" fm-sm-dirty "ordinary dispatch" 2>&1)
+  send_rc=$?
+  [ "$send_rc" -ne 0 ] || fail "ordinary dispatch reached a quarantined secondmate"
+  assert_contains "$send_out" "quarantined from dispatch and decision handling" \
+    "quarantined secondmate refusal did not cover dispatch and decision handling"
+  decision_out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" \
+    FM_SEND_SETTLE=0 "$ROOT/bin/fm-send.sh" fm-sm-dirty --decision route "approved route" 2>&1)
+  decision_rc=$?
+  [ "$decision_rc" -ne 0 ] || fail "decision answer reached a quarantined secondmate"
+  assert_contains "$decision_out" "quarantined from dispatch and decision handling" \
+    "quarantined secondmate decision refusal bypassed the shared guard"
+  assert_absent "$w/home/state/sm-dirty.decision-answers" \
+    "quarantined decision answer minted authority before refusal"
+  assert_not_contains "$(cat "$log" 2>/dev/null || true)" "ordinary dispatch" \
+    "quarantined secondmate dispatch reached its backend"
   [ "$(head_of "$w/sm-dirty")" = "$before" ] || fail "dirty home HEAD moved"
   [ "$(head_of "$w/main")" = "$base" ] || fail "primary HEAD changed during bootstrap"
   grep -q 'uncommitted local edit' "$w/sm-dirty/AGENTS.md" || fail "dirty edit was discarded"
   pass "T9 bootstrap surfaces a skipped dirty live secondmate home"
+}
+
+test_bootstrap_cutover_waits_for_correlated_reload() {
+  local w c1 fakebin out reload quarantine ready corr out2 send_rc log
+  w=$(new_world boot-cutover-reload)
+  c1=$(head_of "$w/main")
+  add_sm_worktree "$w" sm-reload "$c1"
+  rm -f "$w/home/state/.secondmate-decision-cutover-v1/sm-reload.ready" \
+    "$w/sm-reload/state/.decision-answer-cutover-v1"
+  fakebin=$(make_fake_toolchain "$w")
+  log="$w/tmux.log"
+
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" \
+    FM_SEND_SETTLE=0 FM_FAKE_TMUX_LOG="$log" "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null)
+  assert_contains "$out" "SECONDMATE_SYNC: secondmate sm-reload: quarantined:" \
+    "clean current secondmate did not stay quarantined pending reload acknowledgement"
+  assert_contains "$out" "reload acknowledgement corr=" \
+    "reload quarantine did not identify the correlated acknowledgement"
+  reload="$w/home/state/.secondmate-decision-cutover-v1/sm-reload.reload"
+  quarantine="$w/home/state/.secondmate-decision-cutover-v1/sm-reload.quarantine"
+  ready="$w/home/state/.secondmate-decision-cutover-v1/sm-reload.ready"
+  assert_present "$reload" "reload request was not durably recorded"
+  assert_present "$quarantine" "secondmate quarantine cleared before reload acknowledgement"
+  assert_absent "$ready" "reload attestation published before acknowledgement"
+  assert_absent "$w/sm-reload/state/.decision-answer-cutover-v1" \
+    "home decision boundary published before reload acknowledgement"
+  corr=$(grep '^corr=' "$reload" | cut -d= -f2-)
+  case "$corr" in
+    [a-f0-9][a-f0-9][a-f0-9][a-f0-9][a-f0-9][a-f0-9][a-f0-9][a-f0-9][a-f0-9][a-f0-9][a-f0-9][a-f0-9][a-f0-9][a-f0-9][a-f0-9][a-f0-9]) ;;
+    *) fail "reload request carried an invalid correlation id: $corr" ;;
+  esac
+  printf 'done: corr=%s compatible code reloaded\n' "$corr" >> "$w/home/state/sm-reload.status"
+
+  out2=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" \
+    FM_SEND_SETTLE=0 FM_FAKE_TMUX_LOG="$log" "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null)
+  assert_not_contains "$out2" "secondmate sm-reload: quarantined:" \
+    "correlated reload acknowledgement did not clear quarantine"
+  assert_present "$ready" "correlated reload acknowledgement did not publish attestation"
+  assert_absent "$quarantine" "quarantine marker remained after acknowledged reload"
+  assert_absent "$reload" "reload request remained after acknowledged reload"
+  assert_present "$w/sm-reload/state/.decision-answer-cutover-v1" \
+    "home decision boundary was not published after acknowledged reload"
+
+  PATH="$fakebin:$BASE_PATH" FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" \
+    FM_SEND_SETTLE=0 FM_FAKE_TMUX_LOG="$log" \
+    "$ROOT/bin/fm-send.sh" fm-sm-reload "post-cutover dispatch" >/dev/null 2>&1
+  send_rc=$?
+  [ "$send_rc" -eq 0 ] || fail "dispatch remained blocked after correlated reload convergence"
+  pass "T9b secondmate cutover waits for clean code and correlated reload acknowledgement"
 }
 
 # --- T10: spawning a secondmate fast-forwards its worktree before launch ------
@@ -861,6 +940,7 @@ test_bootstrap_nudge_retry_is_idempotent
 test_bootstrap_nudge_retry_refuses_changed_home
 test_nudge_retry_uses_fresh_herdr_endpoint_after_respawn
 test_bootstrap_sweep_surfaces_skipped_home
+test_bootstrap_cutover_waits_for_correlated_reload
 test_spawn_fast_forwards_before_launch
 test_spawn_warns_when_sync_skipped_before_launch
 test_seed_marker_clean_when_gitignored

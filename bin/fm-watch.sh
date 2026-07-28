@@ -509,29 +509,42 @@ run_check_capture() {
 
 # Surfaced-marker bookkeeping for the heartbeat backstop is owned by
 # fm-push-transition-lib.sh because push and poll paths must write one format.
-# Mark every current captain-relevant status as surfaced. Called after the
-# heartbeat backstop enqueues its wake, so the same statuses are not re-surfaced
-# by the next heartbeat.
+# Mark every current captain-relevant status and folded decision occurrence as
+# surfaced. Called after the heartbeat backstop enqueues its wake, so the same
+# work is not re-surfaced by the next heartbeat.
 mark_all_captain_relevant_surfaced() {
-  local f task last
+  local f task last instance _key _summary
   while IFS=$(printf '\t') read -r f task last; do
     [ -n "$f" ] || continue
     printf '%s' "$last" > "$(_hb_surfaced_path "$task")"
   done < <(scan_captain_relevant_statuses "$STATE")
+  while IFS=$(printf '\t') read -r f task instance _key _summary; do
+    [ -n "$f" ] || continue
+    printf '%s' "$instance" > "$(_hb_decision_surfaced_path "$task" "$instance")"
+  done < <(scan_open_needs_decisions "$STATE")
 }
 
-# Cheap heartbeat fleet-scan (the always-on twin of the daemon's catch-all). 0 if
-# any captain-relevant status has NOT already been surfaced to firstmate (its
-# content differs from the .hb-surfaced-<task> marker). Pure detect, no side
-# effects: the caller enqueues first, then marks surfaced. Because every
-# captain-relevant signal/stale already marks itself surfaced when it wakes
-# firstmate, this normally finds nothing and the heartbeat is absorbed; it
-# surfaces only a captain-relevant status the per-wake path absorbed by mistake -
-# the fail-safe backstop.
+# Cheap heartbeat fleet-scan (the always-on twin of the daemon's catch-all). 0
+# if any captain-relevant latest line or folded needs-decision occurrence has
+# NOT already been surfaced to firstmate. Pure detect, no side effects: the
+# caller enqueues first, then marks surfaced. Because every captain-relevant
+# signal/stale already marks itself surfaced when it wakes firstmate, this
+# normally finds nothing and the heartbeat is absorbed; it surfaces only work
+# the per-wake path missed.
 heartbeat_scan_finds_actionable() {
-  local f task last surfaced
+  local f task last surfaced instance _key _summary
+  while IFS=$(printf '\t') read -r f task instance _key _summary; do
+    [ -n "$f" ] || continue
+    surfaced=$(cat "$(_hb_decision_surfaced_path "$task" "$instance")" 2>/dev/null || true)
+    [ "$surfaced" = "$instance" ] && continue
+    return 0
+  done < <(scan_open_needs_decisions "$STATE")
   while IFS=$(printf '\t') read -r f task last; do
     [ -n "$f" ] || continue
+    if [ "$(status_line_verb "$last")" = needs-decision ] \
+      && status_has_open_needs_decision "$f"; then
+      continue
+    fi
     surfaced=$(cat "$(_hb_surfaced_path "$task")" 2>/dev/null || true)
     [ "$surfaced" = "$last" ] && continue
     return 0

@@ -329,6 +329,7 @@ add_sm_home() {
     printf 'harness=%s\n' "$harness"
     printf 'home=%s\n' "$home"
   } > "$w/home/state/$id.meta"
+  fm_test_attest_secondmate_decision_cutover "$w/home/state" "$id" "$home"
 }
 
 run_bootstrap() {  # <fakebin> <home> <pane-cmd> <call-log> [extra env...] -> stdout

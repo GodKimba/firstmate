@@ -45,14 +45,31 @@ _hb_surfaced_path() {
   printf '%s/.hb-surfaced-%s' "$STATE" "$(printf '%s' "$1" | tr ':/.' '___')"
 }
 
+_hb_decision_surfaced_path() {
+  printf '%s/.hb-surfaced-decision-%s-%s' \
+    "$STATE" "$(printf '%s' "$1" | tr ':/.' '___')" "$2"
+}
+
+mark_open_decisions_surfaced() {  # <status-file>
+  local f=$1 task key instance _summary
+  task=$(basename "$f"); task="${task%.status}"
+  while IFS=$'\t' read -r key instance _summary || [ -n "$key" ]; do
+    [ -n "$key" ] || continue
+    printf '%s' "$instance" > "$(_hb_decision_surfaced_path "$task" "$instance")"
+  done <<EOF
+$(status_open_needs_decisions "$f")
+EOF
+}
+
 # Record a captain-relevant status after its durable wake has been enqueued.
 mark_surfaced() {  # <status-file>
   local f=$1 task last
   task=$(basename "$f"); task="${task%.status}"
   last=$(last_status_line "$f")
-  [ -n "$last" ] || return 0
-  status_is_captain_relevant "$last" || return 0
-  printf '%s' "$last" > "$(_hb_surfaced_path "$task")"
+  if [ -n "$last" ] && status_is_captain_relevant "$last"; then
+    printf '%s' "$last" > "$(_hb_surfaced_path "$task")"
+  fi
+  mark_open_decisions_surfaced "$f"
 }
 
 # Act on a fresh actionable transition from a push-capable backend.
