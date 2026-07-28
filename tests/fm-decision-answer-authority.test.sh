@@ -27,11 +27,20 @@ open_set() {  # <status-file> -> fold output with tabs made visible
   status_open_decisions "$1" | tr '\t' '|'
 }
 
-# Mint through the same owner fm-send uses, against an already-open request.
-mint_for() {  # <status-file> <key> <summary> -> token
-  local f=$1 key=$2 summary=$3 token
-  token=$(fm_decision_mint_answer_token) || fail "could not mint an answer token"
-  fm_decision_record_answer "$(fm_decision_answers_file "$f")" "$token" "$key" "$summary" \
+# Mint through the same owner fm-send uses, against an already-open occurrence.
+mint_for() {  # <status-file> <key> -> token
+  local f=$1 key=$2 token instance d_key d_verb d_instance d_summary
+  instance=''
+  while IFS=$'\t' read -r d_key d_verb d_instance d_summary || [ -n "$d_key" ]; do
+    [ "$d_key" = "$key" ] || continue
+    [ "$d_verb" = needs-decision ] || continue
+    instance=$d_instance
+  done <<EOF
+$(status_open_decisions "$f" --with-instance)
+EOF
+  [ -n "$instance" ] || fail "could not find open occurrence for $key"
+  token=$(fm_decision_mint_answer_token "$instance") || fail "could not mint an answer token"
+  fm_decision_record_answer "$(fm_decision_answers_file "$f")" "$token" "$key" "$instance" \
     || fail "could not record the answer token"
 }
 
@@ -107,26 +116,28 @@ test_correlated_answer_after_the_request_closes_it() {
   d=$(new_case correlated)
   f="$d/state/task.status"
   printf 'needs-decision [key=red-test]: accept the red test, or keep fixing?\n' > "$f"
-  token=$(mint_for "$f" red-test "accept the red test, or keep fixing?")
+  token=$(mint_for "$f" red-test)
   printf 'resolved [key=red-test] [ans=%s]: captain chose keep fixing\n' "$token" >> "$f"
   out=$(open_set "$f")
   [ -z "$out" ] || fail "a correlated answer failed to close its decision: $out"
   pass "an answer minted after the request opened closes exactly that request"
 }
 
-test_answer_cannot_be_minted_before_its_request_opens() {
-  local d f token
+test_token_for_an_earlier_position_cannot_close_a_later_request() {
+  local d f token instance
   d=$(new_case no-early-mint)
   f="$d/state/task.status"
+  instance=$(fm_decision_instance_id 1)
+  token=$(fm_decision_mint_answer_token "$instance") || fail "could not mint an early token"
+  fm_decision_record_answer "$(fm_decision_answers_file "$f")" "$token" red-test "$instance" \
+    >/dev/null \
+    || fail "could not record the early token"
   printf 'working: still deciding whether to ask\n' > "$f"
-  # Nothing is open, so the fold has no summary to bind an answer to. A token
-  # minted against the wrong summary cannot close the request that opens later.
-  token=$(mint_for "$f" red-test "a summary nobody has written yet")
   printf 'needs-decision [key=red-test]: accept the red test, or keep fixing?\n' >> "$f"
   printf 'resolved [key=red-test] [ans=%s]: replayed an early token\n' "$token" >> "$f"
   assert_contains "$(open_set "$f")" "red-test|needs-decision|" \
     "a token minted before the request existed closed it anyway"
-  pass "a token bound to a different request instance never closes a later one"
+  pass "a token for an earlier stream position never closes a later request"
 }
 
 test_reopened_decision_needs_a_fresh_answer() {
@@ -134,7 +145,7 @@ test_reopened_decision_needs_a_fresh_answer() {
   d=$(new_case reopened)
   f="$d/state/task.status"
   printf 'needs-decision [key=scope]: ship the narrow fix, or the broad one?\n' > "$f"
-  token=$(mint_for "$f" scope "ship the narrow fix, or the broad one?")
+  token=$(mint_for "$f" scope)
   printf 'resolved [key=scope] [ans=%s]: captain chose narrow\n' "$token" >> "$f"
   out=$(open_set "$f")
   [ -z "$out" ] || fail "pre-check: the first correlated answer should have closed it"
@@ -147,6 +158,30 @@ test_reopened_decision_needs_a_fresh_answer() {
   pass "reopening a key requires a freshly minted answer"
 }
 
+test_identical_reopen_rejects_old_duplicate_and_retry_delivery() {
+  local d f first retry current out
+  d=$(new_case identical-reopen)
+  f="$d/state/task.status"
+  printf 'needs-decision [key=scope]: ship the narrow fix?\n' > "$f"
+  first=$(mint_for "$f" scope)
+  retry=$(mint_for "$f" scope)
+  printf 'resolved [key=scope] [ans=%s]: retry delivery answered the first occurrence\n' "$retry" >> "$f"
+  [ -z "$(open_set "$f")" ] || fail "a retry token for the current occurrence did not close it"
+  printf 'resolved [key=scope] [ans=%s]: duplicate resolution delivery\n' "$retry" >> "$f"
+  printf 'needs-decision [key=scope]: ship the narrow fix?\n' >> "$f"
+  printf 'resolved [key=scope] [ans=%s]: delayed first response\n' "$first" >> "$f"
+  printf 'resolved [key=scope] [ans=%s]: delayed retry response\n' "$retry" >> "$f"
+  out=$(open_set "$f")
+  assert_contains "$out" "scope|needs-decision|ship the narrow fix?" \
+    "an old response closed an identical reopened decision"
+  current=$(mint_for "$f" scope)
+  [ "${current:0:16}" != "${first:0:16}" ] \
+    || fail "identical openings reused the same occurrence identifier"
+  printf 'resolved [key=scope] [ans=%s]: answered the current occurrence\n' "$current" >> "$f"
+  [ -z "$(open_set "$f")" ] || fail "the current occurrence's response did not close it"
+  pass "identical reopens reject delayed duplicates while current retries remain valid"
+}
+
 # --- unrelated keys ----------------------------------------------------------
 
 test_answer_for_another_key_does_not_transfer() {
@@ -157,7 +192,7 @@ test_answer_for_another_key_does_not_transfer() {
     printf 'needs-decision [key=red-test]: accept the red test?\n'
     printf 'needs-decision [key=api-shape]: one endpoint, or two?\n'
   } > "$f"
-  token=$(mint_for "$f" api-shape "one endpoint, or two?")
+  token=$(mint_for "$f" api-shape)
   printf 'resolved [key=red-test] [ans=%s]: borrowed the other decision token\n' "$token" >> "$f"
   out=$(open_set "$f")
   assert_contains "$out" "red-test|needs-decision|" \
@@ -220,7 +255,7 @@ test_blocked_and_captain_held_closure_are_unchanged() {
 
 test_answer_token_does_not_disturb_line_parsers() {
   local line
-  line='resolved [key=red-test] [ans=3f2a91c07b4d6e58]: captain chose keep fixing'
+  line='resolved [key=red-test] [ans=00000000000000013f2a91c07b4d6e58]: captain chose keep fixing'
   [ "$(status_line_verb "$line")" = resolved ] \
     || fail "the answer token broke verb parsing: '$(status_line_verb "$line")'"
   [ "$(status_line_note "$line")" = "captain chose keep fixing" ] \
@@ -229,7 +264,7 @@ test_answer_token_does_not_disturb_line_parsers() {
     && fail "a correlated resolution must stay a nonterminal, non-captain-relevant event"
   # An [ans=] with no key is malformed: it must not silently become a default-key
   # event, and the verb must still parse so the line is classified, not mangled.
-  line='resolved [ans=3f2a91c07b4d6e58]: no key at all'
+  line='resolved [ans=00000000000000013f2a91c07b4d6e58]: no key at all'
   [ "$(status_line_verb "$line")" = resolved ] \
     || fail "a keyless answer token mangled the verb: '$(status_line_verb "$line")'"
   pass "the answer token is transparent to the shared single-line parsers"
@@ -238,8 +273,9 @@ test_answer_token_does_not_disturb_line_parsers() {
 test_pre_request_generic_command_never_answers
 test_queued_generic_command_reaches_a_busy_worker_unchanged
 test_correlated_answer_after_the_request_closes_it
-test_answer_cannot_be_minted_before_its_request_opens
+test_token_for_an_earlier_position_cannot_close_a_later_request
 test_reopened_decision_needs_a_fresh_answer
+test_identical_reopen_rejects_old_duplicate_and_retry_delivery
 test_answer_for_another_key_does_not_transfer
 test_generic_and_unkeyed_input_never_closes_a_decision
 test_blocked_and_captain_held_closure_are_unchanged

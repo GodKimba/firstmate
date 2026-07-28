@@ -189,7 +189,7 @@ test_decision_answer_requires_an_open_request() {
 }
 
 test_decision_answer_mints_a_correlated_token() {
-  local dir fb home err log rc got token
+  local dir fb home err log rc got token record_key record_instance expected_instance _key _verb _summary
   dir="$TMP_ROOT/decision-open"; mkdir -p "$dir"
   fb=$(make_stubs "$dir"); home=$(setup_home decision-open); err="$dir/send.err"; log="$dir/tmux.log"; : > "$log"
   fm_write_meta "$home/state/lane-d2.meta" "window=sess:fm-lane-d2" "kind=ship"
@@ -201,7 +201,16 @@ test_decision_answer_mints_a_correlated_token() {
   expect_code 0 "$rc" "answering an open decision should succeed"
   assert_present "$home/state/lane-d2.decision-answers" \
     "an answered decision should record its minted token"
-  token=$(cut -f1 "$home/state/lane-d2.decision-answers")
+  IFS=$'\t' read -r token record_key record_instance < "$home/state/lane-d2.decision-answers"
+  IFS=$'\t' read -r _key _verb expected_instance _summary <<EOF
+$(bash -c '. "$1/bin/fm-classify-lib.sh"; status_open_decisions "$2" --with-instance' \
+  _ "$ROOT" "$home/state/lane-d2.status")
+EOF
+  [ "$record_key" = red-test ] || fail "the answer record lost its decision key"
+  [ "$record_instance" = "$expected_instance" ] \
+    || fail "the answer record was not bound to the opening occurrence"
+  [ "${token:0:16}" = "$expected_instance" ] \
+    || fail "the answer token did not carry the opening occurrence identifier"
   got=$(cat "$log")
   assert_contains "$got" "decision [key=red-test] [ans=$token]: keep fixing" \
     "the worker should receive the key and token it must copy onto its resolution"

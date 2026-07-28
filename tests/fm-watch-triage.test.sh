@@ -122,7 +122,7 @@ test_scan_captain_relevant_statuses_classifier() {
 }
 
 test_classifier_primitives() {
-  local dir state open activity canonical late token
+  local dir state open activity canonical late token instance _key _verb _summary
   dir=$(make_case classify-primitives); state="$dir/state"
   printf 'working: a\n\ndone: b\n\n' > "$state/x.status"
   [ "$(last_status_line "$state/x.status")" = "done: b" ] || fail "last_status_line did not return the last non-blank line"
@@ -175,10 +175,13 @@ test_classifier_primitives() {
   printf 'resolved [key=route]: captain chose north\n' >> "$state/canonical-key.status"
   printf '%s' "$(status_open_decisions "$state/canonical-key.status")" | grep -F $'route\t' >/dev/null \
     || fail "an uncorrelated resolution silently closed a request for authority"
-  token=$(fm_decision_mint_answer_token) || fail "could not mint a decision answer token"
+  IFS=$'\t' read -r _key _verb instance _summary <<EOF
+$(status_open_decisions "$state/canonical-key.status" --with-instance)
+EOF
+  token=$(fm_decision_mint_answer_token "$instance") || fail "could not mint a decision answer token"
   fm_decision_record_answer \
     "$(fm_decision_answers_file "$state/canonical-key.status")" \
-    "$token" route "choose north or south" >/dev/null \
+    "$token" route "$instance" >/dev/null \
     || fail "could not record the minted answer token"
   printf 'resolved [key=route] [ans=%s]: captain chose north\n' "$token" >> "$state/canonical-key.status"
   [ -z "$(status_open_decisions "$state/canonical-key.status")" ] \

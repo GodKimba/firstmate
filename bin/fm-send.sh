@@ -256,24 +256,24 @@ else
       exit 1
     fi
     DECISION_STATUS="$STATE/$(fm_send_id_from_meta "$TARGET_META").status"
-    DECISION_SUMMARY=''
+    DECISION_INSTANCE=''
     DECISION_FOUND=0
-    while IFS=$'\t' read -r d_key _d_verb d_summary || [ -n "$d_key" ]; do
+    while IFS=$'\t' read -r d_key _d_verb d_instance _d_summary || [ -n "$d_key" ]; do
       [ "$d_key" = "$DECISION_KEY" ] || continue
       [ "$_d_verb" = needs-decision ] || continue
-      DECISION_SUMMARY=$d_summary
+      DECISION_INSTANCE=$d_instance
       DECISION_FOUND=1
     done <<EOF
-$(status_open_decisions "$DECISION_STATUS")
+$(status_open_decisions "$DECISION_STATUS" --with-instance)
 EOF
     if [ "$DECISION_FOUND" != 1 ]; then
       echo "error: no open decision '$DECISION_KEY' in $DECISION_STATUS; an answer cannot precede its request" >&2
       exit 1
     fi
     DECISION_ANSWERS=$(fm_decision_answers_file "$DECISION_STATUS")
-    DECISION_TOKEN=$(fm_decision_mint_answer_token) \
+    DECISION_TOKEN=$(fm_decision_mint_answer_token "$DECISION_INSTANCE") \
       || { echo "error: could not mint a decision answer token" >&2; exit 1; }
-    fm_decision_record_answer "$DECISION_ANSWERS" "$DECISION_TOKEN" "$DECISION_KEY" "$DECISION_SUMMARY" >/dev/null \
+    fm_decision_record_answer "$DECISION_ANSWERS" "$DECISION_TOKEN" "$DECISION_KEY" "$DECISION_INSTANCE" >/dev/null \
       || { echo "error: could not record the decision answer token in $DECISION_ANSWERS" >&2; exit 1; }
     MESSAGE=$(fm_decision_answer_message "$DECISION_KEY" "$DECISION_TOKEN" "$DECISION_TEXT")
   fi

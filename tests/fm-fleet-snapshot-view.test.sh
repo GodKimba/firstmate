@@ -686,9 +686,12 @@ test_open_decision_clears_on_keyed_resolution() {
   # open request, which is the only thing that closes a request for authority.
   token=$(bash -c '
     . "$1/bin/fm-classify-lib.sh"
-    t=$(fm_decision_mint_answer_token) || exit 1
-    fm_decision_record_answer "$(fm_decision_answers_file "$2")" "$t" race \
-      "fix the reconcile-before-subscribe race"' _ "$ROOT" "$home/state/resolved-decision.status") \
+    IFS="$(printf "\t")" read -r key verb instance summary <<EOF
+$(status_open_decisions "$2" --with-instance)
+EOF
+    t=$(fm_decision_mint_answer_token "$instance") || exit 1
+    fm_decision_record_answer "$(fm_decision_answers_file "$2")" "$t" race "$instance"' \
+    _ "$ROOT" "$home/state/resolved-decision.status") \
     || fail "could not mint a correlated answer token for the resolution fixture"
   printf 'resolved [key=race] [ans=%s]: captain chose subscribe-then-reconcile\n' "$token" \
     >> "$home/state/resolved-decision.status"
