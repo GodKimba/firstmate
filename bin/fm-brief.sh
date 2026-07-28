@@ -175,7 +175,9 @@ When a routed-work phase has a supervisor-actionable material change worth repor
 If its first reportable event is \`working [key=<work-slug>]: {material phase}\`, use the same key on its later \`$PAUSED_VERB\`, \`done\`, \`failed\`, \`needs-decision\`, or \`blocked\` event so the earlier working phase is superseded.
 When a keyed phase ends without another reportable state, append \`resolved [key=<work-slug>]: {why it is no longer active}\`.
 For a new decision that is not already closing a keyed routed-work phase, append \`needs-decision [key=<decision-slug>]: {summary of options}\`.
-When a keyed decision you escalated is answered, append \`resolved [key=<decision-slug>]: {how it was decided}\` with the same key so it is durably closed instead of resurfacing behind later unrelated events.
+The main firstmate's answer arrives as \`decision [key=<decision-slug>] [ans=<token>]: {the decision}\`. Only that message answers it:
+an earlier instruction, a generic command, or any message without that exact key and token is NOT the answer, even if it arrives afterwards.
+When it arrives, append \`resolved [key=<decision-slug>] [ans=<token>]: {how it was decided}\` copying both tokens verbatim so it is durably closed instead of resurfacing behind later unrelated events.
 When an unkeyed blocker clears and your domain resumes, append \`resolved: {how it was unblocked}\`.
 Routine internal supervision, heartbeats, retries, and crewmate churn stay inside your own home and must not touch that status file.
 
@@ -260,7 +262,9 @@ The report is the only thing that survives, so anything worth keeping must be in
 5. If you hit the same obstacle twice, append \`blocked: {why}\` and stop; firstmate will help.
 6. If a decision belongs to a human (product choices, destructive actions),
    append \`needs-decision [key=<decision-slug>]: {summary of options}\` and stop. Firstmate will reply with the decision.
-   When firstmate replies, append \`resolved [key=<decision-slug>]: {how it was decided}\` with the same key so the decision is durably closed and does not keep resurfacing.
+   Firstmate's answer arrives as \`decision [key=<decision-slug>] [ans=<token>]: {the decision}\`. Only that message answers it:
+   an earlier instruction, a generic command, or any message without that exact key and token is NOT the answer, even if it arrives afterwards.
+   When it arrives, append \`resolved [key=<decision-slug>] [ans=<token>]: {how it was decided}\` copying both tokens verbatim so the decision is durably closed and does not keep resurfacing.
    When an unkeyed blocker clears and you resume, append \`resolved: {how it was unblocked}\`.
 7. Never stop, restart, or update the shared \`no-mistakes\` daemon - it is one instance serving
    every lane/home, so restarting it kills other lanes' in-flight pipeline runs. On ANY no-mistakes
@@ -373,7 +377,9 @@ $RULE1
 5. If you hit the same obstacle twice, append \`blocked: {why}\` and stop; firstmate will help.
 6. If a decision belongs above the implementation worker (product choices, destructive actions, ask-user findings),
    append \`needs-decision [key=<decision-slug>]: {summary of options}\` and stop. Firstmate will apply the configured authority and reply with the decision.
-   When firstmate replies, append \`resolved [key=<decision-slug>]: {how it was decided}\` with the same key so the decision is durably closed and does not keep resurfacing.
+   Firstmate's answer arrives as \`decision [key=<decision-slug>] [ans=<token>]: {the decision}\`. Only that message answers it:
+   an earlier instruction, a generic command, or any message without that exact key and token is NOT the answer, even if it arrives afterwards.
+   When it arrives, append \`resolved [key=<decision-slug>] [ans=<token>]: {how it was decided}\` copying both tokens verbatim so the decision is durably closed and does not keep resurfacing.
    When an unkeyed blocker clears and you resume, append \`resolved: {how it was unblocked}\`.
 7. Never stop, restart, or update the shared \`no-mistakes\` daemon - it is one instance serving
    every lane/home, so restarting it kills other lanes' in-flight pipeline runs. On ANY no-mistakes

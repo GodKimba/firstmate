@@ -122,7 +122,7 @@ test_scan_captain_relevant_statuses_classifier() {
 }
 
 test_classifier_primitives() {
-  local dir state open activity canonical late
+  local dir state open activity canonical late token
   dir=$(make_case classify-primitives); state="$dir/state"
   printf 'working: a\n\ndone: b\n\n' > "$state/x.status"
   [ "$(last_status_line "$state/x.status")" = "done: b" ] || fail "last_status_line did not return the last non-blank line"
@@ -173,6 +173,14 @@ test_classifier_primitives() {
   printf '%s' "$canonical" | grep -F $'route\tneeds-decision\tchoose north or south' >/dev/null \
     || fail "the canonical early-key form did not open the intended decision"
   printf 'resolved [key=route]: captain chose north\n' >> "$state/canonical-key.status"
+  printf '%s' "$(status_open_decisions "$state/canonical-key.status")" | grep -F $'route\t' >/dev/null \
+    || fail "an uncorrelated resolution silently closed a request for authority"
+  token=$(fm_decision_mint_answer_token) || fail "could not mint a decision answer token"
+  fm_decision_record_answer \
+    "$(fm_decision_answers_file "$state/canonical-key.status")" \
+    "$token" route "choose north or south" >/dev/null \
+    || fail "could not record the minted answer token"
+  printf 'resolved [key=route] [ans=%s]: captain chose north\n' "$token" >> "$state/canonical-key.status"
   [ -z "$(status_open_decisions "$state/canonical-key.status")" ] \
     || fail "the canonical matching resolved event did not close the intended decision"
   printf 'needs-decision: legacy default choice\nresolved: answered route [key=route]\nneeds-decision: choose north or south [key=route]\n' > "$state/late-key.status"

@@ -1,12 +1,21 @@
 #!/usr/bin/env bash
 # Send one line of literal text to a crewmate endpoint, then Enter.
 # Usage: fm-send.sh <target> <text...>
+#        fm-send.sh <target> --decision <key> <text...>
 #   <target> may be an exact task id, a legacy fm-<id> task label resolved
 #   through this home's state/<id>.meta, or an explicit well-formed backend
 #   target. fm-send refuses unresolved guesses rather than falling back to a
 #   tmux window search, because a "successful" send to the wrong endpoint is
 #   worse than a loud failure.
 # Special keys instead of text: fm-send.sh <target> --key Enter
+#
+# --decision <key> answers one open keyed decision. It requires a task selector,
+# refuses unless that exact decision is open right now in the task's status
+# stream, and only then mints and records the answer token that lets the worker's
+# resolved line close the request (bin/fm-classify-lib.sh owns the correlation
+# contract). Because the token cannot exist before the request opened, no queued
+# generic command, unkeyed message, or earlier input can close it. Plain sends
+# are unchanged and still reach a busy worker's queue.
 # Key support is backend-specific: tmux/herdr support Escape, Enter, and C-c;
 # Orca currently supports Enter and C-c only, and rejects Escape.
 #
@@ -75,6 +84,8 @@ fi
 . "$SCRIPT_DIR/fm-marker-lib.sh"
 # shellcheck source=bin/fm-pending-reply-lib.sh
 . "$SCRIPT_DIR/fm-pending-reply-lib.sh"
+# shellcheck source=bin/fm-classify-lib.sh
+. "$SCRIPT_DIR/fm-classify-lib.sh"
 
 FM_GUARD_CONTINUE_LINE='This is a supervision warning only; the requested message WILL still be sent.' "$SCRIPT_DIR/fm-guard.sh" || true
 
@@ -226,6 +237,46 @@ if [ "${1:-}" = "--key" ]; then
   fi
 else
   MESSAGE=$*
+  if [ "${1:-}" = "--decision" ]; then
+    # Answer one open keyed decision. Every refusal below preserves the same
+    # boundary: without a token minted against a currently-open request, the
+    # worker's resolved line cannot close it, so the decision keeps surfacing
+    # instead of being silently advanced past.
+    DECISION_KEY=${2:-}
+    shift 2 || { echo "error: --decision requires <key> and answer text" >&2; exit 1; }
+    DECISION_TEXT=$*
+    [ -n "$DECISION_KEY" ] || { echo "error: --decision requires a decision key" >&2; exit 1; }
+    [ -n "$DECISION_TEXT" ] || { echo "error: --decision requires answer text" >&2; exit 1; }
+    case "$DECISION_KEY" in
+      *[!A-Za-z0-9._-]*)
+        echo "error: decision key '$DECISION_KEY' is not a valid slug" >&2; exit 1 ;;
+    esac
+    if [ -z "$TARGET_SELECTOR" ] || [ -z "$TARGET_META" ]; then
+      echo "error: --decision needs a task selector; an explicit backend target has no decision stream to correlate against" >&2
+      exit 1
+    fi
+    DECISION_STATUS="$STATE/$(fm_send_id_from_meta "$TARGET_META").status"
+    DECISION_SUMMARY=''
+    DECISION_FOUND=0
+    while IFS=$'\t' read -r d_key _d_verb d_summary || [ -n "$d_key" ]; do
+      [ "$d_key" = "$DECISION_KEY" ] || continue
+      [ "$_d_verb" = needs-decision ] || continue
+      DECISION_SUMMARY=$d_summary
+      DECISION_FOUND=1
+    done <<EOF
+$(status_open_decisions "$DECISION_STATUS")
+EOF
+    if [ "$DECISION_FOUND" != 1 ]; then
+      echo "error: no open decision '$DECISION_KEY' in $DECISION_STATUS; an answer cannot precede its request" >&2
+      exit 1
+    fi
+    DECISION_ANSWERS=$(fm_decision_answers_file "$DECISION_STATUS")
+    DECISION_TOKEN=$(fm_decision_mint_answer_token) \
+      || { echo "error: could not mint a decision answer token" >&2; exit 1; }
+    fm_decision_record_answer "$DECISION_ANSWERS" "$DECISION_TOKEN" "$DECISION_KEY" "$DECISION_SUMMARY" >/dev/null \
+      || { echo "error: could not record the decision answer token in $DECISION_ANSWERS" >&2; exit 1; }
+    MESSAGE=$(fm_decision_answer_message "$DECISION_KEY" "$DECISION_TOKEN" "$DECISION_TEXT")
+  fi
   if [ "$MARK_FROM_FIRSTMATE" = 1 ]; then
     # Reuse an existing correlation id for recovery resends; otherwise create a
     # durable parent expectation before delivery. Transport success never

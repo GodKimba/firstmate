@@ -365,12 +365,16 @@ test_keyed_decision_examples_use_authoritative_placement() {
     brief="$home/data/$id/brief.md"
     assert_grep 'needs-decision [key=<decision-slug>]: {summary of options}' "$brief" \
       "$kind brief did not teach the canonical early-key decision opener"
-    assert_grep 'resolved [key=<decision-slug>]: {how it was decided}' "$brief" \
+    assert_grep 'resolved [key=<decision-slug>] [ans=<token>]: {how it was decided}' "$brief" \
       "$kind brief did not teach the matching early-key resolution"
+    assert_grep 'decision [key=<decision-slug>] [ans=<token>]: {the decision}' "$brief" \
+      "$kind brief did not teach the correlated answer message that closes a decision"
     assert_no_grep 'needs-decision: {summary of options}' "$brief" \
       "$kind brief still taught the unkeyed decision opener"
     assert_no_grep 'resolved: {how it was decided or unblocked}' "$brief" \
       "$kind brief still implied that a key could be added after the colon"
+    assert_no_grep 'resolved [key=<decision-slug>]: {how it was decided}' "$brief" \
+      "$kind brief still taught closing a decision without its correlated answer token"
   done
   pass "fm-brief.sh: every worker scaffold teaches authoritative keyed decision placement"
 }

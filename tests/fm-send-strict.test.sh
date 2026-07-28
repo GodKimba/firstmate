@@ -163,8 +163,63 @@ test_healthy_fm_id_send_still_works() {
   pass "fm-send strict: healthy fm-<id> sends still type once and submit"
 }
 
+# --- correlated decision answers --------------------------------------------
+#
+# --decision is the only path that mints the token a worker needs to close a
+# keyed decision, and it mints one only against a request that is already open.
+# That ordering is what stops a queued generic command from becoming approval
+# (bin/fm-classify-lib.sh owns the correlation contract).
+
+test_decision_answer_requires_an_open_request() {
+  local dir fb home err log rc
+  dir="$TMP_ROOT/decision-closed"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); home=$(setup_home decision-closed); err="$dir/send.err"; log="$dir/tmux.log"; : > "$log"
+  fm_write_meta "$home/state/lane-d1.meta" "window=sess:fm-lane-d1" "kind=ship"
+  printf 'working: still deciding whether to ask\n' > "$home/state/lane-d1.status"
+
+  PATH="$fb:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_TMUX_LOG="$log" FM_SEND_SETTLE=0 \
+    "$SEND" lane-d1 --decision red-test "go ahead" >/dev/null 2>"$err"; rc=$?
+  [ "$rc" -ne 0 ] || fail "answering a decision that is not open should fail"
+  assert_contains "$(cat "$err")" "no open decision 'red-test'" \
+    "the refusal should name the decision that is not open"
+  [ ! -s "$log" ] || fail "a refused decision answer still reached the worker"$'\n'"$(cat "$log")"
+  assert_absent "$home/state/lane-d1.decision-answers" \
+    "a refused decision answer must not mint a token"
+  pass "fm-send strict: --decision refuses to answer a request that has not opened"
+}
+
+test_decision_answer_mints_a_correlated_token() {
+  local dir fb home err log rc got token
+  dir="$TMP_ROOT/decision-open"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); home=$(setup_home decision-open); err="$dir/send.err"; log="$dir/tmux.log"; : > "$log"
+  fm_write_meta "$home/state/lane-d2.meta" "window=sess:fm-lane-d2" "kind=ship"
+  printf 'needs-decision [key=red-test]: accept the red test, or keep fixing?\n' \
+    > "$home/state/lane-d2.status"
+
+  PATH="$fb:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_TMUX_LOG="$log" FM_SEND_SETTLE=0 \
+    "$SEND" lane-d2 --decision red-test "keep fixing" >/dev/null 2>"$err"; rc=$?
+  expect_code 0 "$rc" "answering an open decision should succeed"
+  assert_present "$home/state/lane-d2.decision-answers" \
+    "an answered decision should record its minted token"
+  token=$(cut -f1 "$home/state/lane-d2.decision-answers")
+  got=$(cat "$log")
+  assert_contains "$got" "decision [key=red-test] [ans=$token]: keep fixing" \
+    "the worker should receive the key and token it must copy onto its resolution"
+  assert_contains "$got" "target=sess:fm-lane-d2 literal=0 arg=Enter" \
+    "a decision answer should submit like any other message"
+
+  # The worker's correlated resolution closes it; an uncorrelated one would not.
+  printf 'resolved [key=red-test] [ans=%s]: kept fixing\n' "$token" >> "$home/state/lane-d2.status"
+  got=$(bash -c '
+    . "$1/bin/fm-classify-lib.sh"; status_open_decisions "$2"' _ "$ROOT" "$home/state/lane-d2.status")
+  [ -z "$got" ] || fail "the minted token failed to close its own decision: $got"
+  pass "fm-send strict: --decision mints one token bound to the open request"
+}
+
 test_exact_lane_id_send_still_works
 test_unset_fm_home_fails
+test_decision_answer_requires_an_open_request
+test_decision_answer_mints_a_correlated_token
 test_unresolvable_target_does_not_tmux_fallback
 test_prefixless_herdr_pane_id_fails
 test_unmatched_single_colon_target_must_exist

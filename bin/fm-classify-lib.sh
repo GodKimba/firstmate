@@ -73,6 +73,11 @@ FM_PAUSE_RESURFACE_SECS_DEFAULT=3600
 FM_CLASSIFY_RESOLVE_VERB_DEFAULT='resolved'
 FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT='captain-held'
 
+# The verb firstmate uses when it issues a correlated answer to an open decision.
+# It names the decision-answer message shape owned by bin/fm-send.sh --decision;
+# it is not a status verb and never appears in a status stream.
+FM_CLASSIFY_DECISION_VERB_DEFAULT='decision'
+
 # Return the last non-blank line of a status file (empty if missing/blank).
 last_status_line() {
   local f=$1
@@ -161,9 +166,32 @@ status_is_paused_or_captain_held() {  # <status-line>
 # so the late form can neither open nor close the wrong decision silently.
 # The three parsers are pure reads of a single line; the verb parser strips any
 # key token before the colon so the leading word is recovered cleanly.
+#
+# Answer correlation (the authority-ordering boundary): a needs-decision asks for
+# authority the worker does not hold, so its closure additionally requires an
+# "[ans=<token>]" token placed AFTER the key token,
+#   needs-decision [key=api-shape]: <summary>
+#   resolved [key=api-shape] [ans=3f2a91c07b4d6e58]: <how it was decided>
+# The token is minted by bin/fm-send.sh --decision, which refuses to mint one
+# until that keyed request is already open, and is recorded next to the status
+# stream in "<task>.decision-answers". A resolution closes the request only when
+# its token was minted for that key AND for that request instance, so a generic
+# command, an unkeyed message, and any input composed before the request opened
+# can never become its approval. An uncorrelated resolution leaves the request
+# open, which surfaces it rather than silently advancing past it. Closure of a
+# blocked line is unchanged: a blocker clears by being fixed, not by authority.
+# The verified captain-held transfer written by bin/fm-decision-hold.sh is also
+# unchanged, and remains the durable path for a request whose answer never
+# arrived through the correlated channel.
+#
+# The token binds an answer to one request instance; it is not a secret and
+# carries no privacy-bearing content. Unforgeability comes from the minted random
+# token, so the instance digest below only has to separate request instances and
+# deliberately uses no external hashing dependency.
 status_line_verb() {  # <status-line> -> leading verb word
   local v=${1%%:*}
   v=${v%%\[key=*}
+  v=${v%%\[ans=*}
   v=${v#"${v%%[![:space:]]*}"}
   v=${v%"${v##*[![:space:]]}"}
   printf '%s' "$v"
@@ -193,6 +221,101 @@ _fm_decision_key() {  # <status-line> -> key slug, or "default" when no token
       ;;
   esac
 }
+# Print the answer token of a status line, or nothing when it carries none.
+# The token sits after the key token, so a line that carries "[ans=...]" without a
+# preceding "[key=...]" is malformed and prints nothing rather than correlating.
+_fm_decision_answer() {  # <status-line> -> answer token, or empty
+  local prefix=${1%%:*} a
+  case "$prefix" in
+    *\[key=*\]*\[ans=*\]*) : ;;
+    *) return 0 ;;
+  esac
+  a=${prefix#*\[ans=}
+  a=${a%%\]*}
+  case "$a" in
+    ''|*[!A-Za-z0-9]*) return 0 ;;
+    *) printf '%s' "$a" ;;
+  esac
+}
+
+# Digest one request instance so an answer minted for an earlier instance of the
+# same key cannot close a later one. FNV-1a over the request's key and summary,
+# in pure bash so the fold keeps its no-subprocess, no-external-tool contract.
+# This is an instance separator, not a security primitive (see the header above).
+fm_decision_request_digest() {  # <key> <summary> -> 8 hex chars
+  local LC_ALL=C s="$1"$'\n'"$2" i=0 len h=2166136261 c
+  len=${#s}
+  while [ "$i" -lt "$len" ]; do
+    printf -v c '%d' "'${s:i:1}"
+    h=$(( (h ^ (c & 255)) & 4294967295 ))
+    h=$(( (h * 16777619) & 4294967295 ))
+    i=$(( i + 1 ))
+  done
+  printf '%08x' "$h"
+}
+
+# Print the answer-record file that pairs with a status file. fm-send writes one
+# record per minted token; the fold reads it to decide whether a resolution was
+# correlated. Kept beside the status stream so one task's records travel, and are
+# torn down, with that task's other per-task state.
+fm_decision_answers_file() {  # <status-file> -> answer-record file
+  printf '%s' "${1%.status}.decision-answers"
+}
+
+# 0 when <token> was minted for exactly this open request. A record line is
+# "<token>\t<key>\t<digest>"; the token must match all three so an answer to a
+# different key, or to an earlier instance of the same key, never correlates.
+fm_decision_answer_matches() {  # <answers-file> <token> <key> <digest>
+  local f=$1 token=$2 key=$3 digest=$4 rt rk rd
+  [ -n "$token" ] || return 1
+  [ -f "$f" ] || return 1
+  while IFS=$'\t' read -r rt rk rd || [ -n "$rt" ]; do
+    [ "$rt" = "$token" ] || continue
+    [ "$rk" = "$key" ] || continue
+    [ "$rd" = "$digest" ] || continue
+    return 0
+  done < "$f"
+  return 1
+}
+
+# Mint one answer token: 16 lowercase hex characters, from the best source this
+# host has. The token separates one authorized answer from unrelated text, so it
+# only has to be unguessable enough that no message composed without it can carry
+# it by accident; it authenticates nothing on its own.
+fm_decision_mint_answer_token() {
+  local raw=''
+  raw=$(openssl rand -hex 8 2>/dev/null || true)
+  case "$raw" in
+    [a-f0-9][a-f0-9][a-f0-9][a-f0-9][a-f0-9][a-f0-9][a-f0-9][a-f0-9]*) : ;;
+    *)
+      raw=$(printf '%s' "$$-$(date +%s 2>/dev/null)-$RANDOM$RANDOM$RANDOM" \
+        | shasum -a 256 2>/dev/null | awk '{print $1}')
+      ;;
+  esac
+  raw=$(printf '%s' "$raw" | tr 'A-F' 'a-f' | tr -cd 'a-f0-9' | cut -c1-16)
+  [ "${#raw}" -eq 16 ] || return 1
+  printf '%s' "$raw"
+}
+
+# Record a minted token against the open request it answers, then print it.
+# Called only after the caller has confirmed that request is open, which is what
+# makes an answer necessarily later than its request.
+fm_decision_record_answer() {  # <answers-file> <token> <key> <summary>
+  local f=$1 token=$2 key=$3 summary=$4 dir
+  dir=$(dirname "$f")
+  [ -d "$dir" ] || return 1
+  printf '%s\t%s\t%s\n' "$token" "$key" "$(fm_decision_request_digest "$key" "$summary")" >> "$f" \
+    || return 1
+  printf '%s' "$token"
+}
+
+# Print the message shape that carries an authorized answer to a worker. The
+# worker copies the same key and token onto its closing resolved line.
+fm_decision_answer_message() {  # <key> <token> <text>
+  printf '%s [key=%s] [ans=%s]: %s' \
+    "${FM_CLASSIFY_DECISION_VERB:-$FM_CLASSIFY_DECISION_VERB_DEFAULT}" "$1" "$2" "$3"
+}
+
 # Drop the record for <key> from a newline-terminated "<key>\t<verb>\t<note>" set.
 # Portable (no associative arrays) so the fold runs on bash 3.2 as well as 4+.
 _fm_decision_drop() {  # <open-set> <key>
@@ -208,17 +331,38 @@ $set
 EOF
   printf '%s' "$out"
 }
+# Print the "<key>\t<verb>\t<note>" record currently held for <key>, or nothing.
+_fm_decision_get() {  # <open-set> <key>
+  local set=$1 key=$2 line
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    case "$line" in
+      "$key"$'\t'*) printf '%s' "$line"; return 0 ;;
+    esac
+  done <<EOF
+$set
+EOF
+  return 1
+}
 # Fold the WHOLE status stream into the set of decisions still open. Prints one
 # TAB-separated "<key>\t<verb>\t<summary>" line per still-open decision, in
 # most-recently-opened-last order; prints nothing when none are open. Pure read of
-# the file, no globals beyond the optional FM_CLASSIFY_RESOLVE_VERB override. This
-# is the durable open-set the fleet snapshot and any point-in-time consumer must use
-# instead of trusting the last status line.
+# the file and of the paired answer records, no globals beyond the optional
+# FM_CLASSIFY_RESOLVE_VERB override. This is the durable open-set the fleet
+# snapshot and any point-in-time consumer must use instead of trusting the last
+# status line.
+#
+# A needs-decision request additionally requires a correlated answer token to
+# close (see the answer-correlation contract above), so an uncorrelated
+# resolution leaves it open. A blocked line still closes on a plain keyed
+# resolution: clearing a blocker is work, not an exercise of authority.
 status_open_decisions() {  # <status-file>
   local f=$1 line verb key note resolve held open='' stripped
+  local answers held_rec held_verb held_note ans
   [ -f "$f" ] || return 0
   resolve=${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}
   held=${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}
+  answers=$(fm_decision_answers_file "$f")
   while IFS= read -r line || [ -n "$line" ]; do
     stripped=${line//[[:space:]]/}
     [ -n "$stripped" ] || continue
@@ -231,7 +375,22 @@ status_open_decisions() {  # <status-file>
         [ -n "$open" ] && open="${open}"$'\n'
         open="${open}${key}"$'\t'"${verb}"$'\t'"${note}"$'\n'
         ;;
-      "$resolve"|"$held")
+      "$resolve")
+        # Only a correlated answer closes a request for authority.
+        if held_rec=$(_fm_decision_get "$open" "$key"); then
+          held_verb=${held_rec#*$'\t'}
+          held_note=${held_verb#*$'\t'}
+          held_verb=${held_verb%%$'\t'*}
+          if [ "$held_verb" = needs-decision ]; then
+            ans=$(_fm_decision_answer "$line")
+            fm_decision_answer_matches "$answers" "$ans" "$key" \
+              "$(fm_decision_request_digest "$key" "$held_note")" || continue
+          fi
+        fi
+        open=$(_fm_decision_drop "$open" "$key")
+        [ -n "$open" ] && open="${open}"$'\n'
+        ;;
+      "$held")
         open=$(_fm_decision_drop "$open" "$key")
         [ -n "$open" ] && open="${open}"$'\n'
         ;;

@@ -668,7 +668,7 @@ test_open_decision_transfers_to_captain_hold() {
 }
 
 test_open_decision_clears_on_keyed_resolution() {
-  local home fakebin out
+  local home fakebin out token
   home=$(make_home resolution)
   mkdir -p "$home/secondmate-home"
   fm_write_meta "$home/state/resolved-decision.meta" \
@@ -682,7 +682,16 @@ test_open_decision_clears_on_keyed_resolution() {
     "projects=alpha"
   printf 'needs-decision [key=race]: fix the reconcile-before-subscribe race\n' > "$home/state/resolved-decision.status"
   printf 'done: an unrelated subtask finished\n' >> "$home/state/resolved-decision.status"
-  printf 'resolved [key=race]: captain chose subscribe-then-reconcile\n' >> "$home/state/resolved-decision.status"
+  # The resolution carries the answer token firstmate minted against this exact
+  # open request, which is the only thing that closes a request for authority.
+  token=$(bash -c '
+    . "$1/bin/fm-classify-lib.sh"
+    t=$(fm_decision_mint_answer_token) || exit 1
+    fm_decision_record_answer "$(fm_decision_answers_file "$2")" "$t" race \
+      "fix the reconcile-before-subscribe race"' _ "$ROOT" "$home/state/resolved-decision.status") \
+    || fail "could not mint a correlated answer token for the resolution fixture"
+  printf 'resolved [key=race] [ans=%s]: captain chose subscribe-then-reconcile\n' "$token" \
+    >> "$home/state/resolved-decision.status"
   fakebin=$(make_fakebin "$home")
   out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --json)
   printf '%s' "$out" | jq -e '
