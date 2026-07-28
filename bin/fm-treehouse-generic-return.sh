@@ -31,12 +31,19 @@ esac
 case "$PROJECT$WORKTREE$POOL$BRANCH$VALIDATED_HEAD$AUTH_META" in
   *$'\n'*) die "generic Treehouse return paths and identities must be single-line values" ;;
 esac
-git check-ref-format --branch "$BRANCH" >/dev/null 2>&1 \
-  || die "invalid acquisition branch $BRANCH"
-case "$BRANCH" in
-  fm/?*) ;;
-  *) die "acquisition branch is not a Firstmate task branch: $BRANCH" ;;
-esac
+BRANCHLESS_SCOUT=0
+if [ "$BRANCH" = - ]; then
+  [ "$DISPOSITION" = discard ] \
+    || die "branchless generic return is limited to disposable scouts"
+  BRANCHLESS_SCOUT=1
+else
+  git check-ref-format --branch "$BRANCH" >/dev/null 2>&1 \
+    || die "invalid acquisition branch $BRANCH"
+  case "$BRANCH" in
+    fm/?*) ;;
+    *) die "acquisition branch is not a Firstmate task branch: $BRANCH" ;;
+  esac
+fi
 command -v jq >/dev/null 2>&1 || die "jq is required for generic Treehouse return"
 command -v perl >/dev/null 2>&1 || die "perl is required for the Treehouse state lock"
 
@@ -71,8 +78,18 @@ auth_meta_dir=$(canonical_dir "$(dirname "$AUTH_META")") \
 auth_meta_real="$auth_meta_dir/$(basename "$AUTH_META")"
 [ "$AUTH_META" = "$auth_meta_real" ] \
   || die "Firstmate task authorization path is not canonical and non-symlinked"
-[ "$(basename "$AUTH_META")" = "${BRANCH#fm/}.meta" ] \
-  || die "Firstmate task authorization does not match acquisition branch $BRANCH"
+task_meta_name=$(basename "$AUTH_META")
+case "$task_meta_name" in
+  ?*.meta) task_id=${task_meta_name%.meta} ;;
+  *) die "Firstmate task authorization record has an invalid name" ;;
+esac
+case "$task_id" in
+  ''|*/*|.*) die "Firstmate task authorization record has an invalid task identity" ;;
+esac
+if [ "$BRANCHLESS_SCOUT" != 1 ]; then
+  [ "$task_meta_name" = "${BRANCH#fm/}.meta" ] \
+    || die "Firstmate task authorization does not match acquisition branch $BRANCH"
+fi
 
 meta_value() {
   local key=$1
@@ -92,14 +109,30 @@ meta_project=$(meta_value project) \
   || die "Firstmate task authorization has no unique project"
 meta_worktree=$(meta_value worktree) \
   || die "Firstmate task authorization has no unique worktree"
-meta_branch=$(meta_value acquisition_branch) \
-  || die "Firstmate task authorization has no unique acquisition branch"
 [ "$meta_project" = "$PROJECT" ] \
   || die "Firstmate task authorization project does not match"
 [ "$meta_worktree" = "$WORKTREE" ] \
   || die "Firstmate task authorization worktree does not match"
-[ "$meta_branch" = "$BRANCH" ] \
-  || die "Firstmate task authorization acquisition branch does not match"
+if [ "$BRANCHLESS_SCOUT" = 1 ]; then
+  meta_kind=$(meta_value kind) \
+    || die "branchless generic return has no unique task kind"
+  [ "$meta_kind" = scout ] \
+    || die "branchless generic return is limited to a recorded scout"
+  meta_branch_count=$(grep -c '^acquisition_branch=' "$AUTH_META" 2>/dev/null || true)
+  [ "$meta_branch_count" -le 1 ] \
+    || die "branchless generic return has ambiguous acquisition metadata"
+  meta_branch=$(grep '^acquisition_branch=' "$AUTH_META" 2>/dev/null \
+    | cut -d= -f2- || true)
+  case "$meta_branch" in
+    ''|-|"fm/$task_id") ;;
+    *) die "branchless scout authorization has an unexpected acquisition branch" ;;
+  esac
+else
+  meta_branch=$(meta_value acquisition_branch) \
+    || die "Firstmate task authorization has no unique acquisition branch"
+  [ "$meta_branch" = "$BRANCH" ] \
+    || die "Firstmate task authorization acquisition branch does not match"
+fi
 
 slot_dir=$(dirname "$WORKTREE")
 slot=$(basename "$slot_dir")
@@ -149,8 +182,18 @@ git -C "$PROJECT" worktree list --porcelain \
 current_head=$(git -C "$WORKTREE" rev-parse --verify HEAD^{commit} 2>/dev/null) \
   || die "cannot resolve worktree HEAD"
 current_branch=$(git -C "$WORKTREE" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
-branch_head=$(git -C "$PROJECT" rev-parse --verify "refs/heads/$BRANCH^{commit}" 2>/dev/null) \
-  || die "acquisition branch $BRANCH is missing"
+branch_head=
+if [ "$BRANCHLESS_SCOUT" = 1 ]; then
+  [ -z "$current_branch" ] \
+    || die "branchless scout worktree is attached to branch $current_branch"
+  if git -C "$PROJECT" show-ref --verify --quiet "refs/heads/fm/$task_id"; then
+    die "branchless scout unexpectedly owns acquisition branch fm/$task_id"
+  fi
+else
+  branch_head=$(git -C "$PROJECT" rev-parse --verify \
+    "refs/heads/$BRANCH^{commit}" 2>/dev/null) \
+    || die "acquisition branch $BRANCH is missing"
+fi
 
 if [ "$DISPOSITION" = landed ]; then
   [ "$current_branch" = "$BRANCH" ] \

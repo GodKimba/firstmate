@@ -606,6 +606,53 @@ test_backend_of_selector_matches_explicit_target_meta() {
   pass "fm_backend_of_selector: exact task ids, legacy fm-<id> labels, and matching explicit targets inherit metadata backend"
 }
 
+test_tmux_recorded_identity_is_exact() {
+  local dir fakebin inventory log state
+  dir="$TMP_ROOT/tmux-recorded-identity"
+  fakebin="$dir/fakebin"
+  inventory="$dir/inventory"
+  log="$dir/tmux.log"
+  mkdir -p "$fakebin"
+  : > "$log"
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  list-windows) cat "${FM_TMUX_INVENTORY:?}" ;;
+  display-message) printf '%s\n' codex ;;
+  kill-window) printf '%s\n' "$*" >> "${FM_TMUX_LOG:?}" ;;
+esac
+SH
+  chmod +x "$fakebin/tmux"
+
+  printf '%s\t%s\n' '@8' 'fm-task-x10' > "$inventory"
+  state=$(PATH="$fakebin:$PATH" FM_TMUX_INVENTORY="$inventory" FM_TMUX_LOG="$log" \
+    fm_backend_endpoint_state tmux firstmate:fm-task-x1 '' '' @7)
+  [ "$state" = missing ] \
+    || fail "missing recorded tmux window id should be authoritative missing, got '$state'"
+  PATH="$fakebin:$PATH" FM_TMUX_INVENTORY="$inventory" FM_TMUX_LOG="$log" \
+    fm_backend_kill_recorded tmux firstmate:fm-task-x1 '' fm-task-x1 @7
+  [ ! -s "$log" ] \
+    || fail "recorded tmux close targeted a prefix-matching peer after the exact id disappeared"
+
+  printf '%s\t%s\n' '@7' 'fm-task-x1' '@8' 'fm-task-x10' > "$inventory"
+  state=$(PATH="$fakebin:$PATH" FM_TMUX_INVENTORY="$inventory" FM_TMUX_LOG="$log" \
+    fm_backend_endpoint_state tmux firstmate:fm-task-x1 '' '' @7)
+  [ "$state" = present ] \
+    || fail "exact recorded tmux window id should be present, got '$state'"
+  PATH="$fakebin:$PATH" FM_TMUX_INVENTORY="$inventory" FM_TMUX_LOG="$log" \
+    fm_backend_kill_recorded tmux firstmate:fm-task-x1 '' fm-task-x1 @7
+  assert_contains "$(cat "$log")" "kill-window -t @7" \
+    "recorded tmux close did not target the stable window id"
+
+  : > "$log"
+  printf '%s\n' 'fm-task-x10' > "$inventory"
+  PATH="$fakebin:$PATH" FM_TMUX_INVENTORY="$inventory" FM_TMUX_LOG="$log" \
+    fm_backend_kill_recorded tmux firstmate:fm-task-x1 '' fm-task-x1 ''
+  assert_contains "$(cat "$log")" "kill-window -t =firstmate:=fm-task-x1" \
+    "legacy tmux close did not use exact-name target syntax"
+  pass "tmux recorded endpoint close uses stable ids and exact legacy names"
+}
+
 # --- old vs new: fm-send.sh --------------------------------------------------
 
 make_send_fakebin() {  # <dir> -> echoes fakebin dir; logs every tmux call to $FM_TMUX_LOG
@@ -768,6 +815,7 @@ make_spawn_fakebin() {  # <dir> <fake-worktree-path> -> echoes fakebin dir
 set -u
 { printf 'tmux'; for a in "\$@"; do printf '\\x1f%s' "\$a"; done; printf '\\n'; } >> "\${FM_TMUX_LOG:?}"
 case "\${1:-}" in
+  new-window) printf '%s\\n' '@7'; exit 0 ;;
   display-message)
     for a in "\$@"; do case "\$a" in *pane_current_path*) printf '%s\\n' "$wt"; exit 0 ;; esac; done
     printf 'firstmate\\n'; exit 0 ;;
@@ -830,6 +878,7 @@ make_spawn_symlink_fakebin() {  # <dir> <initial-project-path> <worktree-path> -
 set -u
 { printf 'tmux'; for a in "\$@"; do printf '\\x1f%s' "\$a"; done; printf '\\n'; } >> "\${FM_TMUX_LOG:?}"
 case "\${1:-}" in
+  new-window) printf '%s\\n' '@7'; exit 0 ;;
   display-message)
     for a in "\$@"; do case "\$a" in *pane_current_path*)
       printf x >> "$counter"
@@ -972,6 +1021,8 @@ test_teardown_closes_endpoint_before_treehouse_return() {
   fm_write_meta "$state_new/$id.meta" \
     "window=firstmate:fm-$id" "worktree=$wt" "project=$proj" "harness=claude" "kind=scout" "mode=no-mistakes" "yolo=off" \
     "decisions_reviewed=1" "decision_keys="
+  git -C "$wt" checkout -q --detach
+  git -C "$proj" branch -D -- "fm/$id" >/dev/null
   touch "$state_new/.last-watcher-beat"
 
   log_new="$TMP_ROOT/teardown-new.log"
@@ -981,9 +1032,9 @@ test_teardown_closes_endpoint_before_treehouse_return() {
   expect_code 0 "$rc_new" "fm-teardown.sh (scout, report present) should succeed"$'\n'"$out_new"
   assert_contains "$(cat "$log_new")" "treehouse"$'\x1f''return'$'\x1f''--force'$'\x1f'"$wt" \
     "teardown did not call treehouse return --force <worktree>"
-  assert_contains "$(cat "$log_new")" "tmux"$'\x1f''kill-window'$'\x1f''-t'$'\x1f'"firstmate:fm-$id" \
+  assert_contains "$(cat "$log_new")" "tmux"$'\x1f''kill-window'$'\x1f''-t'$'\x1f'"=firstmate:=fm-$id" \
     "teardown did not call tmux kill-window -t <window>"
-  kill_line=$(grep -nF "tmux"$'\x1f''kill-window'$'\x1f''-t'$'\x1f'"firstmate:fm-$id" "$log_new" | cut -d: -f1)
+  kill_line=$(grep -nF "tmux"$'\x1f''kill-window'$'\x1f''-t'$'\x1f'"=firstmate:=fm-$id" "$log_new" | cut -d: -f1)
   return_line=$(grep -nF "treehouse"$'\x1f''return'$'\x1f''--force'$'\x1f'"$wt" "$log_new" | cut -d: -f1)
   [ "$kill_line" -lt "$return_line" ] \
     || fail "fm-teardown.sh did not close the exact endpoint before treehouse return"
@@ -1047,6 +1098,8 @@ test_spawn_default_backend_writes_no_meta_field() {
   expect_code 0 $? "explicit --backend tmux should spawn successfully"$'\n'"$out"
   assert_no_grep 'backend=' "$state/$id.meta" \
     "an explicit --backend tmux (the default) must not write backend= to meta (P1 compatibility contract)"
+  [ "$(fm_meta_get "$state/$id.meta" tmux_window_id)" = @7 ] \
+    || fail "tmux spawn must persist the stable window id used for exact teardown"
   rm -rf "/tmp/fm-$id"
   pass "fm-spawn.sh: an explicit --backend tmux resolves silently and writes no backend= (missing means tmux)"
 }
@@ -1122,6 +1175,7 @@ test_backend_validate_spawn_accepts_orca
 test_meta_get_and_backend_of_meta
 test_resolve_selector_three_forms
 test_backend_of_selector_matches_explicit_target_meta
+test_tmux_recorded_identity_is_exact
 test_send_conformance_old_vs_new
 test_peek_conformance_old_vs_new
 test_spawn_symlinked_project_prefix_avoids_false_refusal

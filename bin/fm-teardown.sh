@@ -143,6 +143,7 @@ PR_URL=$(grep '^pr=' "$META" | tail -1 | cut -d= -f2- || true)
 # (/tmp/fm-<id>/); absent for tasks spawned before that change, so tolerate empty.
 TASK_TMP=$(grep '^tasktmp=' "$META" | cut -d= -f2- || true)
 ORCA_WORKTREE_ID=$(fm_meta_get "$META" orca_worktree_id)
+TMUX_WINDOW_ID=$(fm_meta_get "$META" tmux_window_id)
 ORCA_PATH_MATCH_VERIFIED=0
 
 KIND=$(grep '^kind=' "$META" | cut -d= -f2- || true)
@@ -150,10 +151,24 @@ KIND=$(grep '^kind=' "$META" | cut -d= -f2- || true)
 MODE=$(grep '^mode=' "$META" | cut -d= -f2- || true)
 [ -n "$MODE" ] || MODE=no-mistakes
 ACQUISITION_BRANCH=$(fm_meta_get "$META" acquisition_branch)
-[ -n "$ACQUISITION_BRANCH" ] || ACQUISITION_BRANCH="fm/$ID"
+if [ "$KIND" = scout ]; then
+  case "$ACQUISITION_BRANCH" in
+    ''|-|"fm/$ID") ACQUISITION_BRANCH=- ;;
+    *)
+      echo "REFUSED: scout task $ID has unexpected acquisition branch $ACQUISITION_BRANCH." >&2
+      exit 1
+      ;;
+  esac
+else
+  [ -n "$ACQUISITION_BRANCH" ] || ACQUISITION_BRANCH="fm/$ID"
+fi
 TREEHOUSE_RETURN_VALIDATED_HEAD=-
 TREEHOUSE_RETURN_DISPOSITION=discard
 TREEHOUSE_RETURN_ROUTE=managed
+TREEHOUSE_RETURN_JOURNAL="$STATE/$ID.treehouse-return"
+TREEHOUSE_RETURN_JOURNAL_PRESENT=0
+TREEHOUSE_RETURN_COMPLETED=0
+ACQUISITION_BRANCH_HEAD=
 
 default_branch() {
   local ref branch
@@ -175,6 +190,162 @@ meta_value() {
   local meta=$1 key=$2
   fm_meta_get "$meta" "$key"
 }
+
+treehouse_return_journal_field() {
+  local key=$1
+  awk -v key="$key" '
+    index($0, key "=") == 1 {
+      count++
+      value = substr($0, length(key) + 2)
+    }
+    END {
+      if (count != 1) exit 1
+      print value
+    }
+  ' "$TREEHOUSE_RETURN_JOURNAL"
+}
+
+treehouse_return_journal_snapshot() {
+  local expected_pool line_count
+  [ -f "$TREEHOUSE_RETURN_JOURNAL" ] && [ ! -L "$TREEHOUSE_RETURN_JOURNAL" ] || {
+    echo "REFUSED: generic return journal for $ID is missing or unsafe." >&2
+    return 1
+  }
+  line_count=$(wc -l < "$TREEHOUSE_RETURN_JOURNAL" | tr -d ' ')
+  [ "$line_count" = 9 ] || {
+    echo "REFUSED: generic return journal for $ID has an invalid shape." >&2
+    return 1
+  }
+  TREEHOUSE_RETURN_J_VERSION=$(treehouse_return_journal_field version) || return 1
+  TREEHOUSE_RETURN_J_TASK_ID=$(treehouse_return_journal_field task_id) || return 1
+  TREEHOUSE_RETURN_J_STATE=$(treehouse_return_journal_field state) || return 1
+  TREEHOUSE_RETURN_J_ROUTE=$(treehouse_return_journal_field route) || return 1
+  TREEHOUSE_RETURN_J_PROJECT=$(treehouse_return_journal_field project) || return 1
+  TREEHOUSE_RETURN_J_WORKTREE=$(treehouse_return_journal_field worktree) || return 1
+  TREEHOUSE_RETURN_J_POOL=$(treehouse_return_journal_field pool) || return 1
+  TREEHOUSE_RETURN_J_BRANCH=$(treehouse_return_journal_field branch) || return 1
+  TREEHOUSE_RETURN_J_BRANCH_HEAD=$(treehouse_return_journal_field branch_head) || return 1
+  expected_pool=$(dirname "$(dirname "$WT")")
+  [ "$TREEHOUSE_RETURN_J_VERSION" = 1 ] \
+    && [ "$TREEHOUSE_RETURN_J_TASK_ID" = "$ID" ] \
+    && [ "$TREEHOUSE_RETURN_J_ROUTE" = generic ] \
+    && [ "$TREEHOUSE_RETURN_J_PROJECT" = "$PROJ" ] \
+    && [ "$TREEHOUSE_RETURN_J_WORKTREE" = "$WT" ] \
+    && [ "$TREEHOUSE_RETURN_J_POOL" = "$expected_pool" ] \
+    && [ "$TREEHOUSE_RETURN_J_BRANCH" = "$ACQUISITION_BRANCH" ] || {
+      echo "REFUSED: generic return journal for $ID does not match task metadata." >&2
+      return 1
+    }
+  case "$TREEHOUSE_RETURN_J_STATE" in
+    prepared|provider-complete) ;;
+    *)
+      echo "REFUSED: generic return journal for $ID has an invalid state." >&2
+      return 1
+      ;;
+  esac
+  if [ "$ACQUISITION_BRANCH" = - ]; then
+    [ "$KIND" = scout ] && [ "$TREEHOUSE_RETURN_J_BRANCH_HEAD" = - ] || {
+      echo "REFUSED: branchless scout return journal for $ID is inconsistent." >&2
+      return 1
+    }
+  else
+    printf '%s\n' "$TREEHOUSE_RETURN_J_BRANCH_HEAD" \
+      | grep -Eq '^([0-9a-fA-F]{40}|[0-9a-fA-F]{64})$' || {
+      echo "REFUSED: generic return journal for $ID has an invalid branch identity." >&2
+      return 1
+    }
+  fi
+}
+
+treehouse_return_journal_write() {
+  local state=$1 tmp pool branch_head
+  pool=$(dirname "$(dirname "$WT")")
+  branch_head=${ACQUISITION_BRANCH_HEAD:--}
+  tmp=$(mktemp "$STATE/.fm-treehouse-return.XXXXXXXX") || return 1
+  if ! {
+    printf 'version=1\n'
+    printf 'task_id=%s\n' "$ID"
+    printf 'state=%s\n' "$state"
+    printf 'route=generic\n'
+    printf 'project=%s\n' "$PROJ"
+    printf 'worktree=%s\n' "$WT"
+    printf 'pool=%s\n' "$pool"
+    printf 'branch=%s\n' "$ACQUISITION_BRANCH"
+    printf 'branch_head=%s\n' "$branch_head"
+  } > "$tmp"; then
+    rm -f "$tmp"
+    return 1
+  fi
+  chmod 600 "$tmp" || {
+    rm -f "$tmp"
+    return 1
+  }
+  if [ "$state" = prepared ] && [ "$TREEHOUSE_RETURN_JOURNAL_PRESENT" != 1 ]; then
+    if ! ln "$tmp" "$TREEHOUSE_RETURN_JOURNAL" 2>/dev/null; then
+      rm -f "$tmp"
+      echo "REFUSED: could not publish generic return journal for $ID." >&2
+      return 1
+    fi
+    rm -f "$tmp"
+  else
+    mv -f "$tmp" "$TREEHOUSE_RETURN_JOURNAL" || {
+      rm -f "$tmp"
+      return 1
+    }
+  fi
+  TREEHOUSE_RETURN_JOURNAL_PRESENT=1
+  treehouse_return_journal_snapshot
+}
+
+treehouse_return_journal_prepare() {
+  if [ "$TREEHOUSE_RETURN_JOURNAL_PRESENT" = 1 ]; then
+    treehouse_return_journal_snapshot || return 1
+    [ "$TREEHOUSE_RETURN_J_STATE" = prepared ] \
+      && [ "$TREEHOUSE_RETURN_J_BRANCH_HEAD" = "${ACQUISITION_BRANCH_HEAD:--}" ] || {
+        echo "REFUSED: generic return journal for $ID does not match the validated branch." >&2
+        return 1
+      }
+    return 0
+  fi
+  treehouse_return_journal_write prepared
+}
+
+treehouse_return_journal_complete() {
+  treehouse_return_journal_snapshot || return 1
+  [ "$TREEHOUSE_RETURN_J_STATE" = prepared ] || {
+    echo "REFUSED: generic return journal for $ID cannot advance from $TREEHOUSE_RETURN_J_STATE." >&2
+    return 1
+  }
+  ACQUISITION_BRANCH_HEAD=
+  [ "$TREEHOUSE_RETURN_J_BRANCH_HEAD" = - ] \
+    || ACQUISITION_BRANCH_HEAD=$TREEHOUSE_RETURN_J_BRANCH_HEAD
+  treehouse_return_journal_write provider-complete
+}
+
+generic_return_postconditions_hold() {
+  local worktrees remaining state_file
+  [ ! -e "$WT" ] && [ ! -L "$WT" ] || return 1
+  [ -d "$PROJ" ] || return 1
+  [ -d "$TREEHOUSE_RETURN_J_POOL" ] && [ ! -L "$TREEHOUSE_RETURN_J_POOL" ] || return 1
+  [ "$(cd "$TREEHOUSE_RETURN_J_POOL" 2>/dev/null && pwd -P)" = "$TREEHOUSE_RETURN_J_POOL" ] \
+    || return 1
+  worktrees=$(git -C "$PROJ" worktree list --porcelain 2>/dev/null) || return 1
+  printf '%s\n' "$worktrees" | grep -Fx "worktree $WT" >/dev/null && return 1
+  state_file="$TREEHOUSE_RETURN_J_POOL/treehouse-state.json"
+  [ -f "$state_file" ] && [ ! -L "$state_file" ] || return 1
+  remaining=$(jq -er --arg path "$WT" \
+    '[.worktrees[]? | select(.path == $path)] | length' "$state_file" 2>/dev/null) \
+    || return 1
+  [ "$remaining" = 0 ]
+}
+
+if [ -e "$TREEHOUSE_RETURN_JOURNAL" ] || [ -L "$TREEHOUSE_RETURN_JOURNAL" ]; then
+  treehouse_return_journal_snapshot || exit 1
+  TREEHOUSE_RETURN_JOURNAL_PRESENT=1
+  TREEHOUSE_RETURN_ROUTE=generic
+  [ "$TREEHOUSE_RETURN_J_BRANCH_HEAD" = - ] \
+    || ACQUISITION_BRANCH_HEAD=$TREEHOUSE_RETURN_J_BRANCH_HEAD
+fi
 
 require_orca_worktree_id() {
   local meta=$1 id
@@ -1253,13 +1424,14 @@ quiesce_treehouse_task_endpoint() {
   else
     fm_backend_kill_recorded \
       "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "$expected_label" \
+      "$TMUX_WINDOW_ID" \
       2>/dev/null || true
   fi
 
   recorded_tab_id=$(meta_value "$META" zellij_tab_id)
   while :; do
     endpoint_state=$(fm_backend_endpoint_state \
-      "$BACKEND" "$T" "$expected_label" "$recorded_tab_id")
+      "$BACKEND" "$T" "$expected_label" "$recorded_tab_id" "$TMUX_WINDOW_ID")
     case "$endpoint_state" in
       missing)
         TREEHOUSE_ENDPOINT_QUIESCED=1
@@ -1292,7 +1464,9 @@ fi
 # recorded endpoint, prove it is gone, then repeat the safety check so the
 # worker cannot mutate the copy between authorization and provider return.
 if [ -d "$WT" ] && [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
-  TREEHOUSE_RETURN_ROUTE=$(treehouse_return_route "$WT" "$PROJ") || exit 1
+  if [ "$TREEHOUSE_RETURN_JOURNAL_PRESENT" != 1 ]; then
+    TREEHOUSE_RETURN_ROUTE=$(treehouse_return_route "$WT" "$PROJ") || exit 1
+  fi
   quiesce_treehouse_task_endpoint || exit 1
   remove_generated_worktree_artifacts || {
     echo "REFUSED: could not remove Firstmate-generated worktree artifacts; preserving task records and worktree." >&2
@@ -1311,27 +1485,74 @@ if [ -d "$WT" ] && [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   fi
 fi
 
-ACQUISITION_BRANCH_HEAD=
 prepare_acquisition_branch_cleanup() {
+  local current_branch current
+  if [ "$ACQUISITION_BRANCH" = - ]; then
+    [ "$KIND" = scout ] || {
+      echo "REFUSED: only a scout may have no acquisition branch." >&2
+      return 1
+    }
+    current_branch=$(git -C "$WT" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
+    [ -z "$current_branch" ] || {
+      echo "REFUSED: branchless scout worktree is attached to $current_branch; preserving task records and worktree." >&2
+      return 1
+    }
+    if git -C "$PROJ" show-ref --verify --quiet "refs/heads/fm/$ID"; then
+      echo "REFUSED: branchless scout unexpectedly owns acquisition branch fm/$ID; preserving it and task records." >&2
+      return 1
+    fi
+    ACQUISITION_BRANCH_HEAD=
+    if [ "$TREEHOUSE_RETURN_JOURNAL_PRESENT" = 1 ] \
+       && [ "$TREEHOUSE_RETURN_J_BRANCH_HEAD" != - ]; then
+      echo "REFUSED: branchless scout return journal has a branch identity." >&2
+      return 1
+    fi
+    return 0
+  fi
   git check-ref-format --branch "$ACQUISITION_BRANCH" >/dev/null 2>&1 || {
     echo "REFUSED: invalid recorded acquisition branch $ACQUISITION_BRANCH." >&2
     return 1
   }
-  ACQUISITION_BRANCH_HEAD=$(git -C "$PROJ" rev-parse --verify \
+  current=$(git -C "$PROJ" rev-parse --verify \
     "refs/heads/$ACQUISITION_BRANCH^{commit}" 2>/dev/null || true)
+  if [ "$TREEHOUSE_RETURN_JOURNAL_PRESENT" = 1 ]; then
+    [ -n "$current" ] && [ "$current" = "$TREEHOUSE_RETURN_J_BRANCH_HEAD" ] || {
+      echo "REFUSED: acquisition branch $ACQUISITION_BRANCH no longer matches the return journal; preserving task records." >&2
+      return 1
+    }
+    ACQUISITION_BRANCH_HEAD=$TREEHOUSE_RETURN_J_BRANCH_HEAD
+    return 0
+  fi
+  ACQUISITION_BRANCH_HEAD=$current
   if [ -z "$ACQUISITION_BRANCH_HEAD" ] \
-     && [ "$FORCE" != "--force" ] && [ "$KIND" != scout ]; then
+     && { [ "$FORCE" != "--force" ] || [ "$TREEHOUSE_RETURN_ROUTE" = generic ]; }; then
     echo "REFUSED: acquisition branch $ACQUISITION_BRANCH is missing; preserving task records and worktree." >&2
     return 1
   fi
 }
 
 delete_acquisition_branch_after_return() {
-  local current current_branch
+  local current current_branch ref status
+  [ "$ACQUISITION_BRANCH" != - ] || return 0
   [ -n "$ACQUISITION_BRANCH_HEAD" ] || return 0
-  current=$(git -C "$PROJ" rev-parse --verify \
-    "refs/heads/$ACQUISITION_BRANCH^{commit}" 2>/dev/null || true)
-  [ -n "$current" ] || return 0
+  ref="refs/heads/$ACQUISITION_BRANCH"
+  if git -C "$PROJ" show-ref --verify --quiet "$ref"; then
+    status=0
+  else
+    status=$?
+  fi
+  case "$status" in
+    0) ;;
+    1) return 0 ;;
+    *)
+      echo "error: could not query acquisition branch $ACQUISITION_BRANCH after provider return" >&2
+      return 1
+      ;;
+  esac
+  current=$(git -C "$PROJ" rev-parse --verify "$ref^{commit}" 2>/dev/null) || {
+    echo "error: could not resolve acquisition branch $ACQUISITION_BRANCH after provider return" >&2
+    return 1
+  }
   if [ "$current" != "$ACQUISITION_BRANCH_HEAD" ]; then
     echo "error: acquisition branch $ACQUISITION_BRANCH moved during provider return; preserving it and task records" >&2
     return 1
@@ -1345,16 +1566,60 @@ delete_acquisition_branch_after_return() {
       }
     fi
   fi
-  git -C "$PROJ" branch -D -- "$ACQUISITION_BRANCH" >/dev/null 2>&1 || {
+  git -C "$PROJ" update-ref -d "$ref" "$ACQUISITION_BRANCH_HEAD" >/dev/null 2>&1 || {
     echo "error: could not delete acquisition branch $ACQUISITION_BRANCH after provider return" >&2
     return 1
   }
-  git -C "$PROJ" show-ref --verify --quiet "refs/heads/$ACQUISITION_BRANCH" && {
+  if git -C "$PROJ" show-ref --verify --quiet "$ref"; then
     echo "error: acquisition branch $ACQUISITION_BRANCH remains after provider return" >&2
     return 1
+  else
+    status=$?
+  fi
+  [ "$status" = 1 ] || {
+    echo "error: acquisition branch deletion postcondition is unreadable for $ACQUISITION_BRANCH" >&2
+    return 1
   }
-  return 0
 }
+
+treehouse_return_journal_retire() {
+  rm -f "$TREEHOUSE_RETURN_JOURNAL" || return 1
+  [ ! -e "$TREEHOUSE_RETURN_JOURNAL" ] && [ ! -L "$TREEHOUSE_RETURN_JOURNAL" ] || return 1
+  TREEHOUSE_RETURN_JOURNAL_PRESENT=0
+}
+
+resume_generic_return_cleanup() {
+  treehouse_return_journal_snapshot || return 1
+  if [ -d "$WT" ]; then
+    [ "$TREEHOUSE_RETURN_J_STATE" = prepared ] || {
+      echo "REFUSED: completed generic return journal still has a worktree at $WT." >&2
+      return 1
+    }
+    return 0
+  fi
+  generic_return_postconditions_hold || {
+    echo "REFUSED: generic return postconditions for $ID are not authoritative; preserving task records." >&2
+    return 1
+  }
+  if [ "$TREEHOUSE_RETURN_J_STATE" = prepared ]; then
+    treehouse_return_journal_complete || return 1
+    treehouse_return_journal_snapshot || return 1
+  fi
+  ACQUISITION_BRANCH_HEAD=
+  [ "$TREEHOUSE_RETURN_J_BRANCH_HEAD" = - ] \
+    || ACQUISITION_BRANCH_HEAD=$TREEHOUSE_RETURN_J_BRANCH_HEAD
+  delete_acquisition_branch_after_return || return 1
+  treehouse_return_journal_retire || {
+    echo "error: could not retire completed generic return journal for $ID" >&2
+    return 1
+  }
+  TREEHOUSE_ENDPOINT_QUIESCED=1
+  TREEHOUSE_RETURN_COMPLETED=1
+}
+
+if [ "$TREEHOUSE_RETURN_JOURNAL_PRESENT" = 1 ]; then
+  resume_generic_return_cleanup || exit 1
+fi
 
 # Release the selected provider resource, then retire its task branch.
 if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
@@ -1374,8 +1639,11 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
   fi
   [ -z "$T_ORCA" ] || fm_backend_kill "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID" 2>/dev/null || true
   fm_backend_remove_worktree "$BACKEND" "$ORCA_WORKTREE_ID"
-elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
+elif [ "$TREEHOUSE_RETURN_COMPLETED" != 1 ] && [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
   prepare_acquisition_branch_cleanup || exit 1
+  if [ "$TREEHOUSE_RETURN_ROUTE" = generic ]; then
+    treehouse_return_journal_prepare || exit 1
+  fi
   # Return only after the endpoint is confirmed gone and the final safety check
   # passes. treehouse resolves the provider from the project working directory.
   # The return wrapper retains transient and stale git-lock recovery.
@@ -1388,10 +1656,26 @@ elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
     echo "error: treehouse return failed for worktree $WT; teardown aborted" >&2
     exit 1
   }
+  if [ "$TREEHOUSE_RETURN_ROUTE" = generic ]; then
+    treehouse_return_journal_snapshot || exit 1
+    generic_return_postconditions_hold || {
+      echo "error: generic return postconditions failed for worktree $WT; teardown aborted" >&2
+      exit 1
+    }
+    treehouse_return_journal_complete || exit 1
+  fi
   delete_acquisition_branch_after_return || exit 1
+  if [ "$TREEHOUSE_RETURN_ROUTE" = generic ]; then
+    treehouse_return_journal_retire || {
+      echo "error: could not retire completed generic return journal for $ID" >&2
+      exit 1
+    }
+  fi
 fi
 if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ] && [ "$TREEHOUSE_ENDPOINT_QUIESCED" != 1 ]; then
-  fm_backend_kill "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID" 2>/dev/null || true
+  fm_backend_kill_recorded \
+    "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID" \
+    "$TMUX_WINDOW_ID" 2>/dev/null || true
 fi
 if [ "$HERDR_PRESENTATION_RETIRE_CANDIDATE" = 1 ]; then
   if [ "$(fm_backend_herdr_pane_agent_state "$HERDR_PRESENTATION_SESSION" "$HERDR_PRESENTATION_PANE")" = dead ]; then
@@ -1404,11 +1688,17 @@ elif [ "$BACKEND" = herdr ] \
   echo "warning: herdr presentation journal for $ID remains quarantined; no workspace cleanup was attempted" >&2
 fi
 if [ "$KIND" = secondmate ]; then
-  [ "$BACKEND" = orca ] || fm_backend_kill "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID" 2>/dev/null || true
+  [ "$BACKEND" = orca ] || fm_backend_kill_recorded \
+    "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID" \
+    "$TMUX_WINDOW_ID" 2>/dev/null || true
   [ -n "$HOME_PATH" ] || HOME_PATH=$WT
   remove_firstmate_home "$HOME_PATH" "secondmate home" "$ID"
   remove_secondmate_registry_entry "$ID"
 fi
+[ ! -e "$TREEHOUSE_RETURN_JOURNAL" ] && [ ! -L "$TREEHOUSE_RETURN_JOURNAL" ] || {
+  echo "REFUSED: generic return journal for $ID remains incomplete; preserving task records." >&2
+  exit 1
+}
 remove_grok_turnend_auth "$STATE" "$ID"
 remove_kimi_turnend_auth "$STATE" "$ID"
 fm_backend_clear_transition "$BACKEND" "$STATE" "$T" || true

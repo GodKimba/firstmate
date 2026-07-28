@@ -123,6 +123,33 @@ fm_backend_tmux_kill() {  # <target>
   tmux kill-window -t "$1" 2>/dev/null || true
 }
 
+fm_backend_tmux_kill_recorded() {  # <target> [recorded-window-id]
+  local target=$1 recorded_window_id=${2:-} session window windows
+  case "$target" in
+    *:*:*|'':*|*:'') return 1 ;;
+    *:*) ;;
+    *) return 1 ;;
+  esac
+  session=${target%%:*}
+  window=${target#*:}
+  if [ -n "$recorded_window_id" ]; then
+    case "$recorded_window_id" in
+      @*[!0-9]*|@|'') return 1 ;;
+      @*) ;;
+      *) return 1 ;;
+    esac
+    windows=$(LC_ALL=C tmux list-windows -t "=$session" \
+      -F '#{window_id}	#{window_name}' 2>/dev/null) || return 0
+    [ "$(printf '%s\n' "$windows" | awk -F '	' -v id="$recorded_window_id" \
+      '$1 == id { count++ } END { print count + 0 }')" = 1 ] || return 0
+    printf '%s\n' "$windows" | awk -F '	' -v id="$recorded_window_id" -v name="$window" \
+      '$1 == id && $2 == name { found = 1 } END { exit(found ? 0 : 1) }' || return 1
+    tmux kill-window -t "$recorded_window_id" 2>/dev/null || true
+    return 0
+  fi
+  tmux kill-window -t "=$session:=$window" 2>/dev/null || true
+}
+
 # fm_backend_tmux_current_command: <target>'s live foreground process name -
 # tmux's own `#{pane_current_command}`, already resolved from the pty's
 # foreground process group (verified empirically with real tmux 3.6a: a
@@ -145,8 +172,9 @@ fm_backend_tmux_current_command() {  # <target>
 # An omitted window or a definitive missing-session/server response is
 # `missing`; any other inventory or pane read failure is `unreadable`, so a
 # transient tmux problem never licenses a duplicate.
-fm_backend_tmux_agent_state() {  # <target>
-  local target=$1 comm session window windows inventory_status
+fm_backend_tmux_agent_state() {  # <target> [recorded-window-id]
+  local target=$1 recorded_window_id=${2:-} comm session window windows inventory_status
+  local command_target exact_count
   case "$target" in
     *:*:*|'':*|*:'') printf 'unreadable'; return 0 ;;
     *:*) ;;
@@ -154,7 +182,21 @@ fm_backend_tmux_agent_state() {  # <target>
   esac
   session=${target%%:*}
   window=${target#*:}
-  if windows=$(LC_ALL=C tmux list-windows -t "$session" -F '#{window_name}' 2>&1); then
+  if [ -n "$recorded_window_id" ]; then
+    case "$recorded_window_id" in
+      @*[!0-9]*|@|'') printf 'unreadable'; return 0 ;;
+      @*) ;;
+      *) printf 'unreadable'; return 0 ;;
+    esac
+  fi
+  if [ -n "$recorded_window_id" ]; then
+    if windows=$(LC_ALL=C tmux list-windows -t "=$session" \
+      -F '#{window_id}	#{window_name}' 2>&1); then
+      inventory_status=0
+    else
+      inventory_status=$?
+    fi
+  elif windows=$(LC_ALL=C tmux list-windows -t "=$session" -F '#{window_name}' 2>&1); then
     inventory_status=0
   else
     inventory_status=$?
@@ -170,12 +212,29 @@ fm_backend_tmux_agent_state() {  # <target>
     esac
     return 0
   fi
-  if ! printf '%s\n' "$windows" | grep -Fqx "$window"; then
-    printf 'missing'
-    return 0
+  if [ -n "$recorded_window_id" ]; then
+    exact_count=$(printf '%s\n' "$windows" | awk -F '	' -v id="$recorded_window_id" \
+      '$1 == id { count++ } END { print count + 0 }')
+    if [ "$exact_count" = 0 ]; then
+      printf 'missing'
+      return 0
+    fi
+    if [ "$exact_count" != 1 ] || ! printf '%s\n' "$windows" \
+      | awk -F '	' -v id="$recorded_window_id" -v name="$window" \
+        '$1 == id && $2 == name { found = 1 } END { exit(found ? 0 : 1) }'; then
+      printf 'unreadable'
+      return 0
+    fi
+    command_target=$recorded_window_id
+  else
+    if ! printf '%s\n' "$windows" | grep -Fqx "$window"; then
+      printf 'missing'
+      return 0
+    fi
+    command_target="=$session:=$window"
   fi
 
-  comm=$(fm_backend_tmux_current_command "$target") || {
+  comm=$(fm_backend_tmux_current_command "$command_target") || {
     printf 'unreadable'
     return 0
   }

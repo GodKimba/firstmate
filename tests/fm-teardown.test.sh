@@ -194,12 +194,13 @@ SH
 
 # Write a meta file for the task. Args: case_dir mode kind
 write_meta() {
-  local case_dir=$1 mode=$2 kind=$3
+  local case_dir=$1 mode=$2 kind=$3 acquisition_branch="fm/task-x1"
+  [ "$kind" != scout ] || acquisition_branch=-
   fm_write_meta "$case_dir/state/task-x1.meta" \
     "window=firstmate:fm-task-x1" \
     "worktree=$case_dir/wt" \
     "project=$case_dir/project" \
-    "acquisition_branch=fm/task-x1" \
+    "acquisition_branch=$acquisition_branch" \
     "kind=$kind" \
     "mode=$mode"
 }
@@ -1270,12 +1271,17 @@ SH
 }
 
 test_report_gated_scout_cleanup_remains_supported() {
-  local case_dir rc
+  local case_dir rc wt state
   case_dir=$(make_case scout-report-gated)
   mkdir -p "$case_dir/data/task-x1"
   printf '%s\n' 'scout result' > "$case_dir/data/task-x1/report.md"
   write_meta "$case_dir" no-mistakes scout
   printf '%s\n' 'decisions_reviewed=1' 'decision_keys=' >> "$case_dir/state/task-x1.meta"
+  git -C "$case_dir/wt" checkout -q --detach main
+  git -C "$case_dir/project" branch -D -- fm/task-x1 >/dev/null
+  configure_generic_pool_case "$case_dir"
+  wt=$(grep '^worktree=' "$case_dir/state/task-x1.meta" | cut -d= -f2-)
+  state=$(cat "$case_dir/config/fake-generic-state")
   add_compatible_tasks_axi "$case_dir"
 
   set +e
@@ -1285,7 +1291,106 @@ test_report_gated_scout_cleanup_remains_supported() {
 
   expect_code 0 "$rc" "scout-report-gated: completed scout cleanup should remain supported"
   [ ! -f "$case_dir/state/task-x1.meta" ] || fail "scout-report-gated: task metadata remains after successful cleanup"
+  [ ! -e "$wt" ] || fail "scout-report-gated: branchless scout worktree remains"
+  [ "$(jq --arg path "$wt" '[.worktrees[]? | select(.path == $path)] | length' "$state")" = 0 ] \
+    || fail "scout-report-gated: generic state retained the branchless scout"
+  git -C "$case_dir/project" show-ref --verify --quiet refs/heads/fm/task-x1 \
+    && fail "scout-report-gated: branchless scout gained a task branch"
   pass "report-gated disposable scout cleanup remains explicit and supported"
+}
+
+test_legacy_branchless_scout_metadata_remains_supported() {
+  local case_dir rc style
+  for style in absent recorded; do
+    case_dir=$(make_case "scout-legacy-$style")
+    mkdir -p "$case_dir/data/task-x1"
+    printf '%s\n' 'scout result' > "$case_dir/data/task-x1/report.md"
+    write_meta "$case_dir" no-mistakes scout
+    if [ "$style" = absent ]; then
+      grep -v '^acquisition_branch=' "$case_dir/state/task-x1.meta" \
+        > "$case_dir/state/task-x1.meta.tmp"
+      mv "$case_dir/state/task-x1.meta.tmp" "$case_dir/state/task-x1.meta"
+    else
+      sed 's|^acquisition_branch=.*|acquisition_branch=fm/task-x1|' \
+        "$case_dir/state/task-x1.meta" > "$case_dir/state/task-x1.meta.tmp"
+      mv "$case_dir/state/task-x1.meta.tmp" "$case_dir/state/task-x1.meta"
+    fi
+    printf '%s\n' 'decisions_reviewed=1' 'decision_keys=' >> "$case_dir/state/task-x1.meta"
+    git -C "$case_dir/wt" checkout -q --detach main
+    git -C "$case_dir/project" branch -D -- fm/task-x1 >/dev/null
+    add_compatible_tasks_axi "$case_dir"
+
+    set +e
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+    rc=$?
+    set -e
+
+    expect_code 0 "$rc" "scout-legacy-$style: branchless scout cleanup should remain supported"
+    [ ! -f "$case_dir/state/task-x1.meta" ] \
+      || fail "scout-legacy-$style: task metadata remains after successful cleanup"
+  done
+  pass "legacy branchless scout metadata remains cleanup-compatible"
+}
+
+test_generic_return_retries_guarded_branch_cleanup() {
+  local case_dir first_rc second_rc wt state route_count
+  case_dir=$(make_case generic-branch-retry)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit "$case_dir" "landed generic retry work"
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  git -C "$case_dir/project" fetch -q origin
+  configure_generic_pool_case "$case_dir"
+  wt=$(grep '^worktree=' "$case_dir/state/task-x1.meta" | cut -d= -f2-)
+  state=$(cat "$case_dir/config/fake-generic-state")
+  cat > "$case_dir/fakebin/git" <<'SH'
+#!/usr/bin/env bash
+case " $* " in
+  *" update-ref -d refs/heads/fm/task-x1 "*)
+    if [ ! -e "${FM_FAKE_BRANCH_DELETE_FAILED:?}" ]; then
+      : > "$FM_FAKE_BRANCH_DELETE_FAILED"
+      exit 73
+    fi
+    ;;
+esac
+exec "${REAL_GIT_FOR_TEST:?}" "$@"
+SH
+  chmod +x "$case_dir/fakebin/git"
+
+  set +e
+  FM_FAKE_BRANCH_DELETE_FAILED="$case_dir/branch-delete-failed" \
+    run_teardown "$case_dir" > "$case_dir/first.stdout" 2> "$case_dir/first.stderr"
+  first_rc=$?
+  set -e
+
+  expect_code 1 "$first_rc" "generic-branch-retry: first branch deletion failure must preserve recovery state"
+  [ ! -e "$wt" ] || fail "generic-branch-retry: provider did not remove the worktree"
+  [ -f "$case_dir/state/task-x1.meta" ] || fail "generic-branch-retry: metadata was cleared after branch deletion failure"
+  [ -f "$case_dir/state/task-x1.treehouse-return" ] \
+    || fail "generic-branch-retry: provider-complete journal was not retained"
+  grep -Fx 'state=provider-complete' "$case_dir/state/task-x1.treehouse-return" >/dev/null \
+    || fail "generic-branch-retry: journal did not preserve provider completion"
+  git -C "$case_dir/project" show-ref --verify --quiet refs/heads/fm/task-x1 \
+    || fail "generic-branch-retry: acquisition branch disappeared despite injected deletion failure"
+  [ "$(jq --arg path "$wt" '[.worktrees[]? | select(.path == $path)] | length' "$state")" = 0 ] \
+    || fail "generic-branch-retry: provider state retained the removed worktree"
+
+  set +e
+  FM_FAKE_BRANCH_DELETE_FAILED="$case_dir/branch-delete-failed" \
+    run_teardown "$case_dir" > "$case_dir/second.stdout" 2> "$case_dir/second.stderr"
+  second_rc=$?
+  set -e
+
+  expect_code 0 "$second_rc" "generic-branch-retry: retry should finish guarded branch cleanup"
+  [ ! -e "$case_dir/state/task-x1.treehouse-return" ] \
+    || fail "generic-branch-retry: completed return journal remains after retry"
+  [ ! -e "$case_dir/state/task-x1.meta" ] \
+    || fail "generic-branch-retry: metadata remains after retry"
+  git -C "$case_dir/project" show-ref --verify --quiet refs/heads/fm/task-x1 \
+    && fail "generic-branch-retry: exact acquisition branch remains after retry"
+  route_count=$(grep -c '^firstmate-return-route ' "$case_dir/treehouse.log" || true)
+  [ "$route_count" = 1 ] \
+    || fail "generic-branch-retry: retry invoked provider routing again"
+  pass "generic return retries exact branch cleanup from durable provider state"
 }
 
 test_gh_error_and_content_absent_refuses() {
@@ -1845,6 +1950,8 @@ test_generic_return_removes_exact_worktree_without_force
 test_missing_private_router_preserves_managed_return
 test_generic_postcondition_failure_restores_worktree
 test_report_gated_scout_cleanup_remains_supported
+test_legacy_branchless_scout_metadata_remains_supported
+test_generic_return_retries_guarded_branch_cleanup
 test_gh_error_and_content_absent_refuses
 test_stale_index_lock_cleared_and_teardown_succeeds
 test_live_index_lock_is_never_removed_and_teardown_refuses

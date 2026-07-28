@@ -590,7 +590,7 @@ fm_backend_kill_recorded() {  # <backend> <target> [backend identity arguments]
   fm_backend_source "$backend" || return 1
   case "$backend" in
     cmux) fm_backend_cmux_kill_recorded "$@" ;;
-    tmux) fm_backend_tmux_kill "$@" ;;
+    tmux) fm_backend_tmux_kill_recorded "$1" "${4:-}" ;;
     herdr) fm_backend_herdr_kill "$@" ;;
     zellij) fm_backend_zellij_kill "$@" ;;
     orca) fm_backend_orca_kill "$@" ;;
@@ -711,11 +711,20 @@ fm_backend_target_exists() {  # <backend> <target> [expected-label]
   esac
 }
 
-fm_backend_endpoint_state() {  # <backend> <target> [expected-label] [recorded-tab-id]
-  local backend=$1 target=$2 expected_label=${3:-} recorded_tab_id=${4:-} state
+fm_backend_endpoint_state() {  # <backend> <target> [expected-label] [recorded-tab-id] [recorded-window-id]
+  local backend=$1 target=$2 expected_label=${3:-} recorded_tab_id=${4:-}
+  local recorded_window_id=${5:-} state
   fm_backend_source "$backend" || { printf 'unreadable'; return 0; }
   case "$backend" in
-    tmux|herdr)
+    tmux)
+      state=$(fm_backend_agent_state "$backend" "$target" "$recorded_window_id")
+      case "$state" in
+        missing) printf 'missing' ;;
+        alive|dead|ambiguous) printf 'present' ;;
+        *) printf 'unreadable' ;;
+      esac
+      ;;
+    herdr)
       state=$(fm_backend_agent_state "$backend" "$target")
       case "$state" in
         missing) printf 'missing' ;;
@@ -750,11 +759,11 @@ fm_backend_endpoint_state() {  # <backend> <target> [expected-label] [recorded-t
 # classifier. Zellij remains unverified because its secondmate ghost-tab and
 # agent-process recovery path has not been empirically validated. Orca and cmux
 # do not support secondmate spawns.
-fm_backend_agent_state() {  # <backend> <target>
-  local backend=$1 target=$2
+fm_backend_agent_state() {  # <backend> <target> [recorded-window-id]
+  local backend=$1 target=$2 recorded_window_id=${3:-}
   fm_backend_source "$backend" || { printf 'unverified'; return 0; }
   case "$backend" in
-    tmux) fm_backend_tmux_agent_state "$target" ;;
+    tmux) fm_backend_tmux_agent_state "$target" "$recorded_window_id" ;;
     herdr) fm_backend_herdr_agent_state "$target" ;;
     *) printf 'unverified' ;;
   esac
