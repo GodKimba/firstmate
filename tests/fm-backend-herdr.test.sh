@@ -2247,22 +2247,169 @@ test_send_text_submit_confirms_blocked_after_enter() {
   pass "fm_backend_herdr_send_text_submit: a post-Enter blocked state confirms delivery without retrying into the prompt"
 }
 
+# --- send_text_submit: BUSY baseline (task fm-herdr-send-busy-duplicate) -----
+# When the target is already working before Enter, agent-state reads "working"
+# whether the instruction was queued or is still sitting unsent, so
+# confirmation reads the composer TRANSITION: anchor on proven 'pending' before
+# Enter, then require it to drain to 'empty'. Call order for these fixtures is
+# 1 send-text, 2 agent get (baseline), 3 pane read (anchor), 4 send-keys enter,
+# 5 pane read (confirm), 6 send-keys enter, 7 pane read ...
+
 test_send_text_submit_preexisting_working_does_not_false_confirm_swallowed_enter() {
-  local dir log resp fb out enter_count read_count
+  local dir log resp fb out enter_count
   dir="$TMP_ROOT/submit-preexisting-working-swallow"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
   printf '{"result":{"agent":{"agent_status":"working"}}}\n' > "$resp/2.out"
-  printf '{"result":{"agent":{"agent_status":"working"}}}\n' > "$resp/3.out"
-  printf '  \xe2\x9d\xaf hello captain\n' > "$resp/4.out"
-  printf '  \xe2\x9d\xaf hello captain\n' > "$resp/6.out"
+  printf '  \xe2\x9d\xaf hello captain\n' > "$resp/3.out"
+  printf '  \xe2\x9d\xaf hello captain\n' > "$resp/5.out"
+  printf '  \xe2\x9d\xaf hello captain\n' > "$resp/7.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "hello captain" 2 0.01 0.01' "$ROOT" )
   [ "$out" = pending ] || fail "send_text_submit must not accept preexisting working as proof that this Enter landed, got '$out'"
   enter_count=$(grep -c $'\x1f''pane'$'\x1f''send-keys'$'\x1f''w1:p2'$'\x1f''enter' "$log")
   [ "$enter_count" -eq 2 ] || fail "preexisting-working swallowed Enter should retry Enter up to the configured count, sent $enter_count Enter(s)"
-  read_count=$(grep -c $'\x1f''pane'$'\x1f''read' "$log")
-  [ "$read_count" -eq 2 ] || fail "preexisting-working confirmation should fall back to composer reads, made $read_count read(s)"
   pass "fm_backend_herdr_send_text_submit: preexisting working is not accepted as submit proof when the composer still holds the message"
+}
+
+# The defect this task fixes, in the shape it was reproduced live on Pi: a busy
+# harness ACCEPTS the instruction and queues it, and the composer drains. That
+# must confirm once, with no further Enter, so one logical send can never
+# become a duplicate queued instruction.
+test_send_text_submit_busy_accepted_and_queued_confirms_without_extra_enter() {
+  local dir log resp fb out enter_count text_count
+  dir="$TMP_ROOT/submit-busy-queued"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"result":{"agent":{"agent_status":"working"}}}\n' > "$resp/2.out"
+  printf '  \xe2\x9d\xaf approve the api shape\n' > "$resp/3.out"
+  # Enter is accepted and queued: the composer drains, the pane stays working.
+  printf '  \xe2\x9d\xaf \n' > "$resp/5.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "approve the api shape" 3 0.01 0.01' "$ROOT" )
+  [ "$out" = empty ] || fail "a busy harness that accepted and queued the instruction must confirm as delivered, got '$out'"
+  enter_count=$(grep -c $'\x1f''pane'$'\x1f''send-keys'$'\x1f''w1:p2'$'\x1f''enter' "$log")
+  [ "$enter_count" -eq 1 ] || fail "an accepted busy send must not send another Enter (that is how one send becomes a duplicate queued instruction), sent $enter_count Enter(s)"
+  text_count=$(grep -c $'\x1f''pane'$'\x1f''send-text' "$log")
+  [ "$text_count" -eq 1 ] || fail "send_text_submit must never retype the instruction, typed it $text_count time(s)"
+  pass "fm_backend_herdr_send_text_submit: a busy accepted-and-queued instruction confirms as delivered with exactly one Enter and one typed copy (the fm-herdr-send-busy-duplicate defect)"
+}
+
+# The anchor is what keeps the drain honest. A busy pane whose composer cannot
+# be proven to hold our text must stop safely rather than treat a later empty
+# read as proof of delivery - and must not send Enter into it at all.
+test_send_text_submit_busy_without_pending_anchor_stops_safely() {
+  local dir log resp fb out enter_count
+  dir="$TMP_ROOT/submit-busy-no-anchor"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"result":{"agent":{"agent_status":"working"}}}\n' > "$resp/2.out"
+  # The literal never landed in the composer: it reads empty BEFORE any Enter.
+  printf '  \xe2\x9d\xaf \n' > "$resp/3.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "approve the api shape" 3 0.01 0.01' "$ROOT" )
+  [ "$out" = unknown ] || fail "a busy send whose text cannot be proven to be in the composer must report unknown, got '$out'"
+  enter_count=$(grep -c $'\x1f''pane'$'\x1f''send-keys'$'\x1f''w1:p2'$'\x1f''enter' "$log")
+  [ "$enter_count" -eq 0 ] || fail "an unanchored busy send must not press Enter into an ambiguous pane, sent $enter_count Enter(s)"
+  pass "fm_backend_herdr_send_text_submit: a busy send with no proven pending anchor stops safely as unknown without pressing Enter"
+}
+
+test_send_text_submit_busy_unreadable_composer_stops_safely() {
+  local dir log resp fb out enter_count
+  dir="$TMP_ROOT/submit-busy-unreadable"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"result":{"agent":{"agent_status":"working"}}}\n' > "$resp/2.out"
+  printf '1\n' > "$resp/3.exit"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "x" 3 0.01 0.01' "$ROOT" )
+  [ "$out" = unknown ] || fail "an unreadable busy composer must report unknown, got '$out'"
+  enter_count=$(grep -c $'\x1f''pane'$'\x1f''send-keys'$'\x1f''w1:p2'$'\x1f''enter' "$log")
+  [ "$enter_count" -eq 0 ] || fail "an unreadable busy pane must not be pressed blind, sent $enter_count Enter(s)"
+  pass "fm_backend_herdr_send_text_submit: an unreadable composer on a busy pane stops safely as unknown"
+}
+
+# The live Pi shape (verified against pi 0.82.1 in an isolated Herdr lab): a
+# WORKING Pi renders its composer as a separator pair with no prompt glyph.
+# The injection guard refuses that pane, and before this task that refusal also
+# reached submit confirmation, which reported 'unknown' for an instruction Pi
+# had actually accepted - the ambiguity that invited a duplicate resend.
+test_send_text_submit_working_pi_busy_queue_confirms() {
+  local dir log resp fb out enter_count sep
+  dir="$TMP_ROOT/submit-pi-busy-queued"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  sep='────────────────────────'
+  printf '{"result":{"agent":{"agent_status":"working"}}}\n' > "$resp/2.out"
+  # 3: anchor composer read, 4: the Pi identity probe inside it, 5: Enter,
+  # 6: confirm composer read, 7: its identity probe.
+  printf '%s\n  SENTINEL-GOLF\n%s\n' "$sep" "$sep" > "$resp/3.out"
+  printf '{"result":{"agent":{"agent":"pi","agent_status":"working"}}}\n' > "$resp/4.out"
+  printf '%s\n  \n%s\n' "$sep" "$sep" > "$resp/6.out"
+  printf '{"result":{"agent":{"agent":"pi","agent_status":"working"}}}\n' > "$resp/7.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "SENTINEL-GOLF" 3 0.01 0.01' "$ROOT" )
+  [ "$out" = empty ] || fail "a working Pi that accepted and queued the instruction must confirm as delivered, got '$out'"
+  enter_count=$(grep -c $'\x1f''pane'$'\x1f''send-keys'$'\x1f''w1:p2'$'\x1f''enter' "$log")
+  [ "$enter_count" -eq 1 ] || fail "an accepted Pi busy send must not send another Enter, sent $enter_count Enter(s)"
+  pass "fm_backend_herdr_send_text_submit: a WORKING Pi's separator composer is read for submit confirmation, so an accepted-and-queued instruction confirms instead of reporting unknown"
+}
+
+test_send_text_submit_working_pi_genuinely_unsent_stays_pending() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/submit-pi-busy-unsent"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  local sep='────────────────────────'
+  printf '{"result":{"agent":{"agent_status":"working"}}}\n' > "$resp/2.out"
+  printf '%s\n  SENTINEL-GOLF\n%s\n' "$sep" "$sep" > "$resp/3.out"
+  printf '{"result":{"agent":{"agent":"pi","agent_status":"working"}}}\n' > "$resp/4.out"
+  # Every post-Enter read still shows the text: genuinely unsent.
+  printf '%s\n  SENTINEL-GOLF\n%s\n' "$sep" "$sep" > "$resp/6.out"
+  printf '{"result":{"agent":{"agent":"pi","agent_status":"working"}}}\n' > "$resp/7.out"
+  printf '%s\n  SENTINEL-GOLF\n%s\n' "$sep" "$sep" > "$resp/9.out"
+  printf '{"result":{"agent":{"agent":"pi","agent_status":"working"}}}\n' > "$resp/10.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "SENTINEL-GOLF" 2 0.01 0.01' "$ROOT" )
+  [ "$out" = pending ] || fail "a working Pi whose composer never drains must still report the instruction as unsent, got '$out'"
+  pass "fm_backend_herdr_send_text_submit: a WORKING Pi whose composer never drains is still reported as genuinely unsent, never as delivered"
+}
+
+# The read/inject split must not widen injection authority: the pre-injection
+# guard used by the away-mode daemon still refuses a working Pi outright.
+test_composer_state_still_refuses_working_pi_after_submit_read_split() {
+  local dir log resp fb out sep
+  dir="$TMP_ROOT/composer-working-pi-still-refused"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  sep='────────────────────────'
+  printf '%s\n  \n%s\n' "$sep" "$sep" > "$resp/1.out"
+  printf '{"result":{"agent":{"agent":"pi","agent_status":"working"}}}\n' > "$resp/2.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/fm-backend.sh"; fm_backend_composer_state herdr default:w1:p2' "$ROOT" )
+  [ "$out" = unknown ] || fail "the pre-injection guard must still refuse a working Pi even though submit confirmation may now read it, got '$out'"
+  pass "fm_backend_composer_state (herdr): a working Pi is still refused for INJECTION after the submit-read split (the split widens reading, never typing)"
+}
+
+# An unreadable agent identity is illegibility, not merely a lack of authority,
+# so it must close BOTH questions - the submit read included.
+test_submit_composer_state_refuses_unreadable_pi_identity() {
+  local dir log resp fb out sep
+  dir="$TMP_ROOT/submit-composer-unreadable-identity"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  sep='────────────────────────'
+  printf '%s\n  SENTINEL-GOLF\n%s\n' "$sep" "$sep" > "$resp/1.out"
+  printf '1\n' > "$resp/2.exit"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_submit_composer_state default:w1:p2' "$ROOT" )
+  [ "$out" = unknown ] || fail "an unreadable agent identity must close the submit read too, got '$out'"
+  pass "fm_backend_herdr_submit_composer_state: an unreadable agent identity is illegibility and closes the submit read as unknown"
+}
+
+# A dead shell is the false-delivered direction of the same boundary: the zsh
+# prompt glyph must never be mistaken for a drained composer.
+test_submit_composer_state_refuses_bare_shell_prompt() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/submit-composer-dead-shell"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf 'zsh: command not found: SENTINEL-CHARLIE\n$ \n' > "$resp/1.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_submit_composer_state default:w1:p2' "$ROOT" )
+  [ "$out" = unknown ] || fail "a bare shell prompt must never read as a drained composer, got '$out'"
+  pass "fm_backend_herdr_submit_composer_state: a dead shell's bare prompt reads unknown, never as a drained composer (no false 'delivered' on a dead pane)"
 }
 
 # Regression for the submit-confirmation side of the 2026-07-07 incident:
@@ -3079,6 +3226,14 @@ test_send_text_submit_detects_swallowed_enter
 test_send_text_submit_popup_autocomplete_requires_second_enter
 test_send_text_submit_confirms_blocked_after_enter
 test_send_text_submit_preexisting_working_does_not_false_confirm_swallowed_enter
+test_send_text_submit_busy_accepted_and_queued_confirms_without_extra_enter
+test_send_text_submit_busy_without_pending_anchor_stops_safely
+test_send_text_submit_busy_unreadable_composer_stops_safely
+test_send_text_submit_working_pi_busy_queue_confirms
+test_send_text_submit_working_pi_genuinely_unsent_stays_pending
+test_composer_state_still_refuses_working_pi_after_submit_read_split
+test_submit_composer_state_refuses_unreadable_pi_identity
+test_submit_composer_state_refuses_bare_shell_prompt
 test_send_text_submit_confirms_despite_codex_idle_tip_composer
 test_composer_state_codex_dynamic_idle_tip_reads_empty_when_faint
 test_composer_state_guard_still_refuses_real_pending_text_after_submit_confirmation_change

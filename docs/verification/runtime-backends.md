@@ -220,6 +220,28 @@ FM_SEND_MARKER_HERDR_E2E=1 \
   tests/fm-send-secondmate-marker-herdr-e2e.test.sh
 ```
 
+### Busy submit confirmation
+
+The busy-send path was measured on 2026-07-28 against Herdr 0.7.5 with Claude Code and Pi driven into a real long foreground tool wait inside an isolated lab session.
+
+Rejected signal: `agent get` counters are not an acceptance signal.
+Claude advanced `revision` from 1 to 2 during quiet work with no input at all, and did not advance it when it accepted a queued instruction; Pi moved neither `revision` nor `state_change_seq` in either situation.
+
+Active signal: the composer transition.
+On both harnesses the composer read pending while the message sat typed-but-unsubmitted, and drained within 100ms of an accepted Enter, while native state stayed `working` throughout and could not distinguish the two.
+
+Observed guarantees for one logical send into an already-busy harness:
+
+```text
+ok - claude: a busy accepted send confirms as delivered (empty)
+ok - claude: exactly one queued instruction after one logical send (1)
+ok - pi: a busy accepted send confirms as delivered (empty)
+ok - pi: exactly one queued instruction after one logical send (1)
+ok - dead shell: never reported as delivered (unknown)
+```
+
+The deterministic cases are pinned in `tests/fm-backend-herdr.test.sh`; this record owns only the live evidence that the counters were rejected and the composer transition holds on real harnesses.
+
 ### Native blocked event
 
 The protocol-16 event path was measured on 2026-07-11 with Herdr 0.7.3 and Python 3.13:

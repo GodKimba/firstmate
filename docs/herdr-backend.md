@@ -168,9 +168,13 @@ Slash and dollar-prefixed input uses the shared harness-aware settle before the 
 Text is typed once; only Enter is retried.
 
 On an idle or done native baseline, submit confirmation waits for `working` or `blocked` across a bounded polling window.
-On an already active or unreadable baseline, it falls back to conservative composer clearance.
-A fully unreadable target stops retrying and reports unknown.
 The poll density bounds the residual possibility of an extremely fast complete turn; a missed transition can cause only a redundant Enter on an empty composer, never duplicate message text.
+
+On an already active or unreadable baseline, native state cannot distinguish an accepted instruction from an unsent one because the pane reads `working` either way, so confirmation reads the composer transition instead.
+The adapter first requires proof that the message is in the composer, and only then treats a drained composer after Enter as delivery.
+Requiring that anchor is what keeps the drain meaningful: without it, a composer that was already empty would read as proof of delivery for text that never arrived.
+An anchor that cannot be established stops safely as unknown and sends no Enter at all.
+`revision` and `state_change_seq` were evaluated as acceptance signals and rejected on measured evidence; the adapter comment in `bin/backends/herdr.sh` records that evidence.
 
 `pane read --lines N` can return empty output when N is below the viewport height.
 The capture owner requests at least 200 lines from Herdr and trims locally to the caller's bound.
@@ -183,8 +187,14 @@ A human-blocked permission dialog has no busy banner and still surfaces.
 ## Composer and injection safety
 
 Herdr has no direct cursor-row primitive.
-The adapter locates the bottom-most recognized bordered row, Claude `❯` row, Codex `›` row, or a Pi separator region admitted only when native identity is exactly Pi and state is idle, done, or blocked.
-A working Pi, pending middle row, missing identity, incomplete separator pair, or over-tall candidate remains pending or unknown.
+The adapter locates the bottom-most recognized bordered row, Claude `❯` row, Codex `›` row, or a Pi separator region.
+A pending middle row, missing identity, incomplete separator pair, or over-tall candidate remains pending or unknown.
+
+Locating the composer answers two different questions, and only the Pi separator region separates them.
+"May I safely type here" is the injection question the away-mode daemon asks, and it admits a Pi separator only when native identity is exactly Pi and state is idle, done, or blocked; a working Pi is refused.
+"Did the text I already typed leave the box" is the confirmation question submit asks about its own send, and it may read a working Pi's separator region because reading it neither types nor grants authority.
+The split widens reading only, never typing.
+An unreadable identity closes both questions, because that is illegibility rather than a mere lack of injection authority.
 
 ANSI capture preserves de-emphasized placeholder style.
 `bin/fm-composer-lib.sh` is the fleet-wide owner that strips dim or faint runs and dark truecolor placeholders while retaining bright typed input.
@@ -264,7 +274,8 @@ Tests use thin compatibility wrappers in `tests/herdr-test-safety.sh` and never 
 - Ghost and placeholder recognition depends on ANSI de-emphasis and fails safely to pending when unavailable.
 - Mid-session secondmate liveness is not implemented.
 - OpenCode 1.18.4 can accept Enter while busy without clearing the composer.
-  The tmux backend has a busy-queue fallback, but Herdr still reports this case as submit pending and needs a separate adapter fix.
+  The composer-transition confirmation above covers the harnesses that do clear it, verified on Claude and Pi, but a harness that keeps the accepted text visible cannot be confirmed this way and is still reported as submit pending.
+  tmux infers acceptance from a busy pane after its retry budget; Herdr deliberately does not copy that inference, because a busy pane is this path's baseline rather than new information, so accepting it would confirm every genuinely swallowed Enter as delivered.
 - Only tmux and Herdr can host the away-mode supervisor terminal.
 
 ## Regression entry points

@@ -1898,14 +1898,39 @@ fm_backend_herdr_agent_identity_raw() {  # <session> <pane> -> <agent>\t<status>
   printf '%s' "$out" | jq -r '[.result.agent.agent // "", .result.agent.agent_status // ""] | @tsv' 2>/dev/null
 }
 
-fm_backend_herdr_composer_state() {  # <target> -> empty|pending|unknown
-  local target=$1 session pane cap line trimmed found=0 shape="" raw_match="" bordered=0 stripped
-  local identity agent agent_status row=0 generic_line=0
-  fm_backend_herdr_parse_target "$target" || { printf 'unknown'; return 0; }
-  session=$FM_BACKEND_HERDR_SESSION
-  pane=$FM_BACKEND_HERDR_PANE
-  cap=$(fm_backend_herdr_capture_ansi "$target" "$FM_BACKEND_HERDR_COMPOSER_LINES" 2>/dev/null \
-    || fm_backend_herdr_capture "$target" "$FM_BACKEND_HERDR_COMPOSER_LINES") || { printf 'unknown'; return 0; }
+# fm_backend_herdr_composer_locate: the single structural owner of "where is
+# this pane's composer, and how far may its content be trusted". Both the
+# injection guard (fm_backend_herdr_composer_state) and submit confirmation
+# (fm_backend_herdr_submit_composer_state) scan through here, so the two can
+# never drift apart on shape detection.
+#
+# Sets, for the caller to read:
+#   FM_BACKEND_HERDR_COMPOSER_FOUND    1 when a composer container was located
+#                                      AND is authorized for the INJECTION
+#                                      question: "is it safe to type here".
+#   FM_BACKEND_HERDR_COMPOSER_LEGIBLE  1 when a composer container was located
+#                                      and its content can be read at all. This
+#                                      is the weaker READ question: "did the
+#                                      text I already typed leave this box".
+#   FM_BACKEND_HERDR_COMPOSER_SHAPE    bordered|bare|separated (empty if none)
+#   FM_BACKEND_HERDR_COMPOSER_RAW      the located container's raw, still-styled
+#                                      bytes, for ANSI-aware content extraction
+#
+# The two flags differ in exactly one place: a WORKING Pi. Herdr's native agent
+# identity says the target is Pi and is mid-turn, so typing into its composer
+# is not authorized - but its separator pair is still a genuine, readable
+# container, and reading it is precisely what proves whether a busy send was
+# accepted or left the instruction unsent (task fm-herdr-send-busy-duplicate).
+# An identity that cannot be read at all, an over-tall candidate, or an
+# unmatched separator below the generic row clears BOTH flags: those are
+# illegibility, not merely a lack of authority.
+fm_backend_herdr_composer_locate() {  # <ansi-capture> <session> <pane>
+  local cap=$1 session=$2 pane=$3 line trimmed found=0 shape="" raw_match=""
+  local identity agent agent_status row=0 generic_line=0 legible=0
+  FM_BACKEND_HERDR_COMPOSER_FOUND=0
+  FM_BACKEND_HERDR_COMPOSER_LEGIBLE=0
+  FM_BACKEND_HERDR_COMPOSER_SHAPE=""
+  FM_BACKEND_HERDR_COMPOSER_RAW=""
   # Structural scan: locate the bottom-most composer row and remember its RAW
   # (styled) bytes. Shape detection runs on the plain row (fm_backend_herdr_strip_ansi
   # keeps ghost text so the border/prompt glyph is still visible); the raw row is
@@ -1933,6 +1958,7 @@ fm_backend_herdr_composer_state() {  # <target> -> empty|pending|unknown
         ;;
     esac
   done < <(printf '%s\n' "$cap")
+  legible=$found
   # Pi has no prompt glyph or side border. Compare its bottom-most complete
   # separator pair with the last generic match so an earlier bordered transcript
   # row can never suppress the live Pi composer. Identity is consulted only when
@@ -1951,14 +1977,30 @@ EOF
           shape=separated
           raw_match=$FM_BACKEND_HERDR_PI_CONTENT
           found=1
+          legible=1
         else
           found=0
+          legible=0
         fi
         ;;
-      pi:*|:*)
-        # A working Pi or unreadable identity cannot authorize injection, and
-        # the lower separator pair proves any generic row above is not current.
+      pi:*)
+        # A working Pi cannot authorize injection, and the lower separator pair
+        # proves any generic row above is not current. The pair itself is still
+        # a real, readable container, so submit confirmation may read it.
         found=0
+        if [ "$FM_BACKEND_HERDR_PI_PAIR_VALID" -eq 1 ]; then
+          shape=separated
+          raw_match=$FM_BACKEND_HERDR_PI_CONTENT
+          legible=1
+        else
+          legible=0
+        fi
+        ;;
+      :*)
+        # An unreadable identity cannot establish which container this is, so
+        # neither question may be answered from it.
+        found=0
+        legible=0
         ;;
       *) : ;; # A known non-Pi agent keeps its established generic verdict.
     esac
@@ -1967,8 +2009,18 @@ EOF
     # A lower unmatched separator proves the generic row is stale, but does
     # not provide the complete Pi composer structure required for injection.
     found=0
+    legible=0
   fi
-  [ "$found" -eq 1 ] || { printf 'unknown'; return 0; }
+  FM_BACKEND_HERDR_COMPOSER_FOUND=$found
+  FM_BACKEND_HERDR_COMPOSER_LEGIBLE=$legible
+  FM_BACKEND_HERDR_COMPOSER_SHAPE=$shape
+  FM_BACKEND_HERDR_COMPOSER_RAW=$raw_match
+}
+
+# Classify the container fm_backend_herdr_composer_locate just located. Callers
+# gate on their own flag first; this step is identical for both questions.
+fm_backend_herdr_composer_classify_located() {  # -> empty|pending|unknown
+  local bordered=0 stripped
   # Content: extract the real typed text from the raw row with the shared,
   # fleet-wide ghost stripper (bin/fm-composer-lib.sh), which drops dim/faint AND
   # dark-truecolor ghost/placeholder runs. This replaces the former herdr-only
@@ -1976,28 +2028,68 @@ EOF
   # prompt and missed claude's own dim prompt-suggestion ghost - the overnight
   # afk-herdr-false-pending wedge) and, in a dark theme, drops the composer's own
   # dark box border too, which is why the bordered flag was read from the plain
-  # shape above, not from this ghost-stripped content.
-  stripped=$(printf '%s\n' "$raw_match" | fm_composer_strip_ghost)
+  # shape during the scan, not from this ghost-stripped content.
+  stripped=$(printf '%s\n' "$FM_BACKEND_HERDR_COMPOSER_RAW" | fm_composer_strip_ghost)
   stripped="${stripped#"${stripped%%[![:space:]]*}"}"
   stripped="${stripped%"${stripped##*[![:space:]]}"}"
-  if [ "$shape" = bordered ]; then
+  if [ "$FM_BACKEND_HERDR_COMPOSER_SHAPE" = bordered ]; then
     bordered=1
     stripped=${stripped//│/}
     stripped=${stripped//┃/}
     stripped=${stripped//|/}
     stripped="${stripped#"${stripped%%[![:space:]]*}"}"
     stripped="${stripped%"${stripped##*[![:space:]]}"}"
-  elif [ "$shape" = separated ]; then
-    # The native Pi identity plus the complete separator pair is the genuine
-    # composer container, equivalent to a bordered box for shared content
-    # classification. ANSI stripping keeps real text and drops only styling.
+  elif [ "$FM_BACKEND_HERDR_COMPOSER_SHAPE" = separated ]; then
+    # The complete Pi separator pair is the genuine composer container,
+    # equivalent to a bordered box for shared content classification. ANSI
+    # stripping keeps real text and drops only styling.
     bordered=1
   fi
   # Delegate the empty/pending/unknown decision to the shared owner. The bare
   # shape only ever starts with an AGENT glyph (FM_BACKEND_HERDR_BARE_PROMPT_RE
   # is '^[❯›]'), so a bare shell prompt never reaches here - it stays 'unknown'
-  # via the no-composer-row path above, exactly as before.
+  # via the no-composer-row path in the caller, exactly as before.
   fm_composer_classify_content "$bordered" "$stripped" "$FM_BACKEND_HERDR_IDLE_RE"
+}
+
+fm_backend_herdr_composer_capture() {  # <target> -> ansi capture on stdout
+  fm_backend_herdr_capture_ansi "$1" "$FM_BACKEND_HERDR_COMPOSER_LINES" 2>/dev/null \
+    || fm_backend_herdr_capture "$1" "$FM_BACKEND_HERDR_COMPOSER_LINES"
+}
+
+fm_backend_herdr_composer_state() {  # <target> -> empty|pending|unknown
+  local target=$1 cap
+  fm_backend_herdr_parse_target "$target" || { printf 'unknown'; return 0; }
+  cap=$(fm_backend_herdr_composer_capture "$target") || { printf 'unknown'; return 0; }
+  fm_backend_herdr_composer_locate "$cap" "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE"
+  [ "$FM_BACKEND_HERDR_COMPOSER_FOUND" -eq 1 ] || { printf 'unknown'; return 0; }
+  fm_backend_herdr_composer_classify_located
+}
+
+# fm_backend_herdr_submit_composer_state: the SUBMIT-confirmation read of the
+# same composer. It answers "does this container still hold typed text", which
+# is a strictly weaker question than composer_state's "may I type here", so it
+# gates on FM_BACKEND_HERDR_COMPOSER_LEGIBLE instead of _FOUND.
+#
+# The only case the two differ on is a working Pi, and that difference is the
+# whole point: Herdr's Pi composer is a separator pair with no prompt glyph, so
+# the injection guard refuses a mid-turn Pi outright. Before this split that
+# refusal also reached submit confirmation, which reported 'unknown' for an
+# instruction Pi had actually accepted and queued - the exact ambiguity that
+# invited a duplicate resend (task fm-herdr-send-busy-duplicate).
+#
+# This never widens injection authority: it is only ever consulted AFTER this
+# adapter has already typed the text itself, so there is no "is it safe to
+# type here" decision left to make. The pre-injection guard used by the
+# away-mode daemon still routes through fm_backend_composer_state and is
+# unchanged.
+fm_backend_herdr_submit_composer_state() {  # <target> -> empty|pending|unknown
+  local target=$1 cap
+  fm_backend_herdr_parse_target "$target" || { printf 'unknown'; return 0; }
+  cap=$(fm_backend_herdr_composer_capture "$target") || { printf 'unknown'; return 0; }
+  fm_backend_herdr_composer_locate "$cap" "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE"
+  [ "$FM_BACKEND_HERDR_COMPOSER_LEGIBLE" -eq 1 ] || { printf 'unknown'; return 0; }
+  fm_backend_herdr_composer_classify_located
 }
 
 # fm_backend_herdr_send_text_submit: type <text> into <target> once (raw,
@@ -2038,6 +2130,42 @@ EOF
 # Enter exactly as it did before - the fix generalizes instead of special-
 # casing the popup shape.
 #
+# Busy baseline (task fm-herdr-send-busy-duplicate, verified live in an
+# isolated Herdr lab against claude 2.x and pi 0.82.1): when the target is
+# ALREADY working before Enter, agent-state cannot prove anything - it reads
+# "working" both for an accepted-and-queued instruction and for one still
+# sitting unsent in the composer. Confirmation therefore falls back to the
+# composer, but on the TRANSITION rather than the absolute state:
+#
+#   1. Before the first Enter, require the composer to read 'pending'. That is
+#      positive proof this adapter's own literal text is in the box.
+#   2. After Enter, 'empty' means the box drained, so the busy harness took the
+#      instruction into its queue. 'pending' means it is still unsent and the
+#      Enter is retried (Enter only, never retyped).
+#
+# Requiring step 1 is what keeps step 2 honest. Without it, a busy pane whose
+# composer is empty for any other reason (the literal never landed, or the
+# harness consumed it some other way) would read 'empty' after Enter and be
+# reported as delivered - a false success for genuinely unsent text. When step
+# 1 cannot be proven, this reports 'unknown' and sends no Enter at all, so an
+# ambiguous busy pane stops safely instead of guessing.
+#
+# Measured in the lab: the busy composer drains within 100ms of Enter on both
+# claude and pi, comfortably inside one <enter-sleep>, and neither harness
+# duplicated the instruction. `revision`/`state_change_seq` were evaluated as
+# an acceptance signal and REJECTED on evidence: claude bumps `revision` during
+# ordinary quiet work with no input at all, and did not bump it when it
+# accepted a queued instruction, while pi never moved either counter.
+#
+# Deliberately NOT copied from tmux: fm_tmux_submit_enter_core treats "the pane
+# is busy" as proof that a still-pending composer was queued (its OpenCode
+# 1.18.4 case). That inference is unavailable here, because on this path a busy
+# pane is the BASELINE, not new information - accepting it would confirm every
+# genuinely swallowed Enter as delivered. OpenCode's keep-the-text-visible
+# shape therefore remains an open herdr limit (docs/herdr-backend.md "Active
+# limits"), which is the safe direction: a loud unconfirmed send, never a
+# silent one.
+#
 # Failure-mode analysis (the two directions the caller-facing contract must
 # not get wrong - see docs/herdr-backend.md "Native agent-state submit
 # confirmation" for the empirical timing behind this):
@@ -2069,6 +2197,14 @@ fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep>
   baseline=$(fm_backend_herdr_classify_submit_agent_status \
     "$(fm_backend_herdr_agent_status_raw "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE")")
   confirm_sleep=$(fm_backend_herdr_submit_confirm_budget "$sleep_s")
+  if [ "$baseline" != idle ]; then
+    # Busy or unreadable baseline: agent-state cannot distinguish accepted from
+    # unsent, so confirmation reads the composer transition instead. Anchor it
+    # first - without proof our own text is in the box, a later 'empty' proves
+    # nothing about THIS instruction.
+    verdict=$(fm_backend_herdr_submit_composer_state "$target")
+    [ "$verdict" = pending ] || { printf 'unknown'; return 0; }
+  fi
   while :; do
     fm_backend_herdr_send_key "$target" Enter || true
     if [ "$baseline" = idle ]; then
@@ -2076,7 +2212,7 @@ fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep>
         "$confirm_sleep" "$FM_BACKEND_HERDR_SUBMIT_POLLS")
     else
       sleep "$sleep_s"
-      verdict=$(fm_backend_herdr_composer_state "$target")
+      verdict=$(fm_backend_herdr_submit_composer_state "$target")
     fi
     case "$verdict" in
       busy) printf 'empty'; return 0 ;;
