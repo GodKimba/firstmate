@@ -366,8 +366,8 @@ test_keyed_decision_examples_use_authoritative_placement() {
     esac
     brief="$home/data/$id/brief.md"
     status_file="$home/state/$id.status"
-    assert_grep "$FM_CLASSIFY_DECISION_CUTOVER_MARK_DEFAULT" "$status_file" \
-      "$kind brief did not establish the correlated-answer cutover before worker events"
+    fm_decision_stream_id "$status_file" >/dev/null \
+      || fail "$kind brief did not initialize a self-describing token-era stream"
     assert_grep 'needs-decision [key=<decision-slug>]: {summary of options}' "$brief" \
       "$kind brief did not teach the canonical early-key decision opener"
     assert_grep 'resolved [key=<decision-slug>] [ans=<token>]: {how it was decided}' "$brief" \

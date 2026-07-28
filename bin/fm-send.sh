@@ -213,28 +213,9 @@ MARK_FROM_FIRSTMATE=0
 PENDING_REPLY_CORR=
 PENDING_REPLY_CREATED=0
 TARGET_TASK_ID=
-if [ -n "$TARGET_META" ] && [ "$(fm_meta_get "$TARGET_META" kind)" = secondmate ]; then
+if [ -n "$TARGET_SELECTOR" ] && [ -n "$TARGET_META" ] && [ "$(fm_meta_get "$TARGET_META" kind)" = secondmate ]; then
+  MARK_FROM_FIRSTMATE=1
   TARGET_TASK_ID=$(fm_send_id_from_meta "$TARGET_META")
-  if [ -n "$TARGET_SELECTOR" ]; then
-    MARK_FROM_FIRSTMATE=1
-  fi
-  if ! fm_secondmate_decision_cutover_dir_is_safe "$STATE"; then
-    echo "error: secondmate $TARGET_TASK_ID dispatch refused because its decision-answer cutover quarantine path is unsafe; rerun session start after repairing $STATE" >&2
-    exit 1
-  fi
-  if fm_secondmate_decision_cutover_is_quarantined "$STATE" "$TARGET_TASK_ID"; then
-    reload_corr=${FM_SECONDMATE_CUTOVER_RELOAD_CORR:-}
-    if [ "$MARK_FROM_FIRSTMATE" = 1 ] \
-      && [ -n "$reload_corr" ] \
-      && [ "$reload_corr" = "${FM_PENDING_REPLY_EXISTING_CORR:-}" ] \
-      && fm_secondmate_decision_cutover_reload_bypass_is_valid "$STATE" "$TARGET_TASK_ID" "$reload_corr" \
-      && fm_pending_reply_corr_reusable "$STATE" "$reload_corr" "$TARGET_TASK_ID"; then
-      :
-    else
-      echo "error: secondmate $TARGET_TASK_ID is quarantined from dispatch and decision handling until its compatible code reload is acknowledged; rerun session start after repair" >&2
-      exit 1
-    fi
-  fi
 fi
 
 # Resolve the target's harness from its meta (recorded by fm-spawn), used only to

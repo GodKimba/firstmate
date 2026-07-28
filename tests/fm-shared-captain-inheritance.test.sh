@@ -283,8 +283,6 @@ EOF
     printf 'window=firstmate:fm-sm\n'
     printf 'kind=secondmate\n'
   } > "$home/state/sm.meta"
-  fm_test_attest_secondmate_decision_cutover "$home/state" sm "$sm" \
-    "$(git -C "$sm" rev-parse HEAD)"
   printf -- '- sm - fixture secondmate (home: %s; scope: fixture; projects: sample; added 2026-07-16)\n' "$sm" \
     > "$data_override/secondmates.md"
   fakebin=$(make_fake_spawn_toolchain "$w")

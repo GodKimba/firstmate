@@ -576,7 +576,7 @@ test_heartbeat_scan_dedup() {
 }
 
 test_retained_decision_signal_and_scan_dedup() {
-  local dir state status_file out instance key marker
+  local dir state status_file out instance marker
   dir=$(make_supercase retained-decision-dedup)
   state="$dir/state"
   status_file="$state/retained.status"
@@ -585,15 +585,14 @@ test_retained_decision_signal_and_scan_dedup() {
     'needs-decision [key=route]: captain must choose the route' \
     'resolved [key=route]: queued generic command was not authority' \
     'working: worker resumed after consuming the queue' >> "$status_file"
-  instance=$(status_open_needs_decisions "$status_file" | awk -F '\t' 'NR == 1 { print $2 }')
+  instance=$(status_open_token_needs_decisions "$status_file" | awk -F '\t' 'NR == 1 { print $2 }')
   out=$(FM_STATE_OVERRIDE="$state" classify_signal "$status_file" "$state")
   case "$out" in
     escalate\|*occurrence="$instance"*) ;;
     *) fail "daemon signal classifier hid the retained decision behind working: $out" ;;
   esac
   FM_STATE_OVERRIDE="$state" handle_wake "signal: $status_file" "$state"
-  key=$(printf '%s' retained | tr ':/.' '___')
-  marker="$state/.subsuper-seen-decision-$key-$instance"
+  marker="$state/.subsuper-seen-decision-$instance"
   [ "$(cat "$marker" 2>/dev/null || true)" = "$instance" ] \
     || fail "daemon signal path did not mark the retained decision occurrence seen"
   : > "$state/.subsuper-escalations"

@@ -194,21 +194,6 @@ fm_write_secondmate_meta() {
     "projects=$projects"
 }
 
-fm_test_attest_secondmate_decision_cutover() {  # <parent-state> <id> <home> [commit]
-  local state=$1 id=$2 home=$3 commit=${4:-fixture} home_real
-  mkdir -p "$home/state" "$state/.secondmate-decision-cutover-v1"
-  home_real=$(cd "$home" && pwd -P)
-  printf '%s\n' '[fm-decision-answer-cutover:v1]' > "$home/state/.decision-answer-cutover-v1"
-  {
-    printf 'version=%s\n' '[fm-decision-answer-cutover:v1]'
-    printf 'id=%s\n' "$id"
-    printf 'home=%s\n' "$home_real"
-    printf 'commit=%s\n' "$commit"
-    printf 'corr=\n'
-    printf 'reason=fixture already reloaded\n'
-  } > "$state/.secondmate-decision-cutover-v1/$id.ready"
-}
-
 # --- common assertions ------------------------------------------------------
 
 # assert_contains <haystack> <needle> <msg>

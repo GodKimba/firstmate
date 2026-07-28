@@ -3,8 +3,7 @@
 # Usage: fm-bootstrap.sh
 #          Detect: prints one line per actionable problem, or an explicit
 #          BOOTSTRAP_INFO no-action fact for completed benign bootstrap work, and
-#          exits 0. A DECISION_CUTOVER failure exits nonzero before later
-#          detection or mutation.
+#          exits 0.
 #          Silent = all good.
 #          Lines: "MISSING: <tool> (install: <command>)",
 #                 "MISSING_MANUAL: <tool> (instructions: <url>)", "NEEDS_GH_AUTH",
@@ -12,9 +11,8 @@
 #                 "CREW_DISPATCH: invalid config/crew-dispatch.json - <reason>",
 #                 "FLEET_SYNC: <repo>: skipped|recovered|STUCK: <detail>",
 #                 "PR_CHECK_MIGRATION: <private remediation>",
-#                 "DECISION_CUTOVER: <repair requirement>",
 #                 "TANGLE: <remediation>",
-#                 "SECONDMATE_SYNC: secondmate <id>: skipped|quarantined: <reason>",
+#                 "SECONDMATE_SYNC: secondmate <id>: skipped: <reason>",
 #                 "NUDGE_SECONDMATES: secondmate <id>: send failed: <reason>",
 #                 "BOOTSTRAP_INFO: nudged fm-<id> with '<message>'",
 #                 "SECONDMATE_LIVENESS: secondmate <id>: skipped: <reason>|respawn failed after <cause>: <reason>",
@@ -32,11 +30,10 @@
 #          Already-current or no-instruction-change homes are silently left alone.
 #          The secondmate sweep also propagates declared inherited local material
 #          into each validated live secondmate home.
-#          SECONDMATE_SYNC lines report actionable skipped local-HEAD syncs,
-#          inheritance failures, or a secondmate quarantined from dispatch and
-#          decision handling until compatible code is loaded and acknowledged,
-#          plus quarantine diagnostics for divergent shared captain-preference
-#          copies; no-op/current and successful updates stay quiet.
+#          SECONDMATE_SYNC lines report actionable skipped local-HEAD syncs or
+#          inheritance failures for live secondmate homes, plus quarantine
+#          diagnostics for divergent shared captain-preference copies;
+#          no-op/current and successful updates stay quiet.
 #          SECONDMATE_LIVENESS lines report only actionable failures from the
 #          recovery-grade state owned by bin/fm-backend.sh's
 #          fm_backend_agent_state: skipped distinguishes an existing ambiguous
@@ -71,10 +68,9 @@
 #          refresh relays any completed fm-fleet-sync.sh output before the
 #          aggregate timeout skip line with timeout and elapsed seconds.
 #          Set FM_FLEET_PRUNE=0 to skip branch pruning during that refresh.
-#          Set FM_BOOTSTRAP_DETECT_ONLY=1 to skip the six MUTATING sweeps
-#          (PR-check migration, decision-answer cutover, secondmate_sync,
-#          secondmate_liveness_sweep, x_mode_setup, fleet_sync) while still
-#          printing every read-only detect line
+#          Set FM_BOOTSTRAP_DETECT_ONLY=1 to skip the five MUTATING sweeps
+#          (PR-check migration, secondmate_sync, secondmate_liveness_sweep,
+#          x_mode_setup, fleet_sync) while still printing every read-only detect line
 #          above; the TANGLE line switches to advisory-only wording with no
 #          checkout command. Used by
 #          fm-session-start.sh's read-only path when another live session holds
@@ -108,10 +104,6 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 . "$SCRIPT_DIR/fm-x-lib.sh"
 # shellcheck source=bin/fm-backend.sh disable=SC1091
 . "$SCRIPT_DIR/fm-backend.sh"
-# shellcheck source=bin/fm-classify-lib.sh disable=SC1091
-. "$SCRIPT_DIR/fm-classify-lib.sh"
-# shellcheck source=bin/fm-pending-reply-lib.sh disable=SC1091
-. "$SCRIPT_DIR/fm-pending-reply-lib.sh"
 
 fleet_sync_origin_backed_project_count() {
   local count proj
@@ -196,61 +188,6 @@ fleet_sync() {
   rm -f "$tmp"
 }
 
-secondmate_decision_cutover_write_record() {  # <id> <kind> <home> <commit> <corr> <reason>
-  local id=$1 kind=$2 home=$3 commit=$4 corr=$5 reason=$6 dir path tmp
-  dir=$(fm_secondmate_decision_cutover_dir "$STATE")
-  fm_secondmate_decision_cutover_dir_is_safe "$STATE" || return 1
-  if [ ! -e "$dir" ]; then
-    mkdir "$dir" 2>/dev/null || return 1
-    chmod 700 "$dir" 2>/dev/null || true
-  fi
-  path=$(fm_secondmate_decision_cutover_path "$STATE" "$id" "$kind") || return 1
-  [ ! -L "$path" ] || return 1
-  tmp=$(umask 077; mktemp "$dir/.${id}.${kind}.XXXXXX" 2>/dev/null) || return 1
-  {
-    printf 'version=%s\n' "$FM_CLASSIFY_DECISION_CUTOVER_MARK_DEFAULT"
-    printf 'id=%s\n' "$id"
-    printf 'home=%s\n' "$home"
-    printf 'commit=%s\n' "$commit"
-    printf 'corr=%s\n' "$corr"
-    printf 'reason=%s\n' "$reason"
-  } > "$tmp" || { rm -f "$tmp"; return 1; }
-  mv -f "$tmp" "$path" || { rm -f "$tmp"; return 1; }
-}
-
-secondmate_decision_cutover_prequarantine() {
-  local id home home_real ready_reload ready_quarantine
-  fm_secondmate_decision_cutover_dir_is_safe "$STATE" || {
-    echo "SECONDMATE_SYNC: fleet: quarantined: decision-answer cutover quarantine path is unsafe; repair owner: firstmate must repair $(fm_secondmate_decision_cutover_dir "$STATE") before session start"
-    return 1
-  }
-  while IFS='|' read -r id home _window _meta; do
-    if ! validate_secondmate_home "$id" "$home"; then
-      if ! secondmate_decision_cutover_write_record "$id" quarantine "$home" "" "" "unsafe home: $VALIDATION_ERROR"; then
-        echo "SECONDMATE_SYNC: secondmate $id: quarantined: unsafe home could not be isolated; repair owner: firstmate must repair $(fm_secondmate_decision_cutover_dir "$STATE") before session start"
-        return 1
-      fi
-      echo "SECONDMATE_SYNC: secondmate $id: quarantined: decision-answer cutover cannot validate its home: $VALIDATION_ERROR; repair owner: firstmate must repair the recorded home and rerun session start"
-      continue
-    fi
-    home_real="$VALIDATED_HOME"
-    if fm_secondmate_decision_cutover_is_ready "$STATE" "$id" "$home_real"; then
-      ready_reload=$(fm_secondmate_decision_cutover_path "$STATE" "$id" reload) || return 1
-      ready_quarantine=$(fm_secondmate_decision_cutover_path "$STATE" "$id" quarantine) || return 1
-      if ! rm -f "$ready_reload" "$ready_quarantine"; then
-        echo "SECONDMATE_SYNC: secondmate $id: quarantined: completed reload attestation could not clear stale quarantine; repair owner: firstmate must repair $(fm_secondmate_decision_cutover_dir "$STATE") before session start"
-        return 1
-      fi
-      continue
-    fi
-    if ! secondmate_decision_cutover_write_record "$id" quarantine "$home_real" "" "" "awaiting compatible code and correlated reload"; then
-      echo "SECONDMATE_SYNC: secondmate $id: quarantined: quarantine could not be recorded; repair owner: firstmate must repair $(fm_secondmate_decision_cutover_dir "$STATE") before session start"
-      return 1
-    fi
-  done < <(live_secondmate_meta_records "$STATE" "$DATA/secondmates.md")
-  return 0
-}
-
 secondmate_sync() {
   # shellcheck source=bin/fm-wake-lib.sh disable=SC1091
   . "$SCRIPT_DIR/fm-wake-lib.sh"
@@ -328,7 +265,6 @@ secondmate_sync() {
 
   fm_ff_after_instruction_update() {
     local id=$1 home=$2 _window=$3 instr=$4
-    fm_secondmate_decision_cutover_is_ready "$STATE" "$id" "$home" || return 0
     secondmate_send_nudge "$id" "$home" "$primary_head" "$instr"
   }
 
@@ -386,98 +322,6 @@ secondmate_sync() {
         echo "NUDGE_SECONDMATES: secondmate $id: send failed: $(first_line "$out")"
       fi
     done
-  }
-
-  secondmate_decision_cutover_complete() {
-    local id=$1 home=$2 reload quarantine
-    if ! fm_decision_cutover_ensure_state "$home/state"; then
-      echo "SECONDMATE_SYNC: secondmate $id: quarantined: compatible reload was acknowledged but the home boundary could not be established; repair owner: firstmate must repair $home/state and rerun session start"
-      return 1
-    fi
-    if ! secondmate_decision_cutover_write_record "$id" ready "$home" "$primary_head" "" "compatible code reloaded and acknowledged"; then
-      echo "SECONDMATE_SYNC: secondmate $id: quarantined: compatible reload was acknowledged but its attestation could not be recorded; repair owner: firstmate must repair $(fm_secondmate_decision_cutover_dir "$STATE") and rerun session start"
-      return 1
-    fi
-    reload=$(fm_secondmate_decision_cutover_path "$STATE" "$id" reload) || return 1
-    quarantine=$(fm_secondmate_decision_cutover_path "$STATE" "$id" quarantine) || return 1
-    if ! rm -f "$reload" "$quarantine"; then
-      echo "SECONDMATE_SYNC: secondmate $id: quarantined: compatible reload was acknowledged but quarantine could not be cleared; repair owner: firstmate must repair $(fm_secondmate_decision_cutover_dir "$STATE") and rerun session start"
-      return 1
-    fi
-    return 0
-  }
-
-  secondmate_decision_cutover_converge() {
-    local id home home_real head dirt reload corr rec phase delivered record_id record_home record_commit
-    local request out
-    while IFS='|' read -r id home _window _meta; do
-      validate_secondmate_home "$id" "$home" || continue
-      home_real="$VALIDATED_HOME"
-      fm_secondmate_decision_cutover_is_ready "$STATE" "$id" "$home_real" && continue
-      head=$(git -C "$home_real" rev-parse HEAD 2>/dev/null || true)
-      dirt=$(dirty_status "$home_real" yes)
-      if [ "$head" != "$primary_head" ] || [ -n "$dirt" ]; then
-        echo "SECONDMATE_SYNC: secondmate $id: quarantined: decision-answer cutover requires a clean fast-forward to $primary_head; repair owner: firstmate must preserve local work, converge $home_real, and rerun session start"
-        continue
-      fi
-      reload=$(fm_secondmate_decision_cutover_path "$STATE" "$id" reload) || continue
-      corr=
-      if [ -f "$reload" ] && [ ! -L "$reload" ]; then
-        record_id=$(fm_meta_get "$reload" id)
-        record_home=$(fm_meta_get "$reload" home)
-        record_commit=$(fm_meta_get "$reload" commit)
-        if [ "$record_id" = "$id" ] && [ "$record_home" = "$home_real" ] \
-          && [ "$record_commit" = "$primary_head" ]; then
-          corr=$(fm_meta_get "$reload" corr)
-          case "$corr" in
-            [A-Fa-f0-9][A-Fa-f0-9][A-Fa-f0-9][A-Fa-f0-9][A-Fa-f0-9][A-Fa-f0-9][A-Fa-f0-9][A-Fa-f0-9][A-Fa-f0-9][A-Fa-f0-9][A-Fa-f0-9][A-Fa-f0-9][A-Fa-f0-9][A-Fa-f0-9][A-Fa-f0-9][A-Fa-f0-9]) ;;
-            *) corr= ;;
-          esac
-        fi
-      fi
-      rec=
-      phase=
-      delivered=
-      if [ -n "$corr" ]; then
-        rec=$(fm_pending_reply_path "$STATE" "$corr")
-        if [ -f "$rec" ] && [ "$(fm_pending_reply_get "$rec" task_id)" = "$id" ]; then
-          phase=$(fm_pending_reply_get "$rec" phase)
-          delivered=$(fm_pending_reply_get "$rec" delivered_epoch)
-          if [ "$phase" = resolved ] || fm_pending_reply_try_resolve "$STATE" "$corr"; then
-            secondmate_decision_cutover_complete "$id" "$home_real"
-            continue
-          fi
-        else
-          corr=
-        fi
-      fi
-      request='decision-answer cutover reload: re-read AGENTS.md and bin/, then report this request through your correlated parent status before accepting dispatch or decision answers.'
-      if [ -z "$corr" ]; then
-        corr=$(fm_pending_reply_create "$FM_HOME" "$STATE" "$id" "$request") || {
-          echo "SECONDMATE_SYNC: secondmate $id: quarantined: compatible code is present but a reload acknowledgement could not be prepared; repair owner: firstmate must repair $STATE/pending-replies and rerun session start"
-          continue
-        }
-        secondmate_decision_cutover_write_record "$id" reload "$home_real" "$primary_head" "$corr" "awaiting correlated reload acknowledgement" || {
-          echo "SECONDMATE_SYNC: secondmate $id: quarantined: compatible code is present but the reload request could not be recorded; repair owner: firstmate must repair $(fm_secondmate_decision_cutover_dir "$STATE") and rerun session start"
-          continue
-        }
-        delivered=
-        phase=awaiting_report
-      fi
-      if [ -z "$delivered" ] && [ "$phase" = awaiting_report ]; then
-        if ! out=$(FM_HOME="$FM_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" FM_STATE_OVERRIDE="$STATE" \
-          FM_PENDING_REPLY_EXISTING_CORR="$corr" FM_SECONDMATE_CUTOVER_RELOAD_CORR="$corr" \
-          "$SCRIPT_DIR/fm-send.sh" "fm-$id" "$request" 2>&1); then
-          echo "SECONDMATE_SYNC: secondmate $id: quarantined: compatible code is present but its reload request failed: $(first_line "$out"); repair owner: firstmate must restore the endpoint and rerun session start"
-          continue
-        fi
-        if fm_pending_reply_try_resolve "$STATE" "$corr"; then
-          secondmate_decision_cutover_complete "$id" "$home_real"
-          continue
-        fi
-      fi
-      echo "SECONDMATE_SYNC: secondmate $id: quarantined: compatible code is present but reload acknowledgement corr=$corr is pending; repair owner: secondmate $id must report the correlated request, then firstmate must rerun session start"
-    done < <(live_secondmate_meta_records "$STATE" "$DATA/secondmates.md")
   }
 
   local tmp line
@@ -566,7 +410,6 @@ secondmate_sync() {
     rm -f "$report"
     fm_lock_release "$home_lock" || true
   done < <(live_secondmate_meta_records "$STATE" "$DATA/secondmates.md")
-  secondmate_decision_cutover_converge
   return 0
 }
 
@@ -980,11 +823,6 @@ fi
 # runnable. Detect-only sessions never touch state.
 if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ]; then
   "$SCRIPT_DIR/fm-pr-check-migrate.sh" || true
-  fm_decision_cutover_ensure_state "$STATE" \
-    || {
-      echo "DECISION_CUTOVER: failed to establish the correlated-answer boundary in $STATE; session start must stop until this state path is repaired"
-      exit 1
-    }
 fi
 
 if [ "$BACKEND_VALID" -eq 0 ]; then
@@ -1037,7 +875,6 @@ if [ "${FM_BOOTSTRAP_VERBOSE_FACTS:-0}" = 1 ] \
   echo "BOOTSTRAP_INFO: tasks-axi available"
 fi
 if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ]; then
-  secondmate_decision_cutover_prequarantine || exit 1
   secondmate_liveness_sweep
   secondmate_sync
   x_mode_setup

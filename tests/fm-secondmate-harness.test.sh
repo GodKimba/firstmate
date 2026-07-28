@@ -786,7 +786,6 @@ add_sm_worktree() {
   local w=$1 id=$2 commit=$3
   git -C "$w/main" worktree add -q --detach "$w/$id" "$commit"
   printf '%s\n' "$id" > "$w/$id/.fm-secondmate-home"
-  fm_test_attest_secondmate_decision_cutover "$w/home/state" "$id" "$w/$id" "$commit"
   {
     printf 'window=firstmate:fm-%s\n' "$id"
     printf 'kind=secondmate\n'

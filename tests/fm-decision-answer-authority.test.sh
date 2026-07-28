@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# tests/fm-decision-answer-authority.test.sh - regression: a keyed decision may be
-# closed only by a correlated answer minted after that request opened.
+# tests/fm-decision-answer-authority.test.sh - regression: a token-era keyed
+# decision may be closed only by a correlated answer minted after it opened.
 #
 # The defect this pins: a generic command submitted while the worker was busy stays
 # queued in the composer, is delivered after the worker opens a keyed
@@ -20,7 +20,8 @@ TMP_ROOT=$(fm_test_tmproot fm-decision-answer-authority)
 new_case() {  # <name> -> case dir with a state/ dir
   local d="$TMP_ROOT/$1"
   mkdir -p "$d/state"
-  fm_decision_cutover_ensure_state "$d/state" || fail "could not establish a post-cutover case"
+  fm_decision_cutover_ensure_status "$d/state/task.status" \
+    || fail "could not initialize a token-era status stream"
   printf '%s' "$d"
 }
 
@@ -61,7 +62,7 @@ test_pre_request_generic_command_never_answers() {
     printf 'working: running the test suite\n'
     printf 'needs-decision [key=red-test]: accept the red integration test, or keep fixing?\n'
     printf 'resolved [key=red-test]: proceeding on the queued /no-mistakes instruction\n'
-  } > "$f"
+  } >> "$f"
   out=$(open_set "$f")
   assert_contains "$out" "red-test|needs-decision|" \
     "an uncorrelated resolution closed a decision it was never authorized to close"
@@ -119,7 +120,7 @@ SH
 # --- the valid post-request correlated response ------------------------------
 
 test_settled_pre_cutover_history_stays_settled() {
-  local d f out
+  local d f out before
   d=$(new_legacy_case legacy-settled)
   f="$d/state/task.status"
   {
@@ -127,12 +128,14 @@ test_settled_pre_cutover_history_stays_settled() {
     printf 'resolved [key=route]: captain chose north\n'
     printf 'done: legacy task completed\n'
   } > "$f"
-  fm_decision_cutover_ensure_state "$d/state" || fail "could not migrate settled legacy history"
+  before=$(cat "$f")
+  fm_decision_cutover_ensure_status "$f" || fail "could not inspect settled legacy history"
+  [ "$(cat "$f")" = "$before" ] || fail "status initialization rewrote settled legacy history"
   out=$(open_set "$f")
   [ -z "$out" ] || fail "settled pre-cutover history reopened: $out"
   [ "$(last_status_line "$f")" = "done: legacy task completed" ] \
     || fail "the cutover marker masked the last real status event"
-  pass "settled pre-cutover history remains settled across cutover"
+  pass "settled unmarked history remains legacy-compatible and unchanged"
 }
 
 test_pre_cutover_opening_accepts_a_late_legacy_resolution() {
@@ -140,84 +143,44 @@ test_pre_cutover_opening_accepts_a_late_legacy_resolution() {
   d=$(new_legacy_case legacy-late)
   f="$d/state/task.status"
   printf 'needs-decision [key=route]: north or south?\n' > "$f"
-  fm_decision_cutover_ensure_state "$d/state" || fail "could not migrate an open legacy request"
+  fm_decision_cutover_ensure_status "$f" || fail "could not inspect an open legacy request"
   printf 'resolved [key=route]: captain chose south after cutover\n' >> "$f"
   out=$(open_set "$f")
   [ -z "$out" ] || fail "a late legacy resolution did not close its pre-cutover opening: $out"
-  pass "a pre-cutover opening remains legacy-closable after cutover"
+  pass "an unmarked opening remains closable by a late legacy resolution"
 }
 
-test_cutover_snapshots_preexisting_task_identities() {
-  local d state sentinel ready release pid tries out
-  d=$(new_legacy_case live-writer)
-  state="$d/state"
-  sentinel="$state/sentinel.status"
-  ready="$d/snapshot-ready"
-  release="$d/release"
-  printf 'working: preexisting stream\n' > "$sentinel"
-  printf 'kind=ship\n' > "$state/preexisting.meta"
-
-  (
-    grep() {
-      local arg pause=0 waited=0
-      for arg in "$@"; do
-        [ "$arg" = "$sentinel" ] && pause=1
-      done
-      if [ "$pause" -eq 1 ] && [ ! -e "$ready" ]; then
-        : > "$ready"
-        while [ ! -e "$release" ] && [ "$waited" -lt 500 ]; do
-          command sleep 0.01
-          waited=$((waited + 1))
-        done
-        [ -e "$release" ] || return 1
-      fi
-      command grep "$@"
-    }
-    fm_decision_cutover_ensure_state "$state"
-  ) &
-  pid=$!
-
-  tries=0
-  while [ ! -e "$ready" ] && kill -0 "$pid" 2>/dev/null && [ "$tries" -lt 500 ]; do
-    command sleep 0.01
-    tries=$((tries + 1))
-  done
-  if [ ! -e "$ready" ]; then
-    kill "$pid" 2>/dev/null || true
-    wait "$pid" 2>/dev/null || true
-    fail "cutover did not reach the deterministic live-writer window"
-  fi
-
-  printf 'needs-decision [key=legacy-live]: answer the pre-cutover worker?\n' \
-    > "$state/preexisting.status"
-  printf 'kind=ship\n' > "$state/new-task.meta"
-  printf 'needs-decision [key=strict-new]: answer the new worker?\n' \
-    > "$state/new-task.status"
-  : > "$release"
-  wait "$pid" || fail "cutover failed after the live-writer window"
-
-  grep -Fqx "$FM_CLASSIFY_DECISION_CUTOVER_MARK_DEFAULT" "$state/preexisting.status" \
-    || fail "cutover did not materialize the captured task identity's stream"
-  if grep -Fqx "$FM_CLASSIFY_DECISION_CUTOVER_MARK_DEFAULT" "$state/new-task.status"; then
-    fail "cutover grandfathered a task identity created after the snapshot"
-  fi
-  printf 'resolved [key=legacy-live]: late response from the pre-cutover worker\n' \
-    >> "$state/preexisting.status"
-  printf 'resolved [key=strict-new]: uncorrelated response from the new worker\n' \
-    >> "$state/new-task.status"
-  [ -z "$(open_set "$state/preexisting.status")" ] \
-    || fail "captured pre-cutover identity rejected its late legacy resolution"
-  out=$(open_set "$state/new-task.status")
-  assert_contains "$out" "strict-new|needs-decision|" \
-    "a genuinely new identity escaped correlated-answer enforcement"
-  pass "cutover captures live legacy writers while excluding new identities"
+test_new_stream_markers_are_self_describing_and_unique() {
+  local d first second reused first_id second_id reused_id old_occurrence new_occurrence
+  d=$(new_legacy_case stream-markers)
+  first="$d/state/foo.bar.status"
+  second="$d/state/foo_bar.status"
+  fm_decision_cutover_ensure_status "$first" || fail "could not initialize the first stream"
+  fm_decision_cutover_ensure_status "$second" || fail "could not initialize the second stream"
+  first_id=$(fm_decision_stream_id "$first") || fail "first marker did not identify its stream"
+  second_id=$(fm_decision_stream_id "$second") || fail "second marker did not identify its stream"
+  [ "$first_id" != "$second_id" ] || fail "distinct task ids received the same stream identity"
+  reused="$d/state/reused.status"
+  fm_decision_cutover_ensure_status "$reused" || fail "could not initialize the reusable stream"
+  reused_id=$(fm_decision_stream_id "$reused") || fail "reusable marker was not self-describing"
+  printf 'needs-decision [key=route]: choose a route\n' >> "$reused"
+  old_occurrence=$(status_open_token_needs_decisions "$reused" | awk -F '\t' 'NR == 1 { print $2 }')
+  rm -f "$reused"
+  fm_decision_cutover_ensure_status "$reused" || fail "could not initialize the replacement stream"
+  [ "$(fm_decision_stream_id "$reused")" != "$reused_id" ] \
+    || fail "a replacement stream reused its retired identity"
+  printf 'needs-decision [key=route]: choose a route\n' >> "$reused"
+  new_occurrence=$(status_open_token_needs_decisions "$reused" | awk -F '\t' 'NR == 1 { print $2 }')
+  [ "$new_occurrence" != "$old_occurrence" ] \
+    || fail "a replacement stream reused its prior decision occurrence"
+  pass "new streams carry unique self-describing token-era identities"
 }
 
 test_post_cutover_plain_resolution_is_rejected() {
   local d f out
   d=$(new_case strict-plain)
   f="$d/state/task.status"
-  printf 'needs-decision [key=route]: north or south?\n' > "$f"
+  printf 'needs-decision [key=route]: north or south?\n' >> "$f"
   printf 'resolved [key=route]: a queued command was mistaken for approval\n' >> "$f"
   out=$(open_set "$f")
   assert_contains "$out" "route|needs-decision|" \
@@ -229,7 +192,7 @@ test_correlated_answer_after_the_request_closes_it() {
   local d f token out
   d=$(new_case correlated)
   f="$d/state/task.status"
-  printf 'needs-decision [key=red-test]: accept the red test, or keep fixing?\n' > "$f"
+  printf 'needs-decision [key=red-test]: accept the red test, or keep fixing?\n' >> "$f"
   token=$(mint_for "$f" red-test)
   printf 'resolved [key=red-test] [ans=%s]: captain chose keep fixing\n' "$token" >> "$f"
   out=$(open_set "$f")
@@ -246,7 +209,7 @@ test_token_for_an_earlier_position_cannot_close_a_later_request() {
   fm_decision_record_answer "$(fm_decision_answers_file "$f")" "$token" red-test "$instance" \
     >/dev/null \
     || fail "could not record the early token"
-  printf 'working: still deciding whether to ask\n' > "$f"
+  printf 'working: still deciding whether to ask\n' >> "$f"
   printf 'needs-decision [key=red-test]: accept the red test, or keep fixing?\n' >> "$f"
   printf 'resolved [key=red-test] [ans=%s]: replayed an early token\n' "$token" >> "$f"
   assert_contains "$(open_set "$f")" "red-test|needs-decision|" \
@@ -258,7 +221,7 @@ test_reopened_decision_needs_a_fresh_answer() {
   local d f token out
   d=$(new_case reopened)
   f="$d/state/task.status"
-  printf 'needs-decision [key=scope]: ship the narrow fix, or the broad one?\n' > "$f"
+  printf 'needs-decision [key=scope]: ship the narrow fix, or the broad one?\n' >> "$f"
   token=$(mint_for "$f" scope)
   printf 'resolved [key=scope] [ans=%s]: captain chose narrow\n' "$token" >> "$f"
   out=$(open_set "$f")
@@ -276,7 +239,7 @@ test_identical_reopen_rejects_old_duplicate_and_retry_delivery() {
   local d f first retry current out
   d=$(new_case identical-reopen)
   f="$d/state/task.status"
-  printf 'needs-decision [key=scope]: ship the narrow fix?\n' > "$f"
+  printf 'needs-decision [key=scope]: ship the narrow fix?\n' >> "$f"
   first=$(mint_for "$f" scope)
   retry=$(mint_for "$f" scope)
   printf 'resolved [key=scope] [ans=%s]: retry delivery answered the first occurrence\n' "$retry" >> "$f"
@@ -307,7 +270,7 @@ test_answer_for_another_key_does_not_transfer() {
   {
     printf 'needs-decision [key=red-test]: accept the red test?\n'
     printf 'needs-decision [key=api-shape]: one endpoint, or two?\n'
-  } > "$f"
+  } >> "$f"
   token=$(mint_for "$f" api-shape)
   printf 'resolved [key=red-test] [ans=%s]: borrowed the other decision token\n' "$token" >> "$f"
   out=$(open_set "$f")
@@ -334,7 +297,7 @@ test_generic_and_unkeyed_input_never_closes_a_decision() {
     printf 'working: acting on /no-mistakes\n'
     printf 'resolved: assuming the earlier instruction covered it\n'
     printf 'resolved [key=red-test]: no token at all\n'
-  } > "$f"
+  } >> "$f"
   out=$(open_set "$f")
   assert_contains "$out" "red-test|needs-decision|" \
     "an unkeyed or untokenized resolution closed a keyed decision"
@@ -351,18 +314,20 @@ test_blocked_and_captain_held_closure_are_unchanged() {
   local d f out
   d=$(new_case preserved)
   f="$d/state/blocked.status"
+  fm_decision_cutover_ensure_status "$f" || fail "could not initialize the blocker stream"
   # A blocker clears by being fixed, not by authority: no token required.
-  printf 'blocked [key=infra]: no credentials for the staging bucket\n' > "$f"
+  printf 'blocked [key=infra]: no credentials for the staging bucket\n' >> "$f"
   printf 'resolved [key=infra]: credentials issued, resuming\n' >> "$f"
   out=$(open_set "$f")
   [ -z "$out" ] || fail "a keyed blocker no longer clears on a plain resolution: $out"
   # Legacy unkeyed blockers keep the historical default-key behavior.
-  printf 'blocked: waiting on infra\nresolved: infra access granted\n' > "$f"
+  printf 'blocked: waiting on infra\nresolved: infra access granted\n' >> "$f"
   out=$(open_set "$f")
   [ -z "$out" ] || fail "an unkeyed blocker no longer clears: $out"
   # The verified backlog transfer still closes a decision without an answer token.
   f="$d/state/held.status"
-  printf 'needs-decision [key=route]: north or south?\n' > "$f"
+  fm_decision_cutover_ensure_status "$f" || fail "could not initialize the held stream"
+  printf 'needs-decision [key=route]: north or south?\n' >> "$f"
   printf 'captain-held [key=route]: tracked by held-decision-route\n' >> "$f"
   out=$(open_set "$f")
   [ -z "$out" ] || fail "a verified captain-held transfer no longer closes a decision: $out"
@@ -390,7 +355,7 @@ test_pre_request_generic_command_never_answers
 test_queued_generic_command_reaches_a_busy_worker_unchanged
 test_settled_pre_cutover_history_stays_settled
 test_pre_cutover_opening_accepts_a_late_legacy_resolution
-test_cutover_snapshots_preexisting_task_identities
+test_new_stream_markers_are_self_describing_and_unique
 test_post_cutover_plain_resolution_is_rejected
 test_correlated_answer_after_the_request_closes_it
 test_token_for_an_earlier_position_cannot_close_a_later_request

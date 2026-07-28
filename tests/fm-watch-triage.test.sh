@@ -1212,7 +1212,7 @@ test_heartbeat_backstop_surfaces_unsurfaced_status() {
 }
 
 test_retained_decision_surfaces_signal_and_heartbeat_once() {
-  local dir state fakebin out status_file instance marker pid sig out2
+  local dir state fakebin out status_file instance marker pid sig out2 queue drain_out
   dir=$(make_case retained-decision-signal); state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"
   status_file="$state/retained.status"
   fm_decision_cutover_ensure_status "$status_file" || fail "could not establish retained-decision signal fixture"
@@ -1220,9 +1220,7 @@ test_retained_decision_surfaces_signal_and_heartbeat_once() {
     'needs-decision [key=route]: captain must choose the route' \
     'resolved [key=route]: queued generic command was not authority' \
     'working: worker resumed after consuming the queue' >> "$status_file"
-  signal_reason_is_actionable "$status_file" \
-    || fail "folded open decision was not actionable after a later working line"
-  instance=$(status_open_needs_decisions "$status_file" | awk -F '\t' 'NR == 1 { print $2 }')
+  instance=$(status_open_token_needs_decisions "$status_file" | awk -F '\t' 'NR == 1 { print $2 }')
   [ -n "$instance" ] || fail "retained-decision occurrence was not folded open"
   export FM_FAKE_CREW_STATE='state: working · source: run-step · worker active'
   watch_bg "$state" "$fakebin" "$out"
@@ -1230,9 +1228,32 @@ test_retained_decision_surfaces_signal_and_heartbeat_once() {
   wait_for_exit "$pid" 40 || fail "active worker's retained decision was absorbed on the signal path"
   grep -F "signal: $status_file" "$out" >/dev/null \
     || fail "retained decision did not surface through live signal notification"
-  marker="$state/.hb-surfaced-decision-retained-$instance"
+  marker="$state/.hb-surfaced-decision-$instance"
   [ "$(cat "$marker" 2>/dev/null || true)" = "$instance" ] \
     || fail "signal path did not deduplicate the retained decision by occurrence"
+  queue=$(cat "$state/.wake-queue")
+  printf '%s' "$queue" | grep -F $'\tdecision\t'"$instance"$'\t' >/dev/null \
+    || fail "signal path did not enqueue the retained decision by occurrence"
+  assert_contains "$queue" "[key=route] [occurrence=$instance]: captain must choose the route" \
+    "retained-decision wake omitted its key, occurrence, or summary"
+  drain_out="$dir/drain.out"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null \
+    || fail "retained-decision wake drain failed"
+  assert_contains "$(cat "$drain_out")" \
+    "[key=route] [occurrence=$instance]: captain must choose the route" \
+    "drained wake replaced the retained decision with the latest working event"
+
+  printf 'working: later status append after the decision wake\n' >> "$status_file"
+  out2="$dir/watch-second.out"
+  PATH="$fakebin:$PATH" FM_FAKE_CREW_STATE='state: working · source: run-step · worker active' \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out2" &
+  pid=$!
+  if ! wait_live "$pid" 30; then
+    reap "$pid"
+    fail "later status append re-surfaced an already-announced occurrence: $(cat "$out2")"
+  fi
+  reap "$pid"
 
   dir=$(make_case retained-decision-heartbeat); state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"
   status_file="$state/retained.status"
@@ -1241,7 +1262,7 @@ test_retained_decision_surfaces_signal_and_heartbeat_once() {
     'needs-decision [key=route]: captain must choose the route' \
     'resolved [key=route]: queued generic command was not authority' \
     'working: worker resumed after consuming the queue' >> "$status_file"
-  instance=$(status_open_needs_decisions "$status_file" | awk -F '\t' 'NR == 1 { print $2 }')
+  instance=$(status_open_token_needs_decisions "$status_file" | awk -F '\t' 'NR == 1 { print $2 }')
   sig=$(seen_sig "$status_file"); printf '%s' "$sig" > "$state/.seen-retained_status"
   PATH="$fakebin:$PATH" FM_FAKE_CREW_STATE='state: working · source: run-step · worker active' \
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=1 FM_SIGNAL_GRACE=1 \
@@ -1249,9 +1270,12 @@ test_retained_decision_surfaces_signal_and_heartbeat_once() {
   pid=$!
   wait_for_exit "$pid" 40 || fail "heartbeat did not surface an active worker's retained decision"
   grep -Fx heartbeat "$out" >/dev/null || fail "retained decision did not surface through heartbeat notification"
-  marker="$state/.hb-surfaced-decision-retained-$instance"
+  marker="$state/.hb-surfaced-decision-$instance"
   [ "$(cat "$marker" 2>/dev/null || true)" = "$instance" ] \
     || fail "heartbeat did not deduplicate the retained decision by occurrence"
+  queue=$(cat "$state/.wake-queue")
+  printf '%s' "$queue" | grep -F $'\tdecision\t'"$instance"$'\t' >/dev/null \
+    || fail "heartbeat did not enqueue the retained decision by occurrence"
 
   out2="$dir/watch-second.out"
   rm -f "$state/.last-heartbeat"

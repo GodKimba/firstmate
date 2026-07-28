@@ -20,8 +20,6 @@ set -u
 
 # shellcheck source=tests/lib.sh disable=SC1091
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
-# shellcheck source=bin/fm-classify-lib.sh disable=SC1091
-. "$ROOT/bin/fm-classify-lib.sh"
 
 BASE_PATH=${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
 TMP_ROOT=$(fm_test_tmproot fm-bootstrap-tests)
@@ -695,7 +693,6 @@ make_routine_bootstrap_fixture() {
     printf '%s\n' '.fm-secondmate-home'
     printf '%s\n' 'config/crew-harness'
     printf '%s\n' 'config/crew-dispatch.json'
-    printf '%s\n' 'state/'
   } > "$root/.gitignore"
   printf '%s\n' 'instructions' > "$root/AGENTS.md"
   mkdir -p "$root/bin" "$root/.agents/skills"
@@ -712,7 +709,6 @@ make_routine_bootstrap_fixture() {
     printf 'harness=codex\n'
     printf 'home=%s\n' "$sm"
   } > "$home/state/sm.meta"
-  fm_test_attest_secondmate_decision_cutover "$home/state" sm "$sm" "$c1"
   fakebin=$(make_fake_toolchain "$case_dir")
   add_real_jq "$fakebin"
   cat > "$fakebin/tmux" <<'SH'
@@ -760,81 +756,16 @@ test_routine_bootstrap_contract_runs_under_system_bash() {
   pass "bootstrap routine contract runs under system /bin/bash"
 }
 
-test_bootstrap_establishes_the_decision_answer_cutover() {
-  local case_dir home fakebin out status marker_count readonly_home
-  case_dir="$TMP_ROOT/decision-cutover"
-  home="$case_dir/home"
-  mkdir -p "$home/config" "$home/state"
-  printf '%s\n' manual > "$home/config/backlog-backend"
-  status="$home/state/legacy.status"
-  printf 'needs-decision [key=route]: north or south?\n' > "$status"
-  fakebin=$(make_fake_toolchain "$case_dir")
-
-  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" \
-    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
-  [ -z "$out" ] || fail "decision cutover migration should be silent, got: $out"
-  grep -Fqx "$FM_CLASSIFY_DECISION_CUTOVER_MARK_DEFAULT" "$status" \
-    || fail "bootstrap did not append the decision-answer cutover marker"
-  assert_present "$home/state/.decision-answer-cutover-v1" \
-    "bootstrap did not record completion of the decision-answer cutover"
-  printf 'resolved [key=route]: captain chose south after cutover\n' >> "$status"
-  [ -z "$(status_open_decisions "$status")" ] \
-    || fail "bootstrap migration did not preserve late legacy closure"
-
-  PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" \
-    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh" >/dev/null
-  marker_count=$(grep -Fxc "$FM_CLASSIFY_DECISION_CUTOVER_MARK_DEFAULT" "$status")
-  [ "$marker_count" -eq 1 ] || fail "bootstrap appended the cutover marker more than once"
-
-  readonly_home="$case_dir/readonly-home"
-  mkdir -p "$readonly_home/config" "$readonly_home/state"
-  printf '%s\n' manual > "$readonly_home/config/backlog-backend"
-  printf 'needs-decision [key=route]: north or south?\n' > "$readonly_home/state/legacy.status"
-  PATH="$fakebin:$BASE_PATH" FM_HOME="$readonly_home" FM_ROOT_OVERRIDE="$readonly_home" \
-    FM_BOOTSTRAP_DETECT_ONLY=1 FM_FAKE_TREEHOUSE_LEASE_HELP=1 \
-    "$ROOT/bin/fm-bootstrap.sh" >/dev/null
-  assert_absent "$readonly_home/state/.decision-answer-cutover-v1" \
-    "detect-only bootstrap wrote the decision-answer cutover completion marker"
-  [ "$(cat "$readonly_home/state/legacy.status")" = \
-    "needs-decision [key=route]: north or south?" ] \
-    || fail "detect-only bootstrap mutated legacy decision history"
-  pass "bootstrap establishes one cutover while detect-only remains read-only"
-}
-
-test_bootstrap_stops_when_decision_cutover_fails() {
-  local case_dir home fakebin out status
-  case_dir="$TMP_ROOT/decision-cutover-failure"
-  home="$case_dir/home"
-  mkdir -p "$home/config" "$home/state/.decision-answer-cutover-v1"
-  printf '%s\n' manual > "$home/config/backlog-backend"
-  fakebin=$(make_fake_toolchain "$case_dir")
-
-  status=0
-  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" \
-    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh") || status=$?
-  expect_code 1 "$status" "bootstrap must fail closed when decision cutover cannot be established"
-  assert_contains "$out" \
-    "DECISION_CUTOVER: failed to establish the correlated-answer boundary in $home/state; session start must stop until this state path is repaired" \
-    "bootstrap did not emit the declared cutover repair diagnostic"
-  assert_not_contains "$out" "MISSING:" \
-    "bootstrap continued into tool detection after decision cutover failed"
-  pass "bootstrap stops with an owned diagnostic when decision cutover fails"
-}
-
 test_bootstrap_info_is_no_load_and_actionable_lines_trigger() {
-  local trigger procedure
+  local trigger
   # shellcheck disable=SC2016 # The backtick-delimited skill names are literal Markdown.
   trigger=$(sed -n '/- `bootstrap-diagnostics`/,/- `diagnostic-reasoning`/p' "$ROOT/AGENTS.md")
   assert_contains "$trigger" "actionable diagnostic line" "bootstrap-diagnostics trigger should be action-scoped"
   assert_contains "$trigger" "BOOTSTRAP_INFO:" "bootstrap-diagnostics trigger should classify BOOTSTRAP_INFO as no-load"
-  assert_contains "$trigger" "DECISION_CUTOVER:" "decision cutover failure should trigger bootstrap diagnostics"
   assert_not_contains "$trigger" "TASKS_AXI:" "tasks-axi availability must not trigger diagnostics loading"
   assert_not_contains "$trigger" "CREW_HARNESS_OVERRIDE:" "harness override confirmation must not trigger diagnostics loading"
   assert_not_contains "$trigger" "CREW_DISPATCH: active" "active dispatch confirmation must not trigger diagnostics loading"
   assert_not_contains "$trigger" "already-live" "already-live secondmate liveness must not trigger diagnostics loading"
-  procedure=$(cat "$ROOT/.agents/skills/bootstrap-diagnostics/SKILL.md")
-  assert_contains "$procedure" "session start stopped before draining wakes" \
-    "bootstrap diagnostics did not own decision cutover failure handling"
   pass "bootstrap diagnostics trigger excludes benign lines and keeps actionable prefixes"
 }
 
@@ -929,8 +860,6 @@ test_fleet_sync_timeout_empty_override_uses_default
 test_fleet_sync_timeout_is_computed_before_launch
 test_routine_bootstrap_confirmations_are_silent
 test_routine_bootstrap_contract_runs_under_system_bash
-test_bootstrap_establishes_the_decision_answer_cutover
-test_bootstrap_stops_when_decision_cutover_fails
 test_bootstrap_info_is_no_load_and_actionable_lines_trigger
 test_crew_dispatch_active_rules_are_verbose_bootstrap_info
 test_crew_dispatch_validation

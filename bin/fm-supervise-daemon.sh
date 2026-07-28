@@ -339,7 +339,7 @@ classify_signal() {  # <reason-after-colon> <state>
     task=$(basename "$f"); task="${task%.status}"
     if status_is_captain_relevant "$last"; then
       if [ "$(status_line_verb "$last")" != needs-decision ] \
-        || ! status_has_open_needs_decision "$f"; then
+        || ! status_has_open_token_needs_decision "$f"; then
         rel=1
         seen="$state/.subsuper-seen-status-$(_stale_key "$task")"
         [ "$(cat "$seen" 2>/dev/null || true)" = "$last" ] || all_seen=0
@@ -349,10 +349,10 @@ classify_signal() {  # <reason-after-colon> <state>
       [ -n "$key" ] || continue
       rel=1
       distilled="${distilled}$(basename "$f"): open needs-decision [key=$key] [occurrence=$instance]: $summary | "
-      seen="$state/.subsuper-seen-decision-$(_stale_key "$task")-$instance"
+      seen="$state/.subsuper-seen-decision-$instance"
       [ "$(cat "$seen" 2>/dev/null || true)" = "$instance" ] || all_seen=0
     done <<EOF
-$(status_open_needs_decisions "$f")
+$(status_open_token_needs_decisions "$f")
 EOF
   done
   # strip a trailing " | " separator so the distilled line is clean
@@ -378,10 +378,10 @@ classify_stale() {  # <window> <state>
     [ -n "$key" ] || continue
     rel=1
     distilled="${distilled}${distilled:+ | }open needs-decision [key=$key] [occurrence=$instance]: $summary"
-    seen="$state/.subsuper-seen-decision-$(_stale_key "$task")-$instance"
+    seen="$state/.subsuper-seen-decision-$instance"
     [ "$(cat "$seen" 2>/dev/null || true)" = "$instance" ] || all_seen=0
   done <<EOF
-$(status_open_needs_decisions "$state/$task.status")
+$(status_open_token_needs_decisions "$state/$task.status")
 EOF
   if [ -n "$rel" ]; then
     if [ "$all_seen" = 1 ]; then
@@ -549,13 +549,12 @@ mark_status_seen() {  # <state> <task> <last-line>
 }
 
 mark_open_decisions_seen() {  # <state> <status-file>
-  local state=$1 f=$2 task key instance _summary
-  task=$(basename "$f"); task="${task%.status}"
+  local state=$1 f=$2 key instance _summary
   while IFS=$'\t' read -r key instance _summary || [ -n "$key" ]; do
     [ -n "$key" ] || continue
-    printf '%s' "$instance" > "$state/.subsuper-seen-decision-$(_stale_key "$task")-$instance"
+    printf '%s' "$instance" > "$state/.subsuper-seen-decision-$instance"
   done <<EOF
-$(status_open_needs_decisions "$f")
+$(status_open_token_needs_decisions "$f")
 EOF
 }
 
@@ -573,7 +572,7 @@ mark_escalated_seen() {  # <kind> <arg> <state>
         [ -n "$last" ] || continue
         status_is_captain_relevant "$last" || continue
         if [ "$(status_line_verb "$last")" = needs-decision ] \
-          && status_has_open_needs_decision "$f"; then
+          && status_has_open_token_needs_decision "$f"; then
           continue
         fi
         task=$(basename "$f"); task="${task%.status}"
@@ -585,7 +584,7 @@ mark_escalated_seen() {  # <kind> <arg> <state>
       last=$(last_status_line "$state/$task.status")
       [ -n "$last" ] && status_is_captain_relevant "$last" \
         && { [ "$(status_line_verb "$last")" != needs-decision ] \
-          || ! status_has_open_needs_decision "$state/$task.status"; } \
+          || ! status_has_open_token_needs_decision "$state/$task.status"; } \
         && mark_status_seen "$state" "$task" "$last" ;;
   esac
 }
@@ -1092,7 +1091,7 @@ housekeeping() {  # <state>
     local seen instance key summary
     while IFS="$(printf '\t')" read -r f task instance key summary; do
       [ -n "$f" ] || continue
-      seen="$state/.subsuper-seen-decision-$(_stale_key "$task")-$instance"
+      seen="$state/.subsuper-seen-decision-$instance"
       [ "$(cat "$seen" 2>/dev/null || true)" = "$instance" ] && continue
       escalate_add "$state" "$(basename "$f"): open needs-decision [key=$key] [occurrence=$instance]: $summary (catch-all scan)"
       printf '%s' "$instance" > "$seen"
@@ -1100,7 +1099,7 @@ housekeeping() {  # <state>
     while IFS="$(printf '\t')" read -r f task last; do
       [ -n "$f" ] || continue
       if [ "$(status_line_verb "$last")" = needs-decision ] \
-        && status_has_open_needs_decision "$f"; then
+        && status_has_open_token_needs_decision "$f"; then
         continue
       fi
       seen="$state/.subsuper-seen-status-$(_stale_key "$task")"

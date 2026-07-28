@@ -119,10 +119,8 @@ if [ "$NO_PROJECTS" -eq 1 ]; then
 else
   [ -n "$SECONDMATE_PROJECTS" ] || { echo "error: --secondmate requires at least one project, or --no-projects for a project-less home" >&2; exit 1; }
 fi
-fm_decision_cutover_ensure_state "$STATE" \
-  || { echo "error: could not establish the decision-answer cutover in $STATE" >&2; exit 1; }
 fm_decision_cutover_ensure_status "$STATE/$ID.status" \
-  || { echo "error: could not establish the decision-answer cutover in $STATE/$ID.status" >&2; exit 1; }
+  || { echo "error: could not initialize decision authority in $STATE/$ID.status" >&2; exit 1; }
 SECONDMATE_CHARTER=${FM_SECONDMATE_CHARTER:-"{TASK}"}
 SECONDMATE_SCOPE=${FM_SECONDMATE_SCOPE:-${FM_SECONDMATE_CHARTER:-"{TASK}"}}
 if [ "$NO_PROJECTS" -eq 1 ]; then
@@ -200,10 +198,8 @@ fi
 exit 0
 fi
 
-fm_decision_cutover_ensure_state "$STATE" \
-  || { echo "error: could not establish the decision-answer cutover in $STATE" >&2; exit 1; }
 fm_decision_cutover_ensure_status "$STATE/$ID.status" \
-  || { echo "error: could not establish the decision-answer cutover in $STATE/$ID.status" >&2; exit 1; }
+  || { echo "error: could not initialize decision authority in $STATE/$ID.status" >&2; exit 1; }
 REPO=${POS[1]}
 
 if [ "$HERDR_LAB" -eq 1 ]; then

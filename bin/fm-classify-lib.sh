@@ -13,8 +13,8 @@
 # daemon keeps its escalation-digest seen-markers; the watcher keeps its .seen-*
 # signatures).
 #
-# The explicit fm_decision_cutover_ensure_* writers establish the one-time
-# status-history boundary used by bootstrap and brief scaffolding.
+# The explicit fm_decision_cutover_ensure_status writer establishes the
+# token-era boundary only when brief scaffolding creates a new status stream.
 # The absorb classification (crew_absorb_class and its working/paused wrappers)
 # is also NOT a pure status-file read: it reuses
 # bin/fm-crew-state.sh, which may make a bounded no-mistakes call, to decide
@@ -74,8 +74,7 @@ FM_PAUSE_RESURFACE_SECS_DEFAULT=3600
 # fm-decision-hold.sh has verified the corresponding captain-held backlog item.
 FM_CLASSIFY_RESOLVE_VERB_DEFAULT='resolved'
 FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT='captain-held'
-FM_CLASSIFY_DECISION_CUTOVER_MARK_DEFAULT='[fm-decision-answer-cutover:v1]'
-FM_CLASSIFY_SECONDMATE_CUTOVER_DIR_DEFAULT='.secondmate-decision-cutover-v1'
+FM_CLASSIFY_DECISION_CUTOVER_MARK_PREFIX_DEFAULT='[fm-decision-answer-cutover:v1 stream='
 
 # The verb firstmate uses when it issues a correlated answer to an open decision.
 # It names the decision-answer message shape owned by bin/fm-send.sh --decision;
@@ -84,11 +83,16 @@ FM_CLASSIFY_DECISION_VERB_DEFAULT='decision'
 
 # Return the last non-blank line of a status file (empty if missing/blank).
 last_status_line() {
-  local f=$1 marker
+  local f=$1 prefix
   [ -e "$f" ] || return 0
-  marker=$FM_CLASSIFY_DECISION_CUTOVER_MARK_DEFAULT
-  LC_ALL=C awk -v marker="$marker" '
-    $0 != marker && /[^[:space:]]/ { line = $0 }
+  prefix=$FM_CLASSIFY_DECISION_CUTOVER_MARK_PREFIX_DEFAULT
+  LC_ALL=C awk -v prefix="$prefix" '
+    function marker(s, id) {
+      if (index(s, prefix) != 1 || length(s) != length(prefix) + 33 || substr(s, length(s), 1) != "]") return 0
+      id = substr(s, length(prefix) + 1, 32)
+      return id !~ /[^a-f0-9]/
+    }
+    !marker($0) && /[^[:space:]]/ { line = $0 }
     END { if (line != "") print line }
   ' "$f" 2>/dev/null
 }
@@ -186,7 +190,7 @@ status_is_paused_or_captain_held() {  # <status-line>
 # its token was minted for that key AND for that request instance, so a generic
 # command, an unkeyed message, and any input composed before the request opened
 # can never become its approval. The one-time
-# "[fm-decision-answer-cutover:v1]" stream marker makes this strict rule
+# "[fm-decision-answer-cutover:v1 stream=<id>]" stream marker makes this strict rule
 # forward-compatible: decision openings before the marker retain legacy plain
 # keyed closure even when their resolution arrives later, while every opening
 # after it requires a correlated token. An uncorrelated post-cutover resolution
@@ -252,13 +256,35 @@ _fm_decision_answer() {  # <status-line> -> answer token, or empty
 }
 
 # Format one opening-event position as the fixed-width identifier carried by
-# every answer token for that occurrence.
-fm_decision_instance_id() {  # <physical-line-number> -> 16 hex chars
-  local position=$1
+# every answer token for that occurrence. Token-era streams bind it to their
+# self-described stream identity; legacy streams retain the historical position.
+fm_decision_hash_text() {
+  if command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 2>/dev/null | awk '{print $1}'
+  elif command -v sha256sum >/dev/null 2>&1; then
+    sha256sum 2>/dev/null | awk '{print $1}'
+  elif command -v openssl >/dev/null 2>&1; then
+    openssl dgst -sha256 2>/dev/null | awk '{print $NF}'
+  else
+    return 1
+  fi
+}
+
+fm_decision_instance_id() {  # <physical-line-number> [stream-id] -> 16 hex chars
+  local position=$1 stream=${2:-} raw
   case "$position" in
     ''|*[!0-9]*) return 1 ;;
   esac
   [ "$position" -gt 0 ] 2>/dev/null || return 1
+  if [ -n "$stream" ]; then
+    [ "${#stream}" -eq 32 ] || return 1
+    case "$stream" in *[!a-f0-9]*) return 1 ;; esac
+    raw=$(printf '%s:%s' "$stream" "$position" | fm_decision_hash_text) || return 1
+    raw=$(printf '%s' "$raw" | cut -c1-16)
+    [ "${#raw}" -eq 16 ] || return 1
+    printf '%s' "$raw"
+    return 0
+  fi
   printf '%016x' "$position"
 }
 
@@ -337,122 +363,60 @@ fm_decision_answer_message() {  # <key> <token> <text>
     "${FM_CLASSIFY_DECISION_VERB:-$FM_CLASSIFY_DECISION_VERB_DEFAULT}" "$1" "$2" "$3"
 }
 
+fm_decision_marker_line_id() {  # <marker-line>
+  local line=$1 prefix id
+  prefix=$FM_CLASSIFY_DECISION_CUTOVER_MARK_PREFIX_DEFAULT
+  case "$line" in "$prefix"*\]) ;; *) return 1 ;; esac
+  id=${line#"$prefix"}
+  id=${id%\]}
+  [ "${#id}" -eq 32 ] || return 1
+  case "$id" in *[!a-f0-9]*) return 1 ;; esac
+  printf '%s' "$id"
+}
+
+fm_decision_stream_id() {  # <status-file>
+  local f=$1 line
+  [ -f "$f" ] && [ ! -L "$f" ] || return 1
+  while IFS= read -r line || [ -n "$line" ]; do
+    fm_decision_marker_line_id "$line" && return 0
+  done < "$f"
+  return 1
+}
+
+fm_decision_status_marker() {
+  local raw
+  raw=$(openssl rand -hex 16 2>/dev/null || true)
+  case "$raw" in
+    [a-f0-9][a-f0-9][a-f0-9][a-f0-9]*) ;;
+    *)
+      raw=$(printf '%s' "${BASHPID:-$$}-$(date +%s 2>/dev/null)-$RANDOM$RANDOM$RANDOM" \
+        | fm_decision_hash_text)
+      ;;
+  esac
+  raw=$(printf '%s' "$raw" | tr 'A-F' 'a-f' | tr -cd 'a-f0-9' | cut -c1-32)
+  [ "${#raw}" -eq 32 ] || return 1
+  printf '%s%s]\n' "$FM_CLASSIFY_DECISION_CUTOVER_MARK_PREFIX_DEFAULT" "$raw"
+}
+
 fm_decision_cutover_ensure_status() {  # <status-file>
   local f=$1 parent marker
   parent=${f%/*}
   [ "$parent" != "$f" ] || return 1
+  if [ ! -e "$parent" ] && [ ! -L "$parent" ]; then
+    mkdir -p "$parent" || return 1
+  fi
   [ -d "$parent" ] && [ ! -L "$parent" ] || return 1
-  marker=$FM_CLASSIFY_DECISION_CUTOVER_MARK_DEFAULT
-  if [ ! -e "$f" ] && [ ! -L "$f" ]; then
-    ( set -C; printf '%s\n' "$marker" > "$f" ) 2>/dev/null || true
+  if [ -e "$f" ] || [ -L "$f" ]; then
+    [ -f "$f" ] && [ ! -L "$f" ] || return 1
+    return 0
+  fi
+  marker=$(fm_decision_status_marker) || return 1
+  if ( set -C; printf '%s\n' "$marker" > "$f" ) 2>/dev/null; then
+    fm_decision_stream_id "$f" >/dev/null || return 1
+    return 0
   fi
   [ -f "$f" ] && [ ! -L "$f" ] || return 1
-  grep -Fqx "$marker" "$f" 2>/dev/null && return 0
-  printf '%s\n' "$marker" >> "$f" || return 1
-  grep -Fqx "$marker" "$f" 2>/dev/null
-}
-
-fm_decision_cutover_ensure_state() {  # <state-dir>
-  local state=$1 complete f id tmp marker
-  local legacy_status_ids='' legacy_task_ids=''
-  if [ ! -e "$state" ] && [ ! -L "$state" ]; then
-    mkdir -p "$state" || return 1
-  fi
-  [ -d "$state" ] && [ ! -L "$state" ] || return 1
-  complete="$state/.decision-answer-cutover-v1"
-  marker=$FM_CLASSIFY_DECISION_CUTOVER_MARK_DEFAULT
-  if [ -f "$complete" ] && [ ! -L "$complete" ] \
-    && [ "$(cat "$complete" 2>/dev/null)" = "$marker" ]; then
-    return 0
-  fi
-  [ ! -e "$complete" ] && [ ! -L "$complete" ] || return 1
-  for f in "$state"/*.status; do
-    [ -e "$f" ] || continue
-    id=$(basename "$f" .status)
-    case "$id" in ''|.*|*[!A-Za-z0-9._-]*) continue ;; esac
-    legacy_status_ids="${legacy_status_ids}${id}"$'\n'
-  done
-  for f in "$state"/*.meta; do
-    [ -f "$f" ] && [ ! -L "$f" ] || continue
-    id=$(basename "$f" .meta)
-    case "$id" in ''|.*|*[!A-Za-z0-9._-]*) continue ;; esac
-    legacy_task_ids="${legacy_task_ids}${id}"$'\n'
-  done
-  while IFS= read -r id; do
-    [ -n "$id" ] || continue
-    fm_decision_cutover_ensure_status "$state/$id.status" || return 1
-  done <<EOF
-$legacy_status_ids
-EOF
-  while IFS= read -r id; do
-    [ -n "$id" ] || continue
-    fm_decision_cutover_ensure_status "$state/$id.status" || return 1
-  done <<EOF
-$legacy_task_ids
-EOF
-  tmp=$(umask 077; mktemp "$state/.decision-answer-cutover-v1.XXXXXX" 2>/dev/null) || return 1
-  printf '%s\n' "$marker" > "$tmp" \
-    || { rm -f "$tmp"; return 1; }
-  if ln "$tmp" "$complete" 2>/dev/null; then
-    rm -f "$tmp"
-    return 0
-  fi
-  rm -f "$tmp"
-  [ -f "$complete" ] && [ ! -L "$complete" ] \
-    && [ "$(cat "$complete" 2>/dev/null)" = "$marker" ]
-}
-
-fm_secondmate_decision_cutover_dir() {  # <state-dir>
-  printf '%s/%s' "$1" "$FM_CLASSIFY_SECONDMATE_CUTOVER_DIR_DEFAULT"
-}
-
-fm_secondmate_decision_cutover_path() {  # <state-dir> <id> <quarantine|reload|ready>
-  local state=$1 id=$2 kind=$3
-  case "$id" in ''|.*|*[!A-Za-z0-9._-]*) return 1 ;; esac
-  case "$kind" in quarantine|reload|ready) ;; *) return 1 ;; esac
-  printf '%s/%s.%s' "$(fm_secondmate_decision_cutover_dir "$state")" "$id" "$kind"
-}
-
-fm_secondmate_decision_cutover_dir_is_safe() {  # <state-dir>
-  local dir
-  dir=$(fm_secondmate_decision_cutover_dir "$1")
-  [ ! -e "$dir" ] && [ ! -L "$dir" ] && return 0
-  [ -d "$dir" ] && [ ! -L "$dir" ]
-}
-
-fm_secondmate_decision_cutover_is_ready() {  # <state-dir> <id> <home>
-  local path version id home complete
-  path=$(fm_secondmate_decision_cutover_path "$1" "$2" ready) || return 1
-  [ -f "$path" ] && [ ! -L "$path" ] || return 1
-  version=$(grep '^version=' "$path" 2>/dev/null | tail -1 | cut -d= -f2- || true)
-  id=$(grep '^id=' "$path" 2>/dev/null | tail -1 | cut -d= -f2- || true)
-  home=$(grep '^home=' "$path" 2>/dev/null | tail -1 | cut -d= -f2- || true)
-  complete="$3/state/.decision-answer-cutover-v1"
-  [ "$version" = "$FM_CLASSIFY_DECISION_CUTOVER_MARK_DEFAULT" ] \
-    && [ "$id" = "$2" ] && [ "$home" = "$3" ] \
-    && [ -f "$complete" ] && [ ! -L "$complete" ] \
-    && [ "$(cat "$complete" 2>/dev/null)" = "$FM_CLASSIFY_DECISION_CUTOVER_MARK_DEFAULT" ]
-}
-
-fm_secondmate_decision_cutover_is_quarantined() {  # <state-dir> <id>
-  local path
-  path=$(fm_secondmate_decision_cutover_path "$1" "$2" quarantine) || return 1
-  [ -f "$path" ] && [ ! -L "$path" ]
-}
-
-fm_secondmate_decision_cutover_reload_bypass_is_valid() {  # <state-dir> <id> <corr>
-  local state=$1 id=$2 corr=$3 path record_id record_corr
-  case "$corr" in
-    [A-Fa-f0-9][A-Fa-f0-9][A-Fa-f0-9][A-Fa-f0-9][A-Fa-f0-9][A-Fa-f0-9][A-Fa-f0-9][A-Fa-f0-9][A-Fa-f0-9][A-Fa-f0-9][A-Fa-f0-9][A-Fa-f0-9][A-Fa-f0-9][A-Fa-f0-9][A-Fa-f0-9][A-Fa-f0-9]) ;;
-    *) return 1 ;;
-  esac
-  fm_secondmate_decision_cutover_dir_is_safe "$state" || return 1
-  fm_secondmate_decision_cutover_is_quarantined "$state" "$id" || return 1
-  path=$(fm_secondmate_decision_cutover_path "$state" "$id" reload) || return 1
-  [ -f "$path" ] && [ ! -L "$path" ] || return 1
-  record_id=$(grep '^id=' "$path" 2>/dev/null | tail -1 | cut -d= -f2- || true)
-  record_corr=$(grep '^corr=' "$path" 2>/dev/null | tail -1 | cut -d= -f2- || true)
-  [ "$record_id" = "$id" ] && [ "$record_corr" = "$corr" ]
+  return 0
 }
 
 # Drop the record for <key> from a newline-terminated
@@ -489,8 +453,8 @@ EOF
 # most-recently-opened-last order; prints nothing when none are open.
 # "--with-instance" inserts the occurrence identifier before the summary for the
 # answer-issuance boundary. Pure read of the file and of the paired answer
-# records, and the home cutover completion marker; no mutation. This is the
-# durable open-set the fleet snapshot and any point-in-time consumer must use
+# records; no mutation.
+# This is the durable open-set the fleet snapshot and any point-in-time consumer must use
 # instead of trusting the last status line.
 #
 # A post-cutover needs-decision request additionally requires a correlated
@@ -501,7 +465,7 @@ EOF
 status_open_decisions() {  # <status-file> [--with-instance]
   local f=$1 view=${2:-} line verb key note resolve held open='' stripped
   local answers held_rec held_fields held_verb held_instance held_authority ans
-  local position=0 instance authority=legacy marker complete
+  local position=0 instance authority=legacy stream_id=''
   local out_key out_verb out_instance _out_authority out_note
   case "$view" in
     ''|--with-instance) ;;
@@ -510,17 +474,10 @@ status_open_decisions() {  # <status-file> [--with-instance]
   [ -f "$f" ] || return 0
   resolve=${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}
   held=${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}
-  marker=$FM_CLASSIFY_DECISION_CUTOVER_MARK_DEFAULT
-  complete="${f%/*}/.decision-answer-cutover-v1"
-  if ! grep -Fqx "$marker" "$f" 2>/dev/null \
-    && [ -f "$complete" ] && [ ! -L "$complete" ] \
-    && [ "$(cat "$complete" 2>/dev/null)" = "$marker" ]; then
-    authority=correlated
-  fi
   answers=$(fm_decision_answers_file "$f")
   while IFS= read -r line || [ -n "$line" ]; do
     position=$((position + 1))
-    if [ "$line" = "$marker" ]; then
+    if stream_id=$(fm_decision_marker_line_id "$line"); then
       authority=correlated
       continue
     fi
@@ -531,7 +488,7 @@ status_open_decisions() {  # <status-file> [--with-instance]
     case "$verb" in
       needs-decision|blocked)
         note=$(status_line_note "$line")
-        instance=$(fm_decision_instance_id "$position") || continue
+        instance=$(fm_decision_instance_id "$position" "$stream_id") || continue
         open=$(_fm_decision_drop "$open" "$key")
         [ -n "$open" ] && open="${open}"$'\n'
         open="${open}${key}"$'\t'"${verb}"$'\t'"${instance}"$'\t'"${authority}"$'\t'"${note}"$'\n'
@@ -580,6 +537,27 @@ status_open_needs_decisions() {  # <status-file>
   done <<EOF
 $(status_open_decisions "$f" --with-instance)
 EOF
+}
+
+status_open_token_needs_decisions() {  # <status-file>
+  local f=$1 stream key instance summary
+  stream=$(fm_decision_stream_id "$f") || return 0
+  while IFS=$'\t' read -r key instance summary || [ -n "$key" ]; do
+    [ -n "$key" ] || continue
+    printf '%s\t%s.%s\t%s\n' "$key" "$stream" "$instance" "$summary"
+  done <<EOF
+$(status_open_needs_decisions "$f")
+EOF
+}
+
+status_has_open_token_needs_decision() {  # <status-file>
+  local key _occurrence _summary
+  while IFS=$'\t' read -r key _occurrence _summary || [ -n "$key" ]; do
+    [ -n "$key" ] && return 0
+  done <<EOF
+$(status_open_token_needs_decisions "$1")
+EOF
+  return 1
 }
 
 status_has_open_needs_decision() {  # <status-file>
@@ -657,9 +635,9 @@ window_to_task() {
 }
 
 # 0 (actionable) if ANY status file listed in a "signal:" wake carries a
-# captain-relevant last line or a folded open needs-decision occurrence; 1
-# otherwise. Pass the space-separated file list that follows the "signal:"
-# prefix. Non-.status arguments (e.g. .turn-ended markers, which never carry a
+# captain-relevant last line; 1 otherwise.
+# Pass the space-separated file list that follows the "signal:" prefix.
+# Non-.status arguments (e.g. .turn-ended markers, which never carry a
 # verb) are skipped. A 1 here is NOT "benign" on its own: a no-verb signal (a
 # bare turn-end, a working: note) is only benign when the crew is also provably
 # working (signal_crew_provably_working below); otherwise it surfaces.
@@ -668,9 +646,12 @@ signal_reason_is_actionable() {  # <file> ...
   for f in "$@"; do
     [ -e "$f" ] || continue
     case "$f" in *.status) ;; *) continue ;; esac
-    status_has_open_needs_decision "$f" && return 0
     last=$(last_status_line "$f")
     [ -n "$last" ] || continue
+    if [ "$(status_line_verb "$last")" = needs-decision ] \
+      && status_has_open_token_needs_decision "$f"; then
+      continue
+    fi
     status_is_captain_relevant "$last" && return 0
   done
   return 1
@@ -777,7 +758,7 @@ scan_captain_relevant_statuses() {  # <state>
   return 0
 }
 
-# Print one row per folded open needs-decision occurrence:
+# Print one row per folded open token-era needs-decision occurrence:
 # "<file>\t<task>\t<instance>\t<key>\t<summary>".
 scan_open_needs_decisions() {  # <state>
   local state=$1 f task key instance summary
@@ -788,7 +769,7 @@ scan_open_needs_decisions() {  # <state>
       [ -n "$key" ] || continue
       printf '%s\t%s\t%s\t%s\t%s\n' "$f" "$task" "$instance" "$key" "$summary"
     done <<EOF
-$(status_open_needs_decisions "$f")
+$(status_open_token_needs_decisions "$f")
 EOF
   done
   return 0

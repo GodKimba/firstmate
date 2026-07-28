@@ -409,7 +409,6 @@ Observed output:
 
 ```text
 bin/fm-afk-return.sh
-bin/fm-bootstrap.sh
 bin/fm-brief.sh
 bin/fm-crew-state.sh
 bin/fm-decision-hold.sh
@@ -427,15 +426,15 @@ Observed guarantee: a runtime carries the answer message as opaque text and a ba
 `fm-send.sh --decision` mints and records the token before any backend dispatch, and `fm_backend_send_text_submit` receives an already-composed message, so the refusal to answer a request that is not open is identical on every backend.
 The status stream a worker appends is a plain file folded only through that shared library, so a new harness or backend adds no correlation surface and needs no per-adapter change.
 
-Cutover concurrency, fail-closed startup, and lifecycle retention are pinned by:
+Token-era initialization, legacy compatibility, lifecycle retention, and retained-decision notification are pinned by:
 
 ```sh
 tests/fm-decision-answer-authority.test.sh
-tests/fm-bootstrap.test.sh
-tests/fm-session-start.test.sh
+tests/fm-brief.test.sh
 tests/fm-fleet-snapshot-view.test.sh
+tests/fm-watch-triage.test.sh
 ```
 
-Expected migration matrix: an authoritative task identity present at the cutover snapshot is materialized even when its first status stream appears during migration, while an identity created after that snapshot begins under correlated authority.
-Expected startup matrix: primary cutover failure emits `DECISION_CUTOVER`, exits nonzero, and stops session start before wake draining.
+Expected compatibility matrix: brief scaffolding gives each new status stream a unique self-describing token-era marker, while an existing unmarked stream remains byte-for-byte legacy-compatible until `fm-decision-token-cutover-migration` marks it.
 Expected notification matrix: active and terminal lifecycle evidence may retire stale blockers, but cannot clear a folded `needs-decision`; only its correlated resolution or verified `captain-held` transfer can close it.
+Expected wake matrix: a token-era decision retained past an uncorrelated resolution is queued with its key, stream occurrence, and summary, then later status appends do not reannounce that occurrence.
