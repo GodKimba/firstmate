@@ -35,6 +35,7 @@ A detailed active synchronous run may keep that identity through the exact submi
 The script header owns the exact current-code binding rules.
 During no-mistakes' `ci` monitor phase, it also reads the ci step log tail because `axi status` reports both "still waiting on checks" and "checks green, waiting on merge" as `ci,running`.
 The most recent recognized ci log marker wins, so checks-green monitoring reports done while a later re-arm, failed-check, or issue marker returns the crew to working.
+On no-mistakes work, every green-ready verdict is additionally corroborated by one bounded GitHub check-run probe, because the pipeline enters that same monitor phase when the forge has reported no checks at all: zero, pending, failing, and unreadable checks all stay working with the reason in the detail, while `direct-PR`, `local-only`, and GitLab-hosted work keep their existing ready signals untouched.
 Only when no matching run exists does it fall back to the pane busy-signature and then a status-log event whose verb maps to a recognized run-state; a dead pane without a run reports unknown instead of trusting a stale log.
 Decision-only events such as `resolved` never become current state or leak their prose into the current-state detail.
 In that status-log fallback, a declared external wait reports the distinct `paused` state with its reason.

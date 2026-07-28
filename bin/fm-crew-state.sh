@@ -40,6 +40,10 @@
 #      checks" from "checks green, waiting on merge" (see nm_ci_checks_state) -
 #      a ci-step log-tail check overrides working -> done once checks read
 #      green, so a green PR is never silently read as still-validating.
+#      Every green-ready verdict on no-mistakes work additionally requires
+#      positive check-run evidence from the forge (see ci_evidence): a green
+#      reading with zero, pending, failing, or unreadable checks stays
+#      non-ready instead of being reported as checks green.
 #   3. Reconcile the status log: if its last line says needs-decision/blocked but
 #      the run-step shows the run moved on, the log is deterministically stale and
 #      is flagged superseded. A genuinely parked run plus a needs-decision log
@@ -67,6 +71,8 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 . "$SCRIPT_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-classify-lib.sh
 . "$SCRIPT_DIR/fm-classify-lib.sh"
+# shellcheck source=bin/fm-pr-lib.sh
+. "$SCRIPT_DIR/fm-pr-lib.sh"
 
 ID=${1:-}
 [ -n "$ID" ] || { echo "usage: fm-crew-state.sh <id>" >&2; exit 2; }
@@ -81,6 +87,11 @@ case "$NM_TIMEOUT" in ''|*[!0-9]*) NM_TIMEOUT=10 ;; esac
 # history every call.
 FM_CREW_STATE_RUNS_LIMIT=${FM_CREW_STATE_RUNS_LIMIT:-200}
 case "$FM_CREW_STATE_RUNS_LIMIT" in ''|*[!0-9]*) FM_CREW_STATE_RUNS_LIMIT=200 ;; esac
+# Seconds allowed for the one forge check-run probe behind a green-ready
+# verdict (ci_evidence). Kept separate from NM_TIMEOUT because it bounds a
+# network call to GitHub rather than a local CLI.
+FM_CREW_STATE_GH_TIMEOUT=${FM_CREW_STATE_GH_TIMEOUT:-20}
+case "$FM_CREW_STATE_GH_TIMEOUT" in ''|*[!0-9]*|0) FM_CREW_STATE_GH_TIMEOUT=20 ;; esac
 SEP=' · '
 
 # Emit the one canonical line and exit 0. Detail is optional.
@@ -102,7 +113,9 @@ meta_value() {  # <key>
 WT=$(meta_value worktree)
 KIND=$(meta_value kind)
 HARNESS=$(meta_value harness)
+MODE=$(meta_value mode)
 [ -n "$KIND" ] || KIND=ship
+[ -n "$MODE" ] || MODE=no-mistakes
 
 # A torn-down (or never-created) worktree has no current state to read.
 if [ -z "$WT" ] || [ ! -d "$WT" ]; then
@@ -331,13 +344,19 @@ nm_effective_ci_step_status() {
 # never distinguishes "still waiting on checks" from "checks green, waiting on
 # merge": both read as plain `ci,running,...`. The only place that transition is
 # recorded is the ci step's own log text, e.g. "all CI checks passed - still
-# monitoring until merged or closed" or "no CI checks reported - still
 # monitoring until merged or closed" (verified against 360+ real run logs under
 # ~/.no-mistakes/logs/*/ci.log on the installed v1.32.2 binary, including the
 # actual PR #252 run). Reads the ci step's log tail via `axi logs` and scans it
 # for the MOST RECENT recognized marker (the log is append-only/chronological,
 # so the last match is current): green with nothing red after it means CI is
 # green right now, still only waiting on merge/close.
+#
+# "no CI checks reported" is NOT green: it states the opposite, that the forge
+# has reported nothing at all. no-mistakes still enters its merge-monitor phase
+# on that reading and marks the change CI-ready, so firstmate PRs #7 and #8
+# (2026-07) were reported as checks green while GitHub held zero check-runs.
+# The marker is therefore not-ready here, and every remaining green reading is
+# separately corroborated against the forge by ci_green_ready_allowed below.
 nm_ci_checks_state() {
   local run_id log_tail marker
   run_id=$(strip_quotes "$(nm_field id)")
@@ -348,11 +367,112 @@ nm_ci_checks_state() {
     | grep -E 'CI checks passed|no CI checks reported - still monitoring|no CI checks reported yet|checks failed|issues detected|CI checks running|base branch advanced.*re-arming CI monitor timeout' \
     | tail -1)
   case "$marker" in
-    *"checks passed"*|*"no CI checks reported - still monitoring"*) printf 'green' ;;
-    *"no CI checks reported yet"*|*"checks failed"*|*"issues detected"*|*"CI checks running"*|*"base branch advanced"*"re-arming CI monitor timeout"*) printf 'not-ready' ;;
+    *"checks passed"*) printf 'green' ;;
+    *"no CI checks reported"*|*"checks failed"*|*"issues detected"*|*"CI checks running"*|*"base branch advanced"*"re-arming CI monitor timeout"*) printf 'not-ready' ;;
     *) printf 'unknown' ;;
   esac
 }
+
+# --- forge check-run evidence ----------------------------------------------
+#
+# Positive evidence that this crew's PR really is green, required before any
+# green-ready verdict on no-mistakes work. Local signals alone cannot supply it:
+# the ci log marker, the `checks-passed` outcome, and the crew's own status line
+# all read green during a zero-check period, so each is corroborated once
+# against the forge's own check-runs.
+#
+# GitHub only, and by design. `direct-PR` and `local-only` never run this
+# pipeline, so their unchanged ready signals stay theirs (AGENTS.md section 7
+# owns the delivery-mode contract), and a GitLab merge request keeps its
+# previous behavior rather than being judged by a GitHub probe. A project that
+# deliberately ships without CI declares that through its delivery mode, never
+# by happening to show zero runs.
+#
+# One bounded probe per read, cached in CI_EVIDENCE, and only on a path already
+# about to report green.
+CI_EVIDENCE=""
+# gh's builtin jq evaluates this, so no external jq is needed. Same classifier
+# as bin/fm-bearings-snapshot.sh, which owns the shape: a skipped check on a
+# fast-path PR counts as green, an unfinished one does not.
+# shellcheck disable=SC2016  # jq expression: $c is jq's binding, not a shell variable
+CI_CHECKS_QUERY='(.statusCheckRollup // []) as $c
+| if ($c|length) == 0 then "none"
+  elif any($c[]; (.conclusion // .state // "") as $s | ($s=="FAILURE" or $s=="ERROR" or $s=="TIMED_OUT" or $s=="CANCELLED" or $s=="ACTION_REQUIRED")) then "failing"
+  elif any($c[]; ((.status // "") != "COMPLETED") and ((.state // "") != "SUCCESS")) then "pending"
+  else "passing" end'
+
+# Bounded gh call, same timeout cascade as nm_run. A home with no bounding tool
+# refuses the probe outright rather than risking an unbounded network wait: an
+# unverifiable answer is never green-ready.
+gh_bounded() {  # <args...>
+  case "$HAVE_TIMEOUT" in
+    timeout)  GH_PROMPT_DISABLED=1 GH_NO_UPDATE_NOTIFIER=1 timeout "$FM_CREW_STATE_GH_TIMEOUT" gh "$@" ;;
+    gtimeout) GH_PROMPT_DISABLED=1 GH_NO_UPDATE_NOTIFIER=1 gtimeout "$FM_CREW_STATE_GH_TIMEOUT" gh "$@" ;;
+    perl)     GH_PROMPT_DISABLED=1 GH_NO_UPDATE_NOTIFIER=1 perl -e 'my $t = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { setpgrp(0, 0); exec @ARGV } local $SIG{ALRM} = sub { kill "TERM", -$pid; select undef, undef, undef, 0.2; kill "KILL", -$pid; exit 124 }; alarm $t; waitpid $pid, 0; exit($? >> 8)' "$FM_CREW_STATE_GH_TIMEOUT" gh "$@" ;;
+    *)        return 124 ;;
+  esac
+}
+
+# The PR a green-ready claim is about, most authoritative source first. The
+# run's own pr field is used ONLY on the full path: a coarse run object belongs
+# to whichever branch `axi status` answered for, so its PR is another crew's.
+ci_pr_url() {
+  local url=""
+  [ "${RUN_SOURCE:-}" = full ] && url=$(strip_quotes "$(nm_field pr)")
+  [ -n "$url" ] || url=$(meta_value pr)
+  [ -n "$url" ] || url=$(printf '%s\n' "$LOG_LINE" | grep -oE 'https://[^[:space:]]+' | head -1)
+  printf '%s' "$url"
+}
+
+# One token for <url>'s check-runs: passing, none, pending, failing,
+# not-applicable (a forge this probe does not cover), or unreadable.
+ci_checks_evidence() {  # <url>
+  local url=${1:-} out
+  [ -n "$url" ] || { printf 'unreadable'; return; }
+  fm_pr_url_parse "$url" || { printf 'unreadable'; return; }
+  [ "$FM_PR_PROVIDER" = github ] || { printf 'not-applicable'; return; }
+  command -v gh >/dev/null 2>&1 || { printf 'unreadable'; return; }
+  out=$(gh_bounded pr view "$url" --json statusCheckRollup -q "$CI_CHECKS_QUERY" 2>/dev/null) || { printf 'unreadable'; return; }
+  case "$(trim "$out")" in
+    passing|none|pending|failing) trim "$out" ;;
+    *) printf 'unreadable' ;;
+  esac
+}
+
+# 0 when a green reading may stand as a green-ready verdict.
+ci_green_ready_allowed() {
+  case "$MODE" in no-mistakes) ;; *) return 0 ;; esac
+  [ -n "$CI_EVIDENCE" ] || CI_EVIDENCE=$(ci_checks_evidence "$(ci_pr_url)")
+  case "$CI_EVIDENCE" in
+    passing|not-applicable) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# Why a green reading was withheld, for the current-state detail.
+ci_withheld_note() {
+  case "$CI_EVIDENCE" in
+    none)    printf 'checks not confirmed green: no check runs reported' ;;
+    pending) printf 'checks not confirmed green: checks still running' ;;
+    failing) printf 'checks not confirmed green: a check failed' ;;
+    *)       printf 'checks not confirmed green: check state unreadable' ;;
+  esac
+}
+
+# Record that reason in RUN_DETAIL, once: several green readings can be withheld
+# in one pass (a checks-passed outcome, a green ci marker, and the crew's own
+# report all claim the same PR) and they share one explanation.
+CI_WITHHELD_NOTED=0
+ci_note_withheld() {
+  [ "$CI_WITHHELD_NOTED" = 0 ] || return 0
+  CI_WITHHELD_NOTED=1
+  if [ -n "$RUN_DETAIL" ]; then
+    RUN_DETAIL="$RUN_DETAIL${SEP}$(ci_withheld_note)"
+  else
+    RUN_DETAIL=$(ci_withheld_note)
+  fi
+}
+
 # Coarse fallback for cross-branch attribution. `no-mistakes axi status` (bare)
 # reports the active-or-most-recent run for the CURRENT branch when one
 # exists, else falls back to some other branch's run purely as informational
@@ -537,7 +657,16 @@ if [ "$HAVE_RUN" = 1 ]; then
     if [ -n "$outcome" ]; then
       case "$outcome" in
         passed)        RUN_STATE="done"; RUN_DETAIL="run passed: PR merged/closed" ;;
-        checks-passed) RUN_STATE="done"; RUN_DETAIL="checks green: PR ready for review" ;;
+        checks-passed)
+          # The pipeline's own "validated, CI green, not merged yet" outcome.
+          # It is set from the same CI-monitor reading that treats zero
+          # check-runs as satisfied, so it needs the forge corroboration too.
+          if ci_green_ready_allowed; then
+            RUN_STATE="done"; RUN_DETAIL="checks green: PR ready for review"
+          else
+            RUN_STATE=working; RUN_DETAIL="run reported checks-passed"; ci_note_withheld
+          fi
+          ;;
         failed)        RUN_STATE=failed; RUN_DETAIL="run failed" ;;
         cancelled)     RUN_STATE=failed; RUN_DETAIL="run cancelled" ;;
         *)             RUN_STATE=unknown; RUN_DETAIL="outcome: $outcome" ;;
@@ -573,8 +702,13 @@ if [ "$HAVE_RUN" = 1 ]; then
           running)
             CI_LOG_STATE=$(nm_ci_checks_state)
             if [ "$CI_LOG_STATE" = green ]; then
-              RUN_STATE="done"
-              RUN_DETAIL="checks green: PR ready for review (still monitoring for merge/close)"
+              if ci_green_ready_allowed; then
+                RUN_STATE="done"
+                RUN_DETAIL="checks green: PR ready for review (still monitoring for merge/close)"
+              else
+                CI_LOG_STATE=not-ready
+                ci_note_withheld
+              fi
             fi
             ;;
           fixing)
@@ -585,20 +719,31 @@ if [ "$HAVE_RUN" = 1 ]; then
     fi
   fi
 
+  # A crew's own "done: PR ... checks green" line is a report, not proof: it is
+  # a historical event written from the same CI-monitor reading that treats zero
+  # check-runs as satisfied. It may still outrank a monitoring run, but only
+  # with the same forge corroboration every other green-ready path needs.
   if [ "$RUN_STATE" = working ] && log_reports_ci_ready; then
     if [ "$RUN_SOURCE" = coarse ]; then
-      emit "done" status-log "$(status_line_note "$LOG_LINE")${SEP}run still monitoring PR"
-    fi
-    [ -n "$CI_STEP_STATUS" ] || CI_STEP_STATUS=$(nm_effective_ci_step_status)
-    if [ "$RUN_STATUS" = fixing ]; then
-      CI_LOG_STATE=not-ready
-    elif [ "$CI_STEP_STATUS" = running ] && [ -z "$CI_LOG_STATE" ]; then
-      CI_LOG_STATE=$(nm_ci_checks_state)
-    elif [ "$CI_STEP_STATUS" = fixing ]; then
-      CI_LOG_STATE=not-ready
-    fi
-    if [ "$CI_LOG_STATE" != not-ready ]; then
-      emit "done" status-log "$(status_line_note "$LOG_LINE")${SEP}run still monitoring PR"
+      if ci_green_ready_allowed; then
+        emit "done" status-log "$(status_line_note "$LOG_LINE")${SEP}run still monitoring PR"
+      fi
+      ci_note_withheld
+    else
+      [ -n "$CI_STEP_STATUS" ] || CI_STEP_STATUS=$(nm_effective_ci_step_status)
+      if [ "$RUN_STATUS" = fixing ]; then
+        CI_LOG_STATE=not-ready
+      elif [ "$CI_STEP_STATUS" = running ] && [ -z "$CI_LOG_STATE" ]; then
+        CI_LOG_STATE=$(nm_ci_checks_state)
+      elif [ "$CI_STEP_STATUS" = fixing ]; then
+        CI_LOG_STATE=not-ready
+      fi
+      if [ "$CI_LOG_STATE" != not-ready ]; then
+        if ci_green_ready_allowed; then
+          emit "done" status-log "$(status_line_note "$LOG_LINE")${SEP}run still monitoring PR"
+        fi
+        ci_note_withheld
+      fi
     fi
   fi
 
