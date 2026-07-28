@@ -29,7 +29,7 @@
 #                       mutating step runs.
 #   2. bootstrap      - home-local stale Herdr projection cleanup runs only
 #                       when this session actually holds the lock. Detect-only
-#                       diagnostics always run. Bootstrap's five MUTATING sweeps
+#                       diagnostics always run. Bootstrap's six MUTATING sweeps
 #                       (legacy PR-check migration, secondmate fast-forward,
 #                       secondmate liveness, X-mode artifact writes, fleet sync)
 #                       also run only when locked.
@@ -65,7 +65,7 @@
 # tasks-axi and quota-axi tool checks, and tasks-axi availability - none of
 # which mutate shared state and all of which are safe to compute without
 # verified lock ownership.
-# Only projection cleanup, the five bootstrap mutating sweeps, and the
+# Only projection cleanup, the six bootstrap mutating sweeps, and the
 # wake-queue drain are skipped.
 # The context and fleet-state digests
 # below are always read-only, so they run unconditionally in both modes.
@@ -85,8 +85,9 @@
 # truly needed.
 #
 # Usage: fm-session-start.sh
-#   Prints the full ordered digest to stdout and always exits 0: this is a
-#   reporting command, not a gate. A lock refusal is reported as a loud
+#   Prints the full ordered digest to stdout and normally exits 0: this is a
+#   reporting command, not a gate. A decision-answer cutover failure exits
+#   nonzero before wake draining or the remaining digest. A lock refusal is a loud
 #   banner inline, never a silent failure or a non-zero exit that would make
 #   an agent skip the rest of the digest.
 set -u
@@ -272,18 +273,24 @@ fi
 
 # --- 2. bootstrap --------------------------------------------------------
 subsection "BOOTSTRAP"
+BOOT_RC=0
 if [ "$READ_ONLY" -eq 1 ]; then
-  BOOT_OUT=$(FM_BOOTSTRAP_DETECT_ONLY=1 "$SCRIPT_DIR/fm-bootstrap.sh" 2>&1)
+  BOOT_OUT=$(FM_BOOTSTRAP_DETECT_ONLY=1 "$SCRIPT_DIR/fm-bootstrap.sh" 2>&1) \
+    || BOOT_RC=$?
 else
   BOOT_OUT=$(
     "$SCRIPT_DIR/fm-herdr-session-cleanup.sh" 2>&1 || true
     "$SCRIPT_DIR/fm-bootstrap.sh" 2>&1
-  )
+  ) || BOOT_RC=$?
 fi
 if [ -n "$BOOT_OUT" ]; then
   printf '%s\n' "$BOOT_OUT"
 else
   printf '(silent - all good)\n'
+fi
+if [ "$BOOT_RC" -ne 0 ]; then
+  printf 'session start stopped before wake drain because bootstrap failed\n'
+  exit "$BOOT_RC"
 fi
 
 # --- 3. wake-drain -------------------------------------------------------

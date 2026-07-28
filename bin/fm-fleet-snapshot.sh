@@ -440,14 +440,14 @@ task_json_lines() {
     # (fm-classify-lib.sh's status_open_decisions) so a later unrelated event can
     # never mask a still-open captain decision. The set is derived purely from the
     # keyed fold - never from report bodies or decision-like prose - and then
-    # reconciled against the crew LIFECYCLE, which only clears a stale decision the
-    # crew has provably moved past. Two lifecycle signals clear it, neither of which
-    # reads any report content:
+    # reconciled against the crew LIFECYCLE. A needs-decision request is authority,
+    # so lifecycle evidence never clears it; only a correlated resolution or a
+    # verified captain-held transfer can do that in the fold. Two lifecycle signals
+    # can clear stale blocked events, neither of which reads any report content:
     #   - a live activity read (run-step or busy pane) that is working/done, so a
-    #     crew that resumed past a gate is not still reported as parked; and
+    #     crew that resumed past a blocker is not still reported as blocked; and
     #   - a TERMINAL done/failed state on a single-owner task (scout or ship), whose
-    #     deliverable is its report or PR, so a COMPLETED scout surfaces only as a
-    #     report POINTER, never as a reopened pending decision.
+    #     deliverable is its report or PR.
     # Secondmates are excluded from lifecycle clearing: they are persistent and
     # multiplex many concerns onto one stream, so activity on one concern must
     # never clear another concern's keyed decision. A parked/blocked state, or a
@@ -458,7 +458,8 @@ task_json_lines() {
        { { { [ "$current_source" = run-step ] || [ "$current_source" = pane ]; } \
            && [ "$current_state" != parked ] && [ "$current_state" != blocked ]; } \
          || { [ "$current_state" = "done" ] || [ "$current_state" = "failed" ]; }; }; then
-      open_decisions_tsv=""
+      open_decisions_tsv=$(printf '%s\n' "$open_decisions_tsv" \
+        | awk -F '\t' '$2 == "needs-decision"')
     fi
     open_decisions_json=$(printf '%s' "$open_decisions_tsv" | jq -R -s '
       [ splits("\n") | select(length > 0)

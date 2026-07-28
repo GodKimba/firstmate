@@ -800,16 +800,40 @@ test_bootstrap_establishes_the_decision_answer_cutover() {
   pass "bootstrap establishes one cutover while detect-only remains read-only"
 }
 
+test_bootstrap_stops_when_decision_cutover_fails() {
+  local case_dir home fakebin out status
+  case_dir="$TMP_ROOT/decision-cutover-failure"
+  home="$case_dir/home"
+  mkdir -p "$home/config" "$home/state/.decision-answer-cutover-v1"
+  printf '%s\n' manual > "$home/config/backlog-backend"
+  fakebin=$(make_fake_toolchain "$case_dir")
+
+  status=0
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh") || status=$?
+  expect_code 1 "$status" "bootstrap must fail closed when decision cutover cannot be established"
+  assert_contains "$out" \
+    "DECISION_CUTOVER: failed to establish the correlated-answer boundary in $home/state; session start must stop until this state path is repaired" \
+    "bootstrap did not emit the declared cutover repair diagnostic"
+  assert_not_contains "$out" "MISSING:" \
+    "bootstrap continued into tool detection after decision cutover failed"
+  pass "bootstrap stops with an owned diagnostic when decision cutover fails"
+}
+
 test_bootstrap_info_is_no_load_and_actionable_lines_trigger() {
-  local trigger
+  local trigger procedure
   # shellcheck disable=SC2016 # The backtick-delimited skill names are literal Markdown.
   trigger=$(sed -n '/- `bootstrap-diagnostics`/,/- `diagnostic-reasoning`/p' "$ROOT/AGENTS.md")
   assert_contains "$trigger" "actionable diagnostic line" "bootstrap-diagnostics trigger should be action-scoped"
   assert_contains "$trigger" "BOOTSTRAP_INFO:" "bootstrap-diagnostics trigger should classify BOOTSTRAP_INFO as no-load"
+  assert_contains "$trigger" "DECISION_CUTOVER:" "decision cutover failure should trigger bootstrap diagnostics"
   assert_not_contains "$trigger" "TASKS_AXI:" "tasks-axi availability must not trigger diagnostics loading"
   assert_not_contains "$trigger" "CREW_HARNESS_OVERRIDE:" "harness override confirmation must not trigger diagnostics loading"
   assert_not_contains "$trigger" "CREW_DISPATCH: active" "active dispatch confirmation must not trigger diagnostics loading"
   assert_not_contains "$trigger" "already-live" "already-live secondmate liveness must not trigger diagnostics loading"
+  procedure=$(cat "$ROOT/.agents/skills/bootstrap-diagnostics/SKILL.md")
+  assert_contains "$procedure" "session start stopped before draining wakes" \
+    "bootstrap diagnostics did not own decision cutover failure handling"
   pass "bootstrap diagnostics trigger excludes benign lines and keeps actionable prefixes"
 }
 
@@ -905,6 +929,7 @@ test_fleet_sync_timeout_is_computed_before_launch
 test_routine_bootstrap_confirmations_are_silent
 test_routine_bootstrap_contract_runs_under_system_bash
 test_bootstrap_establishes_the_decision_answer_cutover
+test_bootstrap_stops_when_decision_cutover_fails
 test_bootstrap_info_is_no_load_and_actionable_lines_trigger
 test_crew_dispatch_active_rules_are_verbose_bootstrap_info
 test_crew_dispatch_validation

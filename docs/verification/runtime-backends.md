@@ -426,3 +426,16 @@ bin/fm-wake-lib.sh
 Observed guarantee: a runtime carries the answer message as opaque text and a backend carries it as opaque keystrokes, so neither can weaken, forge, or bypass the correlation.
 `fm-send.sh --decision` mints and records the token before any backend dispatch, and `fm_backend_send_text_submit` receives an already-composed message, so the refusal to answer a request that is not open is identical on every backend.
 The status stream a worker appends is a plain file folded only through that shared library, so a new harness or backend adds no correlation surface and needs no per-adapter change.
+
+Cutover concurrency, fail-closed startup, and lifecycle retention are pinned by:
+
+```sh
+tests/fm-decision-answer-authority.test.sh
+tests/fm-bootstrap.test.sh
+tests/fm-session-start.test.sh
+tests/fm-fleet-snapshot-view.test.sh
+```
+
+Expected migration matrix: an authoritative task identity present at the cutover snapshot is materialized even when its first status stream appears during migration, while an identity created after that snapshot begins under correlated authority.
+Expected startup matrix: primary cutover failure emits `DECISION_CUTOVER`, exits nonzero, and stops session start before wake draining.
+Expected notification matrix: active and terminal lifecycle evidence may retire stale blockers, but cannot clear a folded `needs-decision`; only its correlated resolution or verified `captain-held` transfer can close it.

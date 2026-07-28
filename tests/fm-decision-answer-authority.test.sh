@@ -147,6 +147,72 @@ test_pre_cutover_opening_accepts_a_late_legacy_resolution() {
   pass "a pre-cutover opening remains legacy-closable after cutover"
 }
 
+test_cutover_snapshots_preexisting_task_identities() {
+  local d state sentinel ready release pid tries out
+  d=$(new_legacy_case live-writer)
+  state="$d/state"
+  sentinel="$state/sentinel.status"
+  ready="$d/snapshot-ready"
+  release="$d/release"
+  printf 'working: preexisting stream\n' > "$sentinel"
+  printf 'kind=ship\n' > "$state/preexisting.meta"
+
+  (
+    grep() {
+      local arg pause=0 waited=0
+      for arg in "$@"; do
+        [ "$arg" = "$sentinel" ] && pause=1
+      done
+      if [ "$pause" -eq 1 ] && [ ! -e "$ready" ]; then
+        : > "$ready"
+        while [ ! -e "$release" ] && [ "$waited" -lt 500 ]; do
+          command sleep 0.01
+          waited=$((waited + 1))
+        done
+        [ -e "$release" ] || return 1
+      fi
+      command grep "$@"
+    }
+    fm_decision_cutover_ensure_state "$state"
+  ) &
+  pid=$!
+
+  tries=0
+  while [ ! -e "$ready" ] && kill -0 "$pid" 2>/dev/null && [ "$tries" -lt 500 ]; do
+    command sleep 0.01
+    tries=$((tries + 1))
+  done
+  if [ ! -e "$ready" ]; then
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+    fail "cutover did not reach the deterministic live-writer window"
+  fi
+
+  printf 'needs-decision [key=legacy-live]: answer the pre-cutover worker?\n' \
+    > "$state/preexisting.status"
+  printf 'kind=ship\n' > "$state/new-task.meta"
+  printf 'needs-decision [key=strict-new]: answer the new worker?\n' \
+    > "$state/new-task.status"
+  : > "$release"
+  wait "$pid" || fail "cutover failed after the live-writer window"
+
+  grep -Fqx "$FM_CLASSIFY_DECISION_CUTOVER_MARK_DEFAULT" "$state/preexisting.status" \
+    || fail "cutover did not materialize the captured task identity's stream"
+  if grep -Fqx "$FM_CLASSIFY_DECISION_CUTOVER_MARK_DEFAULT" "$state/new-task.status"; then
+    fail "cutover grandfathered a task identity created after the snapshot"
+  fi
+  printf 'resolved [key=legacy-live]: late response from the pre-cutover worker\n' \
+    >> "$state/preexisting.status"
+  printf 'resolved [key=strict-new]: uncorrelated response from the new worker\n' \
+    >> "$state/new-task.status"
+  [ -z "$(open_set "$state/preexisting.status")" ] \
+    || fail "captured pre-cutover identity rejected its late legacy resolution"
+  out=$(open_set "$state/new-task.status")
+  assert_contains "$out" "strict-new|needs-decision|" \
+    "a genuinely new identity escaped correlated-answer enforcement"
+  pass "cutover captures live legacy writers while excluding new identities"
+}
+
 test_post_cutover_plain_resolution_is_rejected() {
   local d f out
   d=$(new_case strict-plain)
@@ -324,6 +390,7 @@ test_pre_request_generic_command_never_answers
 test_queued_generic_command_reaches_a_busy_worker_unchanged
 test_settled_pre_cutover_history_stays_settled
 test_pre_cutover_opening_accepts_a_late_legacy_resolution
+test_cutover_snapshots_preexisting_task_identities
 test_post_cutover_plain_resolution_is_rejected
 test_correlated_answer_after_the_request_closes_it
 test_token_for_an_earlier_position_cannot_close_a_later_request

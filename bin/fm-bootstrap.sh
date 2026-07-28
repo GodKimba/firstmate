@@ -3,7 +3,8 @@
 # Usage: fm-bootstrap.sh
 #          Detect: prints one line per actionable problem, or an explicit
 #          BOOTSTRAP_INFO no-action fact for completed benign bootstrap work, and
-#          exits 0.
+#          exits 0. A DECISION_CUTOVER failure exits nonzero before later
+#          detection or mutation.
 #          Silent = all good.
 #          Lines: "MISSING: <tool> (install: <command>)",
 #                 "MISSING_MANUAL: <tool> (instructions: <url>)", "NEEDS_GH_AUTH",
@@ -11,6 +12,7 @@
 #                 "CREW_DISPATCH: invalid config/crew-dispatch.json - <reason>",
 #                 "FLEET_SYNC: <repo>: skipped|recovered|STUCK: <detail>",
 #                 "PR_CHECK_MIGRATION: <private remediation>",
+#                 "DECISION_CUTOVER: <repair requirement>",
 #                 "TANGLE: <remediation>",
 #                 "SECONDMATE_SYNC: secondmate <id>: skipped: <reason>",
 #                 "NUDGE_SECONDMATES: secondmate <id>: send failed: <reason>",
@@ -834,7 +836,10 @@ fi
 if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ]; then
   "$SCRIPT_DIR/fm-pr-check-migrate.sh" || true
   fm_decision_cutover_ensure_state "$STATE" \
-    || echo "DECISION_CUTOVER: failed to establish the correlated-answer boundary in $STATE"
+    || {
+      echo "DECISION_CUTOVER: failed to establish the correlated-answer boundary in $STATE; session start must stop until this state path is repaired"
+      exit 1
+    }
 fi
 
 if [ "$BACKEND_VALID" -eq 0 ]; then

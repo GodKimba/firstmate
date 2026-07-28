@@ -352,7 +352,8 @@ fm_decision_cutover_ensure_status() {  # <status-file>
 }
 
 fm_decision_cutover_ensure_state() {  # <state-dir>
-  local state=$1 complete f tmp marker
+  local state=$1 complete f id tmp marker
+  local legacy_status_ids='' legacy_task_ids=''
   if [ ! -e "$state" ] && [ ! -L "$state" ]; then
     mkdir -p "$state" || return 1
   fi
@@ -366,8 +367,28 @@ fm_decision_cutover_ensure_state() {  # <state-dir>
   [ ! -e "$complete" ] && [ ! -L "$complete" ] || return 1
   for f in "$state"/*.status; do
     [ -e "$f" ] || continue
-    fm_decision_cutover_ensure_status "$f" || return 1
+    id=$(basename "$f" .status)
+    case "$id" in ''|.*|*[!A-Za-z0-9._-]*) continue ;; esac
+    legacy_status_ids="${legacy_status_ids}${id}"$'\n'
   done
+  for f in "$state"/*.meta; do
+    [ -f "$f" ] && [ ! -L "$f" ] || continue
+    id=$(basename "$f" .meta)
+    case "$id" in ''|.*|*[!A-Za-z0-9._-]*) continue ;; esac
+    legacy_task_ids="${legacy_task_ids}${id}"$'\n'
+  done
+  while IFS= read -r id; do
+    [ -n "$id" ] || continue
+    fm_decision_cutover_ensure_status "$state/$id.status" || return 1
+  done <<EOF
+$legacy_status_ids
+EOF
+  while IFS= read -r id; do
+    [ -n "$id" ] || continue
+    fm_decision_cutover_ensure_status "$state/$id.status" || return 1
+  done <<EOF
+$legacy_task_ids
+EOF
   tmp=$(umask 077; mktemp "$state/.decision-answer-cutover-v1.XXXXXX" 2>/dev/null) || return 1
   printf '%s\n' "$marker" > "$tmp" \
     || { rm -f "$tmp"; return 1; }
