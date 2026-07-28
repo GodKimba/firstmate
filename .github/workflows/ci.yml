@@ -5,13 +5,89 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  schedule:
+    - cron: '23 5 * * *'
+  workflow_dispatch:
 
 permissions:
   contents: read
 
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
+  # Manual full-suite runs may represent distinct sensitive-change proofs, so
+  # serialize rather than cancel them. Routine runs keep only the newest ref.
+  cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' }}
+
 jobs:
+  # Two standard Ubuntu jobs are the routine required proof. Their measured,
+  # disjoint composition is owned by bin/fm-test-run.sh and documented in
+  # docs/fm-test-portable-shards.md; each five-minute cap is a hard tripwire.
+  pr-fast-1:
+    name: PR fast proof 1
+    if: github.event_name == 'pull_request' || github.event_name == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - name: Install pinned ShellCheck
+        run: |
+          set -eu
+          bin/fm-install-shellcheck.sh "$RUNNER_TEMP/bin"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+      - name: Install tasks-axi
+        run: |
+          set -eu
+          npm install -g tasks-axi
+          tasks-axi --version
+      - name: Lint shell scripts
+        run: bin/fm-lint.sh
+      - name: Prove regression composition
+        run: bin/fm-test-run.sh --check-coverage
+      - name: Check repository and CI invariants
+        run: |
+          set -eu
+          [ "$(readlink CLAUDE.md)" = "AGENTS.md" ] || { echo "::error::CLAUDE.md must be a symlink to AGENTS.md"; exit 1; }
+          [ "$(readlink .claude/skills)" = "../.agents/skills" ] || { echo "::error::.claude/skills must be a symlink to ../.agents/skills"; exit 1; }
+          tracked=$(git ls-files -- data state config projects .no-mistakes)
+          if [ -n "$tracked" ]; then
+            echo "::error::Personal fleet paths are tracked in git:"
+            printf '%s\n' "$tracked"
+            exit 1
+          fi
+          bash tests/fm-ci-workflow.test.sh
+      - name: Run fast portable regressions 1
+        run: bin/fm-test-run.sh --lane portable-parallel-1
+
+  pr-fast-2:
+    name: PR fast proof 2
+    if: github.event_name == 'pull_request' || github.event_name == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - name: Install pinned ShellCheck
+        run: |
+          set -eu
+          bin/fm-install-shellcheck.sh "$RUNNER_TEMP/bin"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+      - name: Install tasks-axi
+        run: |
+          set -eu
+          npm install -g tasks-axi
+          tasks-axi --version
+      - name: Run fast portable regressions 2
+        run: bin/fm-test-run.sh --lane portable-parallel-2
+
+  # The complete regression suite runs nightly and on explicit maintainer
+  # request. These jobs preserve the prior portable, Herdr, and macOS coverage
+  # without placing long or platform-specific lanes on routine pull requests.
   lint:
-    name: Lint shell scripts
+    name: Full suite - lint shell scripts
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -20,27 +96,21 @@ jobs:
           set -eu
           bin/fm-install-shellcheck.sh "$RUNNER_TEMP/bin"
           echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
-      # Single owner of the lint definition (file set + config + version). Do not
-      # re-spell the shellcheck command here; keep CI and the pre-push gate on it.
       - run: bin/fm-lint.sh
 
-  # Deterministic proof that portable parallel shards + portable serial + Herdr
-  # equal the complete tests/*.test.sh inventory with no missing or duplicates.
   test-coverage:
-    name: Test coverage guard
+    name: Full suite - test coverage guard
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
       - name: Prove complete regression partition
         run: bin/fm-test-run.sh --check-coverage
 
-  # Two duration-balanced portable parallel shards of the Phase 2 proven-isolated
-  # set only. Composition owner: bin/fm-test-run.sh (docs/fm-test-portable-shards.md).
   tests-portable-parallel-1:
-    name: Behavior portable parallel 1
+    name: Full suite - portable parallel 1
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
-    # Measured shard wall is ~1 min of serial sum on proven scripts; this cap is
-    # a hang tripwire with margin, not the expected healthy end of the lane.
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v6
@@ -57,21 +127,11 @@ jobs:
           npm install -g tasks-axi
           tasks-axi --version
       - name: Run portable parallel shard 1
-        run: |
-          set -eu
-          mkdir -p "$RUNNER_TEMP/fm-test"
-          bin/fm-test-run.sh --lane portable-parallel-1 \
-            --json "$RUNNER_TEMP/fm-test/fm-test-timing-portable-parallel-1.json"
-      - name: Upload shard 1 timing artifact
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: fm-test-timing-portable-parallel-1
-          path: ${{ runner.temp }}/fm-test/fm-test-timing-portable-parallel-1.json
-          if-no-files-found: warn
+        run: bin/fm-test-run.sh --lane portable-parallel-1
 
   tests-portable-parallel-2:
-    name: Behavior portable parallel 2
+    name: Full suite - portable parallel 2
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -89,27 +149,12 @@ jobs:
           npm install -g tasks-axi
           tasks-axi --version
       - name: Run portable parallel shard 2
-        run: |
-          set -eu
-          mkdir -p "$RUNNER_TEMP/fm-test"
-          bin/fm-test-run.sh --lane portable-parallel-2 \
-            --json "$RUNNER_TEMP/fm-test/fm-test-timing-portable-parallel-2.json"
-      - name: Upload shard 2 timing artifact
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: fm-test-timing-portable-parallel-2
-          path: ${{ runner.temp }}/fm-test/fm-test-timing-portable-parallel-2.json
-          if-no-files-found: warn
+        run: bin/fm-test-run.sh --lane portable-parallel-2
 
-  # Required portable serial remainder: watcher, lock, AFK, tmux, daemon,
-  # ambiguous, and other stateful tests. Real Herdr stays in tests-herdr.
   tests-portable-serial:
-    name: Behavior portable serial
+    name: Full suite - portable serial
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
-    # Measured serial remainder is ~13 min wall without Herdr. Cap is a hang
-    # tripwire above observed p99 script cost and suite wall, not the expected
-    # healthy end (interim 25m full-suite slack reduced after sharding).
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v6
@@ -134,28 +179,12 @@ jobs:
           npm install -g tasks-axi
           tasks-axi --version
       - name: Run portable serial remainder
-        run: |
-          set -eu
-          mkdir -p "$RUNNER_TEMP/fm-test"
-          bin/fm-test-run.sh --lane portable-serial \
-            --json "$RUNNER_TEMP/fm-test/fm-test-timing-portable-serial.json"
-      - name: Upload portable serial timing artifact
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: fm-test-timing-portable-serial
-          path: ${{ runner.temp }}/fm-test/fm-test-timing-portable-serial.json
-          if-no-files-found: warn
+        run: bin/fm-test-run.sh --lane portable-serial
 
-  # Required real-Herdr lane: pinned install, serial real-herdr-gated family,
-  # hard-fail on "skip: herdr not found". Starts on Linux x86_64; if a genuine
-  # platform invariant fails (focus, cleanup, default-session tripwire), keep
-  # the failure evidence and move the job to macOS rather than skip assertions.
   tests-herdr:
-    name: Behavior tests (Herdr)
+    name: Full suite - Herdr
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
-    # Real Herdr is slower than the portable suite; this is a hang tripwire,
-    # not the expected healthy end of the lane (estimate 15-40 min first cut).
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@v6
@@ -178,8 +207,6 @@ jobs:
       - name: Install pinned Treehouse
         run: |
           set -eu
-          # Several real-herdr-gated E2E scripts require treehouse for spawn
-          # worktree acquisition (presentation, workspace-per-home, autodetect).
           bin/fm-install-treehouse.sh "$RUNNER_TEMP/bin"
           echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
       - name: Assert Herdr pin and protocol floor
@@ -207,9 +234,6 @@ jobs:
       - name: Start default Herdr session for fleet-state tripwire
         run: |
           set -eu
-          # Lab provision requires exactly one running default session so the
-          # default-session tripwire can arm. Start it headless; never use it
-          # for lab work (tests still refuse default and use fm-lab-* only).
           mkdir -p "$RUNNER_TEMP/fm-herdr"
           nohup herdr server >"$RUNNER_TEMP/fm-herdr/default-server.log" 2>&1 &
           echo $! >"$RUNNER_TEMP/fm-herdr/default-server.pid"
@@ -235,12 +259,10 @@ jobs:
           set -eu
           mkdir -p "$RUNNER_TEMP/fm-herdr"
           bin/fm-herdr-ci-cleanup.sh snapshot "$RUNNER_TEMP/fm-herdr/sessions-before.json"
-      - name: Run real-Herdr family (serial, required)
+      - name: Run real-Herdr family
         run: |
           set -eu
           mkdir -p "$RUNNER_TEMP/fm-test"
-          # Serial only. Fail if any script reports herdr not found. Live
-          # harness credential tests stay outside this family (opt-in env only).
           bin/fm-test-run.sh --family real-herdr-gated \
             --fail-on-gate-skip 'herdr not found' \
             --json "$RUNNER_TEMP/fm-test/fm-test-timing-herdr.json"
@@ -250,62 +272,24 @@ jobs:
           set -eu
           bin/fm-herdr-ci-cleanup.sh teardown "$RUNNER_TEMP/fm-herdr/sessions-before.json" || {
             echo "::warning::lab session cleanup reported a problem; see logs"
-            # Surface diagnostics without weakening the suite result above.
             herdr session list --json || true
             exit 1
           }
-      - name: Upload Herdr timing and diagnostics
-        if: always()
+      - name: Upload Herdr failure diagnostics
+        if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: fm-test-timing-herdr
+          name: fm-herdr-failure-diagnostics
           path: |
             ${{ runner.temp }}/fm-test/fm-test-timing-herdr.json
             ${{ runner.temp }}/fm-herdr/sessions-before.json
             ${{ runner.temp }}/fm-herdr/default-server.log
-          if-no-files-found: warn
-
-  # Aggregate per-lane timing into one summary artifact for critical-path review.
-  tests-timing-aggregate:
-    name: Behavior timing aggregate
-    runs-on: ubuntu-latest
-    needs:
-      - tests-portable-parallel-1
-      - tests-portable-parallel-2
-      - tests-portable-serial
-      - tests-herdr
-    if: always()
-    steps:
-      - uses: actions/checkout@v6
-      - name: Download lane timing artifacts
-        uses: actions/download-artifact@v4
-        with:
-          pattern: fm-test-timing-*
-          path: ${{ runner.temp }}/fm-test-aggregate
-          merge-multiple: true
-      - name: Build aggregate timing summary
-        run: |
-          set -eu
-          mkdir -p "$RUNNER_TEMP/fm-test"
-          shopt -s nullglob
-          inputs=("$RUNNER_TEMP"/fm-test-aggregate/fm-test-timing-*.json)
-          if [ "${#inputs[@]}" -eq 0 ]; then
-            echo "::warning::no per-lane timing JSON found to aggregate"
-            exit 0
-          fi
-          bin/fm-test-run.sh --aggregate-json \
-            "$RUNNER_TEMP/fm-test/fm-test-timing-aggregate.json" \
-            "${inputs[@]}"
-      - name: Upload aggregate timing artifact
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: fm-test-timing-aggregate
-          path: ${{ runner.temp }}/fm-test/fm-test-timing-aggregate.json
-          if-no-files-found: warn
+          if-no-files-found: ignore
+          retention-days: 1
 
   macos-stock-bash:
-    name: Stock macOS Bash snapshot compatibility
+    name: Full suite - stock macOS Bash compatibility
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: macos-latest
     timeout-minutes: 10
     steps:
@@ -341,7 +325,8 @@ jobs:
           }
 
   invariants:
-    name: Repo invariants
+    name: Full suite - repo invariants
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -359,3 +344,5 @@ jobs:
             printf '%s\n' "$tracked"
             exit 1
           fi
+      - name: CI routing must stay proportional
+        run: bash tests/fm-ci-workflow.test.sh

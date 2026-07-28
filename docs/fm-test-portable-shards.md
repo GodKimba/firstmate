@@ -1,8 +1,24 @@
-# Firstmate portable test shards (Phase 4)
+# Firstmate CI regression composition
 
-This document records how the two portable parallel CI shards were balanced from measured evidence.
-Composition and execution are owned by `bin/fm-test-run.sh` (`--lane portable-parallel-1` / `portable-parallel-2` / `portable-serial`).
+This document records how the routine fast proof and complete CI suite use the measured portable regression composition.
+Composition and execution are owned by `bin/fm-test-run.sh` (`--proven-isolated`, `--lane portable-parallel-1`, `portable-parallel-2`, and `portable-serial`).
 The proven-isolated candidate set remains owned by `bin/fm-test-isolation-proof.sh`.
+The workflow routing, runner selection, concurrency, and artifact policy are owned by `.github/workflows/ci.yml`.
+
+## CI routing
+
+Pull requests and pushes to `main` run two standard Ubuntu jobs, each with a five-minute timeout.
+The first runs the lint owner, the complete-partition guard, repository and workflow invariants, and portable parallel shard 1.
+The second runs portable parallel shard 2 independently.
+The production shard evidence totals about 65 seconds of serial script time per job, leaving setup and lint margin inside the five-minute target without placing stateful, real-Herdr, or platform-specific work on the routine path.
+
+The complete suite runs nightly at the cron declared in the workflow and on `workflow_dispatch` for sensitive changes and deliberate full validation.
+It retains both portable parallel shards, the portable serial remainder, the real-Herdr family, stock macOS Bash compatibility, lint, repository invariants, and the complete-partition guard.
+Routine runs are grouped by workflow, event, and ref or pull request and cancel older superseded runs.
+Manual complete-suite runs share the same concurrency grouping but are serialized rather than cancelled because two invocations may represent distinct requested proofs.
+
+All jobs use GitHub-hosted standard `ubuntu-latest` or `macos-latest` runners.
+The workflow uses read-only contents permission, does not use `pull_request_target`, and does not consume secrets.
 
 ## Inputs
 
@@ -77,13 +93,14 @@ Measured serial remainder wall (from the same Phase 1 artifacts, excluding Herdr
 3. Union of portable parallel shards + portable serial + real-Herdr family equals the complete `tests/*.test.sh` inventory.
 4. Those four partitions are pairwise disjoint (no missing scripts, no duplicates).
 
-CI runs that guard as a required job (`test-coverage`).
+The routine fast proof runs that guard before regressions, and the nightly or manual complete suite runs it as its own job.
 
-## Timing artifacts
+## Artifacts
 
-Every portable shard, the portable serial lane, and the Herdr lane upload their runner-generated timing JSON even when the behavior run reports failures.
-The dependent aggregate job runs after all four lanes, combines every available lane JSON through `bin/fm-test-run.sh --aggregate-json`, and uploads one summary artifact for critical-path review.
-The workflow in `.github/workflows/ci.yml` owns the exact artifact names and aggregation wiring.
+Successful runs publish no timing or diagnostic artifacts.
+The Herdr job still writes its timing JSON locally so a failed run can upload it with the pre-suite snapshot and server log as one diagnostic artifact.
+That failure-only artifact uses one-day retention, and there is no cross-job timing transport or aggregate artifact.
+Console timing markers from `bin/fm-test-run.sh` remain available in each job log without making artifact storage a permanent requirement.
 
 ## Local entry points
 
@@ -94,15 +111,33 @@ The workflow in `.github/workflows/ci.yml` owns the exact artifact names and agg
 
 | Job | timeout-minutes | Rationale |
 |---|---:|---|
+| routine fast proof 1/2 | 5 | Each measured shard totals about 65 seconds of serial script time, leaving bounded setup and lint margin |
 | portable parallel 1/2 | 10 | Measured shard sum ~1 min; hang tripwire with margin |
 | portable serial | 20 | Measured ~13 min remainder; reduced from interim 25m full-portable slack after sharding |
 | Herdr | 40 | Unchanged hang tripwire for the real-Herdr lane |
+| stock macOS Bash | 10 | Existing platform compatibility tripwire, outside the routine PR path |
 
 Timeouts remain hang tripwires, not expected healthy ends of green suites.
 Do not raise them as a substitute for green results, retries, or weaker assertions.
 
-## What this phase does not do
+## Fork Actions verification
 
-- Does not expand the proven-isolated set without a new concurrent isolation proof.
-- Does not parallelize watcher, AFK, real Herdr, real tmux, or other stateful families.
-- Does not start rollout verification; that waits until this PR is green and merged.
+On 2026-07-28, read-only `gh-axi` inspection of `GodKimba/firstmate` returned Actions enabled with all actions allowed, read-only default workflow permissions, and no permission for workflows to approve pull requests.
+The exact commands were:
+
+```sh
+gh-axi api GET /repos/GodKimba/firstmate/actions/permissions
+gh-axi api GET /repos/GodKimba/firstmate/actions/permissions/workflow
+gh-axi api GET '/repos/GodKimba/firstmate/actions/runs?event=pull_request&per_page=100' --jq '[.workflow_runs[] | select(.pull_requests[]?.number == 7)] | {count:length}'
+gh-axi api GET /repos/GodKimba/firstmate/commits/0f7d5b646b25a04a7c82c4a0141e73176a8252d3/check-runs --jq '{total_count}'
+```
+
+The relevant output was `enabled: true`, `allowed_actions: all`, `default_workflow_permissions: read`, `can_approve_pull_request_reviews: false`, `count: 0`, and `total_count: 0`.
+This confirms the repository-level Actions switch is currently enabled while PR 7 still had no workflow runs and no check-runs at its inspected head.
+Repository or organization settings remain outside this workflow change.
+
+## Preserved boundaries
+
+- The proven-isolated set does not expand without a new concurrent isolation proof.
+- Watcher, AFK, real Herdr, real tmux, and other stateful families remain serial where their composition owner places them.
+- The routine proof does not replace deliberate nightly or manual complete-suite validation.

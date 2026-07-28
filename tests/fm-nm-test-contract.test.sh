@@ -110,11 +110,11 @@ test_ci_still_runs_broad_behavior_suite() {
     fail "CI Behavior must not re-spell an inline tests/*.test.sh loop; use fm-test-run.sh"
   fi
   # Preserve other CI lanes this task must not shrink.
-  grep -Eq 'name:[[:space:]]*Lint shell scripts' "$CI" \
+  grep -Eq 'name:[[:space:]]*Full suite - lint shell scripts' "$CI" \
     || fail "CI must retain the lint job"
-  grep -Eq 'name:[[:space:]]*Stock macOS Bash snapshot compatibility' "$CI" \
+  grep -Eq 'name:[[:space:]]*Full suite - stock macOS Bash compatibility' "$CI" \
     || fail "CI must retain the macOS stock Bash compatibility job"
-  grep -Eq 'name:[[:space:]]*Repo invariants' "$CI" \
+  grep -Eq 'name:[[:space:]]*Full suite - repo invariants' "$CI" \
     || fail "CI must retain the repo invariants job"
   grep -Fq 'tests-herdr:' "$CI" \
     || fail "CI must retain the required Herdr Behavior job"
