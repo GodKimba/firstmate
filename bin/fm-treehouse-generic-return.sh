@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
-# Remove one explicitly authorized, clean Firstmate task worktree from an
-# upstream Treehouse pool without forcing Git worktree removal.
+# Remove one explicitly authorized Firstmate task worktree from a generic
+# Treehouse pool without forcing Git worktree removal. The helper independently
+# binds canonical project, repository, pool-slot, task-meta, branch/disposition,
+# clean-state, and applicable landed-head identities before removal, updates
+# provider state under its lock, and reports failed removal or postconditions
+# as non-zero.
 # Usage:
 #   fm-treehouse-generic-return.sh <project> <worktree> <pool> <branch> <validated-head|-> <landed|discard> <task-meta>
 set -eu

@@ -1450,8 +1450,9 @@ META_WINDOW=$T
   echo "model=${MODEL:-default}"
   echo "effort=${EFFORT:-default}"
   # backend= is written only for a non-default (non-tmux) backend, so the
-  # default path's meta stays byte-identical (absent backend= means tmux;
-  # data/fm-backend-design-d7's P1 compatibility contract).
+  # default path preserves the absent-backend routing contract (absent
+  # backend= means tmux; data/fm-backend-design-d7's P1 compatibility
+  # contract).
   [ "$BACKEND" = tmux ] || echo "backend=$BACKEND"
   [ "$BACKEND" != tmux ] || echo "tmux_window_id=$WID"
   if [ "$BACKEND" = herdr ]; then

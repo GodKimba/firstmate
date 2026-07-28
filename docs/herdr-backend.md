@@ -84,7 +84,9 @@ The worker remains on the ordinary flat or Herdr-current-order path.
 Normal task metadata remains the sole endpoint authority after creation.
 Cleanup closes only the exact recorded task pane and never calls `workspace close`.
 Herdr can move focus when closing the last pane of a non-focused projected workspace, so projected cleanup runs under the same session lock, captures the exact active tab, refuses to delete the active tab, closes the exact task pane, and restores only the exact prior tab when needed.
-If lock, snapshot, pane identity, or restoration is ambiguous, cleanup warns and preserves the journal for manual inspection.
+The recorded endpoint must then be authoritatively absent before Treehouse return can proceed.
+An unavailable lock, still-present pane, or unreadable endpoint inventory refuses teardown and preserves the task record, worktree, and presentation journal.
+A journal that cannot be correlated to the confirmed exact close stays quarantined for manual inspection.
 
 Recovery is deliberately conservative and presentation-only.
 An existing journal suppresses another projected create.

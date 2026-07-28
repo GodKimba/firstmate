@@ -87,14 +87,20 @@
 # checks before any destructive return. Teardown output notes every wait, retry, and
 # removal so the operator can see what happened.
 #
-# For treehouse-backed ordinary tasks, teardown first checks work while the worker is
-# still available, then closes only the recorded runtime endpoint and proves it is
-# gone before a final dirty/landed check. Provider return runs only after that final
-# check, so a worker cannot add dirty or unlanded work in the validation-to-return
-# gap. A failed close, final check, or provider return preserves task records.
+# For treehouse-backed ordinary tasks, teardown closes only the recorded runtime
+# endpoint and proves it is gone before provider return. Non-forced ship teardown
+# checks work both before that close and again afterward, so a worker cannot add
+# dirty or unlanded work in the validation-to-return gap. A failed close, final
+# check, or provider return preserves task records and the exact worktree.
+# Treehouse's route classifier preserves managed-pool recycling and selects the
+# local generic helper only for a generic pool. That helper never passes --force
+# to Git, and teardown deletes only the recorded acquisition branch after provider
+# success and verified postconditions. Its identity-bound journal lets a later
+# teardown finish exact branch cleanup without repeating a completed provider
+# return.
 # `FM_TREEHOUSE_RETURN_AUTHORIZED=1` marks calls that passed the owning lifecycle's
-# checks; local provider shims may require it but must still enforce their own exact
-# target, cleanliness, and postcondition checks.
+# checks; the generic helper requires it and still independently enforces exact
+# target, cleanliness, ownership, and postcondition checks.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
