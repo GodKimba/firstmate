@@ -84,7 +84,11 @@
 #   Before a secondmate launch, the home is locally fast-forwarded to the primary
 #   default-branch commit when safe; skipped syncs warn and launch unchanged.
 #   Ship/scout spawns refuse to launch unless the resolved task path is a real
-#   git worktree root distinct from the primary project checkout.
+#   git worktree root distinct from the primary project checkout. Worktree
+#   discovery waits for the backend to report that exact root: an intermediate
+#   nested directory that a slow provider is still provisioning under is ignored
+#   and never normalized upward to its git root, so a launch cannot outrun
+#   acquisition.
 # Batch dispatch: pass one or more `id=repo` pairs instead of a single <id> <project>, e.g.
 #     fm-spawn.sh fix-a-k3=projects/foo add-b-q7=projects/bar [--scout]
 #   Each pair re-execs this script in single-task mode, so the single path stays the only
@@ -828,15 +832,6 @@ BRIEF_REAL="$BRIEF_DIR_REAL/$(basename "$BRIEF")"
 # (docs/herdr-backend.md "Known gaps").
 PROJ_ABS_REAL=$(cd "$PROJ_ABS" 2>/dev/null && pwd -P) || PROJ_ABS_REAL="$PROJ_ABS"
 
-real_path_or_raw() {  # <path>
-  local path=$1 real
-  if real=$(cd "$path" 2>/dev/null && pwd -P); then
-    printf '%s\n' "$real"
-  else
-    printf '%s\n' "$path"
-  fi
-}
-
 # Session-provider container-ensure + task creation. tmux stays exactly as P1
 # left it (same session-name / new-window sequence, see bin/backends/tmux.sh);
 # a herdr spawn goes through the version-gated, workspace-per-HOME,
@@ -845,19 +840,45 @@ real_path_or_raw() {  # <path>
 # herdr-sm-spaces-k4). Both branches converge on the same $T ("target") string
 # that every downstream operation (send/capture/kill) already treats as opaque
 # per-backend routing (fm_backend_resolve_selector).
+
+# spawn_worktree_root_report: print "<physical-path>\t<git-top-level>" for one
+# candidate path and return 0 only when it is an isolated worktree ROOT: it
+# resolves physically, git reports a top-level for it, that top-level IS the
+# candidate itself (not a parent), and it is not the primary checkout. On
+# failure the same record is printed for diagnostics with an empty field where
+# the read failed. Non-exiting so the settle loop can keep polling; the exiting
+# assertion below is built on the same predicate, so the loop and the fail-safe
+# can never disagree about what counts as an acceptable worktree.
+spawn_worktree_root_report() {  # <path>
+  local path=$1 real top top_real
+  real=
+  if ! real=$(cd "$path" 2>/dev/null && pwd -P); then
+    real=
+  fi
+  top=$(git -C "$path" rev-parse --show-toplevel 2>/dev/null || true)
+  top_real=
+  if ! top_real=$(cd "$top" 2>/dev/null && pwd -P); then
+    top_real=
+  fi
+  printf '%s\t%s\n' "$real" "$top"
+  [ -n "$real" ] && [ -n "$top_real" ] && [ "$real" = "$top_real" ] && [ "$real" != "$PROJ_ABS_REAL" ]
+}
+
+# spawn_worktree_root_real: print the physical path of <path> and return 0 only
+# when it passes spawn_worktree_root_report. Nothing is printed on refusal, so
+# callers can use the output directly as the accepted candidate identity.
+spawn_worktree_root_real() {  # <path>
+  local report status
+  report=$(spawn_worktree_root_report "$1") && status=0 || status=$?
+  [ "$status" = 0 ] || return 1
+  printf '%s\n' "${report%%$'\t'*}"
+}
+
 validate_spawn_worktree() {  # <source> <inspect-target>
-  local source=$1 inspect_target=$2 wt_real proj_real wt_top wt_top_real
-  wt_real=
-  if ! wt_real=$(cd "$WT" 2>/dev/null && pwd -P); then
-    wt_real=
-  fi
-  proj_real=$PROJ_ABS_REAL
-  wt_top=$(git -C "$WT" rev-parse --show-toplevel 2>/dev/null || true)
-  wt_top_real=
-  if ! wt_top_real=$(cd "$wt_top" 2>/dev/null && pwd -P); then
-    wt_top_real=
-  fi
-  if [ -z "$wt_real" ] || [ -z "$wt_top_real" ] || [ "$wt_real" != "$wt_top_real" ] || [ "$wt_real" = "$proj_real" ]; then
+  local source=$1 inspect_target=$2 report status wt_top
+  report=$(spawn_worktree_root_report "$WT") && status=0 || status=$?
+  if [ "$status" != 0 ]; then
+    wt_top=${report#*$'\t'}
     echo "error: $source did not yield an isolated worktree (resolved '$WT'; worktree root '${wt_top:-none}'; primary '$PROJ_ABS'); refusing to launch to avoid tangling the primary checkout. Inspect target $inspect_target" >&2
     exit 1
   fi
@@ -1254,34 +1275,73 @@ if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   # settled there: on some tmux/WSL setups a brand-new window's pane_current_path
   # transiently reports an unrelated stale path (seen live as another real git
   # checkout entirely) before the shell catches up with treehouse get's cd. That
-  # stale path still passes the PROJ_ABS_REAL comparison and validate_spawn_worktree
-  # below (it resolves to a real, distinct worktree top-level too), so accepting it
-  # on one read alone silently records the wrong worktree= in state/<id>.meta. Require
-  # two consecutive reads to agree on the same non-project path before accepting it;
+  # stale path still resolves to a real, distinct worktree top-level, so accepting
+  # it on one read alone silently records the wrong worktree= in state/<id>.meta.
+  # Require two consecutive reads to resolve to the same physical root before accepting it;
   # a mismatch just becomes the new candidate rather than resetting the wait, so a
   # pane that is already settled by the first real read only costs the one existing
   # inter-poll sleep as confirmation, not a whole extra cycle on top.
+  #
+  # Stability alone is not enough either: a slow worktree provider runs its
+  # provisioning steps from a NESTED directory inside the worktree it is still
+  # creating (a monorepo app root, for example), and the backend truthfully
+  # reports that foreground cwd for as long as those steps take. Two equal reads
+  # of that nested path are stable but premature, so every observation must pass
+  # the same exact-root eligibility the post-loop assertion applies - it exists,
+  # resolves physically, is its own git top-level, and is not the primary
+  # checkout - before it may become the stable candidate. Anything else clears
+  # the candidate and the poll continues. The nested path is deliberately NOT
+  # normalized upward to its git root: that string would be right while
+  # provisioning, migrations, or the provider's final shell transition are still
+  # running, and launching then is exactly the race this waits out.
+  #
+  # The bound is the production default of 60 polls one second apart. The two
+  # knobs exist so a test can cover the exhausted-bound path in under a second
+  # without waiting out a live provisioning window; an unset, blank, zero, or
+  # invalid value uses the default, exactly like the other bounded-retry knobs in
+  # docs/configuration.md.
   candidate=""
-  for _ in $(seq 1 60); do
+  observed=""
+  settle_polls=${FM_WORKTREE_SETTLE_POLLS:-60}
+  settle_interval=${FM_WORKTREE_SETTLE_INTERVAL:-1}
+  case "$settle_polls" in
+    ''|*[!0-9]*) settle_polls=60 ;;
+    *[1-9]*) ;;
+    *) settle_polls=60 ;;
+  esac
+  case "$settle_interval" in
+    ''|*[!0-9.]*|.|*.*.*) settle_interval=1 ;;
+    *[1-9]*) ;;
+    *) settle_interval=1 ;;
+  esac
+  settle_i=0
+  while [ "$settle_i" -lt "$settle_polls" ]; do
+    settle_i=$((settle_i + 1))
     p=$(spawn_current_path "$WT_TARGET" || true)
+    p_root=""
     if [ -n "$p" ]; then
-      p_real=$(real_path_or_raw "$p")
-      if [ "$p_real" != "$PROJ_ABS_REAL" ]; then
-        if [ -n "$candidate" ] && [ "$p_real" = "$candidate" ]; then
-          WT="$p"
-          break
-        fi
-        candidate="$p_real"
-      else
-        candidate=""
+      observed="$p"
+      p_root=$(spawn_worktree_root_real "$p" || true)
+    fi
+    if [ -n "$p_root" ]; then
+      if [ "$p_root" = "$candidate" ]; then
+        WT="$p"
+        break
       fi
+      candidate="$p_root"
     else
       candidate=""
     fi
-    sleep 1
+    [ "$settle_i" -ge "$settle_polls" ] || sleep "$settle_interval"
   done
+  # An exhausted bound is the same refusal as a resolved-but-tangled path, so it
+  # keeps the "did not yield an isolated worktree" wording the isolation-guard
+  # contract is asserted on, and reports the last observation plus its git root
+  # so a nested provisioning cwd is obvious in the diagnostic.
   if [ -z "$WT" ]; then
-    echo "error: treehouse get did not enter a worktree within 60s; inspect window $T" >&2
+    settle_report=$(spawn_worktree_root_report "$observed" || true)
+    settle_top=${settle_report#*$'\t'}
+    echo "error: treehouse get did not yield an isolated worktree root within $settle_polls polls ${settle_interval}s apart (last observed '${observed:-none}'; worktree root '${settle_top:-none}'; primary '$PROJ_ABS'); refusing to launch to avoid tangling the primary checkout. Inspect window $T" >&2
     exit 1
   fi
 

@@ -173,6 +173,12 @@ SH
   printf '%s\n' "$fakebin"
 }
 
+# A pane that never reports an isolated worktree root is ignored for the whole
+# settle bound before spawn refuses, so the refusal cases below are run with a
+# short bound instead of the production one. The bound itself is not what these
+# guard cases assert - they assert that a non-worktree or primary-checkout path
+# never launches - and tests/fm-spawn-worktree-settle.test.sh owns the settle
+# behavior, including the production defaults.
 run_spawn() {
   local home=$1 id=$2 proj=$3 pane=$4 fakebin=$5
   mkdir -p "$home/data/$id"
@@ -181,6 +187,7 @@ run_spawn() {
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$pane" TMUX="fake,1,0" \
+    FM_WORKTREE_SETTLE_POLLS=3 FM_WORKTREE_SETTLE_INTERVAL=0.01 \
     PATH="$fakebin:$PATH" \
     "$ROOT/bin/fm-spawn.sh" "$id" "$proj" codex 2>&1
 }
