@@ -392,20 +392,34 @@ Decision vocabulary was searched across every backend adapter and every tracked 
 
 ```sh
 grep -rlE '\[ans=|\[key=|needs-decision|captain-held' bin/backends/ | wc -l
-grep -rlE '\[ans=|\[key=|needs-decision|captain-held' .pi .opencode .claude/hooks | wc -l
+grep -rlE '\[ans=|\[key=|needs-decision|captain-held' .claude .codex .grok .opencode .pi bin/fm-kimi-turnend-hook.sh | wc -l
 grep -rlE 'status_line_verb|status_open_decisions|fm_decision_' bin/backends/ bin/fm-harness.sh | wc -l
 ```
 
 Observed output: `0`, `0`, and `0`.
 
-Every reader of the fold is a shell script that sources the one owner:
+Runtime consumers reach the fold through the shared library.
+Its direct source sites are:
 
 ```sh
-grep -rln 'fm-classify-lib' bin/
+grep -rlnE '^[[:space:]]*\. .*fm-classify-lib\.sh' bin/ | LC_ALL=C sort
 ```
 
-Observed output: `fm-afk-return.sh`, `fm-brief.sh`, `fm-crew-state.sh`, `fm-decision-hold.sh`, `fm-fleet-snapshot.sh`, `fm-push-transition-lib.sh`, `fm-send.sh`, `fm-supervise-daemon.sh`, `fm-test-run.sh`, and `fm-watch.sh`.
+Observed output:
+
+```text
+bin/fm-afk-return.sh
+bin/fm-brief.sh
+bin/fm-crew-state.sh
+bin/fm-decision-hold.sh
+bin/fm-fleet-snapshot.sh
+bin/fm-push-transition-lib.sh
+bin/fm-send.sh
+bin/fm-supervise-daemon.sh
+```
+
+`fm-watch.sh` loads the same owner transitively through `fm-push-transition-lib.sh`.
 
 Observed guarantee: a runtime carries the answer message as opaque text and a backend carries it as opaque keystrokes, so neither can weaken, forge, or bypass the correlation.
 `fm-send.sh --decision` mints and records the token before any backend dispatch, and `fm_backend_send_text_submit` receives an already-composed message, so the refusal to answer a request that is not open is identical on every backend.
-The status stream a worker appends is a plain file read only by the scripts above, so a new harness or backend adds no correlation surface and needs no per-adapter change.
+The status stream a worker appends is a plain file folded only through that shared library, so a new harness or backend adds no correlation surface and needs no per-adapter change.
