@@ -114,7 +114,7 @@ fi
 # Last non-empty status line, and its leading verb (the word before the colon).
 log_last_line() {
   [ -f "$LOG" ] || return 1
-  grep -v '^[[:space:]]*$' "$LOG" 2>/dev/null | tail -1
+  last_status_line "$LOG"
 }
 # Map a status-log verb onto a canonical state for the fallback path. `paused` is
 # the deliberate-external-wait verb (fm-classify-lib.sh's FM_CLASSIFY_PAUSED_VERB):

@@ -3,6 +3,8 @@
 
 FM_WAKE_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_WAKE_DEFAULT_ROOT="$(cd "$FM_WAKE_LIB_DIR/.." && pwd)"
+# shellcheck source=bin/fm-classify-lib.sh
+. "$FM_WAKE_LIB_DIR/fm-classify-lib.sh"
 FM_ROOT="${FM_ROOT_OVERRIDE:-${FM_ROOT:-$FM_WAKE_DEFAULT_ROOT}}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-${STATE:-$FM_HOME/state}}"
@@ -374,7 +376,7 @@ fm_wake_clean_field() {
 fm_wake_append() {
   local kind=$1 key=$2 payload=$3 clean_key clean_payload epoch seq seq_file status
   case "$kind" in
-    signal|stale|check|heartbeat) ;;
+    decision|signal|stale|check|heartbeat) ;;
     *) printf 'fm_wake_append: invalid wake kind: %s\n' "$kind" >&2; return 2 ;;
   esac
 
@@ -477,7 +479,7 @@ EOF
 FM_WAKE_EVENT_LINE=
 FM_WAKE_EVENT_TRUNCATED=false
 fm_wake_latest_event() {  # <validated-status-path> <tail-byte-cap>
-  local path=$1 tail_bytes=$2 result size chunk record line_number
+  local path=$1 tail_bytes=$2 result size chunk record line_number prefix
   FM_WAKE_EVENT_LINE=
   FM_WAKE_EVENT_TRUNCATED=false
   result=$(perl -MFcntl=:DEFAULT -e '
@@ -503,8 +505,14 @@ fm_wake_latest_event() {  # <validated-status-path> <tail-byte-cap>
   chunk=${result#*$'\t'}
   case "$size" in ''|*[!0-9]*) return 1 ;; esac
   [ -n "$chunk" ] || return 1
-  record=$(printf '%s' "$chunk" | LC_ALL=C awk '
-    /[^[:space:]]/ { line = $0; line_number = NR }
+  prefix=$FM_CLASSIFY_DECISION_CUTOVER_MARK_PREFIX_DEFAULT
+  record=$(printf '%s' "$chunk" | LC_ALL=C awk -v prefix="$prefix" '
+    function marker(s, id) {
+      if (index(s, prefix) != 1 || length(s) != length(prefix) + 33 || substr(s, length(s), 1) != "]") return 0
+      id = substr(s, length(prefix) + 1, 32)
+      return id !~ /[^a-f0-9]/
+    }
+    !marker($0) && /[^[:space:]]/ { line = $0; line_number = NR }
     END { if (line_number) printf "%d\t%s", line_number, line }
   ') || return 1
   [ -n "$record" ] || return 1

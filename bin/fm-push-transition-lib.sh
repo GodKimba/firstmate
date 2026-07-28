@@ -45,6 +45,52 @@ _hb_surfaced_path() {
   printf '%s/.hb-surfaced-%s' "$STATE" "$(printf '%s' "$1" | tr ':/.' '___')"
 }
 
+_hb_decision_surfaced_path() {  # <stream-id>.<instance>
+  local occurrence=$1 stream instance
+  stream=${occurrence%%.*}
+  instance=${occurrence#*.}
+  [ "${#stream}" -eq 32 ] && [ "${#instance}" -eq 16 ] || return 1
+  case "$stream$instance" in *[!a-f0-9]*) return 1 ;; esac
+  printf '%s/.hb-surfaced-decision-%s' "$STATE" "$occurrence"
+}
+
+decision_occurrence_is_surfaced() {  # <stream-id>.<instance>
+  local occurrence=$1 path
+  path=$(_hb_decision_surfaced_path "$occurrence") || return 1
+  [ "$(cat "$path" 2>/dev/null || true)" = "$occurrence" ]
+}
+
+mark_decision_occurrence_surfaced() {  # <stream-id>.<instance>
+  local occurrence=$1 path
+  path=$(_hb_decision_surfaced_path "$occurrence") || return 1
+  printf '%s' "$occurrence" > "$path"
+}
+
+pending_open_decisions() {  # <status-file>
+  local f=$1 key occurrence summary
+  while IFS=$'\t' read -r key occurrence summary || [ -n "$key" ]; do
+    [ -n "$key" ] || continue
+    decision_occurrence_is_surfaced "$occurrence" && continue
+    printf '%s\t%s\t%s\n' "$key" "$occurrence" "$summary"
+  done <<EOF
+$(status_open_token_needs_decisions "$f")
+EOF
+}
+
+enqueue_pending_open_decisions() {  # <status-file>
+  local f=$1 key occurrence summary found=1 payload
+  while IFS=$'\t' read -r key occurrence summary || [ -n "$key" ]; do
+    [ -n "$key" ] || continue
+    payload="decision: $(basename "$f") [key=$key] [occurrence=$occurrence]: $summary"
+    fm_wake_append decision "$occurrence" "$payload" || return 2
+    mark_decision_occurrence_surfaced "$occurrence" || return 2
+    found=0
+  done <<EOF
+$(pending_open_decisions "$f")
+EOF
+  return "$found"
+}
+
 # Record a captain-relevant status after its durable wake has been enqueued.
 mark_surfaced() {  # <status-file>
   local f=$1 task last

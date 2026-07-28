@@ -13,8 +13,10 @@
 # daemon keeps its escalation-digest seen-markers; the watcher keeps its .seen-*
 # signatures).
 #
-# The one exception is the absorb classification (crew_absorb_class and its
-# working/paused wrappers). It is NOT a pure status-file read: it reuses
+# The explicit fm_decision_cutover_ensure_status writer establishes the
+# token-era boundary only when brief scaffolding creates a new status stream.
+# The absorb classification (crew_absorb_class and its working/paused wrappers)
+# is also NOT a pure status-file read: it reuses
 # bin/fm-crew-state.sh, which may make a bounded no-mistakes call, to decide
 # whether a crew that just stopped its turn or went stale is working, deliberately
 # paused, or neither. Callers run it ONLY on no-verb signal handling and first
@@ -72,12 +74,27 @@ FM_PAUSE_RESURFACE_SECS_DEFAULT=3600
 # fm-decision-hold.sh has verified the corresponding captain-held backlog item.
 FM_CLASSIFY_RESOLVE_VERB_DEFAULT='resolved'
 FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT='captain-held'
+FM_CLASSIFY_DECISION_CUTOVER_MARK_PREFIX_DEFAULT='[fm-decision-answer-cutover:v1 stream='
+
+# The verb firstmate uses when it issues a correlated answer to an open decision.
+# It names the decision-answer message shape owned by bin/fm-send.sh --decision;
+# it is not a status verb and never appears in a status stream.
+FM_CLASSIFY_DECISION_VERB_DEFAULT='decision'
 
 # Return the last non-blank line of a status file (empty if missing/blank).
 last_status_line() {
-  local f=$1
+  local f=$1 prefix
   [ -e "$f" ] || return 0
-  grep -v '^[[:space:]]*$' "$f" 2>/dev/null | tail -1
+  prefix=$FM_CLASSIFY_DECISION_CUTOVER_MARK_PREFIX_DEFAULT
+  LC_ALL=C awk -v prefix="$prefix" '
+    function marker(s, id) {
+      if (index(s, prefix) != 1 || length(s) != length(prefix) + 33 || substr(s, length(s), 1) != "]") return 0
+      id = substr(s, length(prefix) + 1, 32)
+      return id !~ /[^a-f0-9]/
+    }
+    !marker($0) && /[^[:space:]]/ { line = $0 }
+    END { if (line != "") print line }
+  ' "$f" 2>/dev/null
 }
 
 # 0 if the given (last) status line's leading verb is a real terminal captain verb
@@ -161,9 +178,37 @@ status_is_paused_or_captain_held() {  # <status-line>
 # so the late form can neither open nor close the wrong decision silently.
 # The three parsers are pure reads of a single line; the verb parser strips any
 # key token before the colon so the leading word is recovered cleanly.
+#
+# Answer correlation (the authority-ordering boundary): a needs-decision asks for
+# authority the worker does not hold, so its closure additionally requires an
+# "[ans=<token>]" token placed AFTER the key token,
+#   needs-decision [key=api-shape]: <summary>
+#   resolved [key=api-shape] [ans=00000000000000013f2a91c07b4d6e58]: <how it was decided>
+# The token is minted by bin/fm-send.sh --decision, which refuses to mint one
+# until that keyed request is already open, and is recorded next to the status
+# stream in "<task>.decision-answers". A resolution closes the request only when
+# its token was minted for that key AND for that request instance, so a generic
+# command, an unkeyed message, and any input composed before the request opened
+# can never become its approval. The one-time
+# "[fm-decision-answer-cutover:v1 stream=<id>]" stream marker makes this strict rule
+# forward-compatible: decision openings before the marker retain legacy plain
+# keyed closure even when their resolution arrives later, while every opening
+# after it requires a correlated token. An uncorrelated post-cutover resolution
+# leaves the request open, which surfaces it rather than silently advancing past
+# it. Closure of a blocked line is unchanged: a blocker clears by being fixed,
+# not by authority.
+# The verified captain-held transfer written by bin/fm-decision-hold.sh is also
+# unchanged, and remains the durable path for a request whose answer never
+# arrived through the correlated channel.
+#
+# Each opening receives an immutable instance identifier from its physical
+# position in this append-only stream. The identifier is included in the answer
+# token, while a random suffix makes the complete token unguessable. Keys and
+# summaries remain human-readable grouping rather than instance authority.
 status_line_verb() {  # <status-line> -> leading verb word
   local v=${1%%:*}
   v=${v%%\[key=*}
+  v=${v%%\[ans=*}
   v=${v#"${v%%[![:space:]]*}"}
   v=${v%"${v##*[![:space:]]}"}
   printf '%s' "$v"
@@ -193,7 +238,189 @@ _fm_decision_key() {  # <status-line> -> key slug, or "default" when no token
       ;;
   esac
 }
-# Drop the record for <key> from a newline-terminated "<key>\t<verb>\t<note>" set.
+# Print the answer token of a status line, or nothing when it carries none.
+# The token sits after the key token, so a line that carries "[ans=...]" without a
+# preceding "[key=...]" is malformed and prints nothing rather than correlating.
+_fm_decision_answer() {  # <status-line> -> answer token, or empty
+  local prefix=${1%%:*} a
+  case "$prefix" in
+    *\[key=*\]*\[ans=*\]*) : ;;
+    *) return 0 ;;
+  esac
+  a=${prefix#*\[ans=}
+  a=${a%%\]*}
+  case "$a" in
+    ''|*[!A-Za-z0-9]*) return 0 ;;
+    *) printf '%s' "$a" ;;
+  esac
+}
+
+# Format one opening-event position as the fixed-width identifier carried by
+# every answer token for that occurrence. Token-era streams bind it to their
+# self-described stream identity; legacy streams retain the historical position.
+fm_decision_hash_text() {
+  if command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 2>/dev/null | awk '{print $1}'
+  elif command -v sha256sum >/dev/null 2>&1; then
+    sha256sum 2>/dev/null | awk '{print $1}'
+  elif command -v openssl >/dev/null 2>&1; then
+    openssl dgst -sha256 2>/dev/null | awk '{print $NF}'
+  else
+    return 1
+  fi
+}
+
+fm_decision_instance_id() {  # <physical-line-number> [stream-id] -> 16 hex chars
+  local position=$1 stream=${2:-} raw
+  case "$position" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  [ "$position" -gt 0 ] 2>/dev/null || return 1
+  if [ -n "$stream" ]; then
+    [ "${#stream}" -eq 32 ] || return 1
+    case "$stream" in *[!a-f0-9]*) return 1 ;; esac
+    raw=$(printf '%s:%s' "$stream" "$position" | fm_decision_hash_text) || return 1
+    raw=$(printf '%s' "$raw" | cut -c1-16)
+    [ "${#raw}" -eq 16 ] || return 1
+    printf '%s' "$raw"
+    return 0
+  fi
+  printf '%016x' "$position"
+}
+
+# Print the answer-record file that pairs with a status file. fm-send writes one
+# record per minted token; the fold reads it to decide whether a resolution was
+# correlated. Kept beside the status stream so one task's records travel, and are
+# torn down, with that task's other per-task state.
+fm_decision_answers_file() {  # <status-file> -> answer-record file
+  printf '%s' "${1%.status}.decision-answers"
+}
+
+# 0 when <token> was minted for exactly this opening occurrence. A record line is
+# "<token>\t<key>\t<instance>"; the token embeds the same instance identifier,
+# and all three fields must match.
+fm_decision_answer_matches() {  # <answers-file> <token> <key> <instance>
+  local f=$1 token=$2 key=$3 instance=$4 rt rk ri
+  [ "${#instance}" -eq 16 ] || return 1
+  [ "${#token}" -eq 32 ] || return 1
+  case "$instance$token" in
+    *[!a-f0-9]*) return 1 ;;
+  esac
+  [ "${token:0:16}" = "$instance" ] || return 1
+  [ -f "$f" ] || return 1
+  while IFS=$'\t' read -r rt rk ri || [ -n "$rt" ]; do
+    [ "$rt" = "$token" ] || continue
+    [ "$rk" = "$key" ] || continue
+    [ "$ri" = "$instance" ] || continue
+    return 0
+  done < "$f"
+  return 1
+}
+
+# Mint one answer token: the fixed-width opening instance followed by 16 random
+# lowercase hex characters from the best source this host has.
+fm_decision_mint_answer_token() {  # <instance>
+  local instance=${1:-} raw=''
+  [ "${#instance}" -eq 16 ] || return 1
+  case "$instance" in
+    *[!a-f0-9]*) return 1 ;;
+  esac
+  raw=$(openssl rand -hex 8 2>/dev/null || true)
+  case "$raw" in
+    [a-f0-9][a-f0-9][a-f0-9][a-f0-9][a-f0-9][a-f0-9][a-f0-9][a-f0-9]*) : ;;
+    *)
+      raw=$(printf '%s' "$$-$(date +%s 2>/dev/null)-$RANDOM$RANDOM$RANDOM" \
+        | shasum -a 256 2>/dev/null | awk '{print $1}')
+      ;;
+  esac
+  raw=$(printf '%s' "$raw" | tr 'A-F' 'a-f' | tr -cd 'a-f0-9' | cut -c1-16)
+  [ "${#raw}" -eq 16 ] || return 1
+  printf '%s%s' "$instance" "$raw"
+}
+
+# Record a minted token against the open request it answers, then print it.
+# Called only after the caller has confirmed that request is open, which is what
+# makes an answer necessarily later than its request.
+fm_decision_record_answer() {  # <answers-file> <token> <key> <instance>
+  local f=$1 token=$2 key=$3 instance=$4 dir
+  [ "${#instance}" -eq 16 ] || return 1
+  [ "${#token}" -eq 32 ] || return 1
+  case "$instance$token" in
+    *[!a-f0-9]*) return 1 ;;
+  esac
+  [ "${token:0:16}" = "$instance" ] || return 1
+  dir=$(dirname "$f")
+  [ -d "$dir" ] || return 1
+  printf '%s\t%s\t%s\n' "$token" "$key" "$instance" >> "$f" \
+    || return 1
+  printf '%s' "$token"
+}
+
+# Print the message shape that carries an authorized answer to a worker. The
+# worker copies the same key and token onto its closing resolved line.
+fm_decision_answer_message() {  # <key> <token> <text>
+  printf '%s [key=%s] [ans=%s]: %s' \
+    "${FM_CLASSIFY_DECISION_VERB:-$FM_CLASSIFY_DECISION_VERB_DEFAULT}" "$1" "$2" "$3"
+}
+
+fm_decision_marker_line_id() {  # <marker-line>
+  local line=$1 prefix id
+  prefix=$FM_CLASSIFY_DECISION_CUTOVER_MARK_PREFIX_DEFAULT
+  case "$line" in "$prefix"*\]) ;; *) return 1 ;; esac
+  id=${line#"$prefix"}
+  id=${id%\]}
+  [ "${#id}" -eq 32 ] || return 1
+  case "$id" in *[!a-f0-9]*) return 1 ;; esac
+  printf '%s' "$id"
+}
+
+fm_decision_stream_id() {  # <status-file>
+  local f=$1 line
+  [ -f "$f" ] && [ ! -L "$f" ] || return 1
+  while IFS= read -r line || [ -n "$line" ]; do
+    fm_decision_marker_line_id "$line" && return 0
+  done < "$f"
+  return 1
+}
+
+fm_decision_status_marker() {
+  local raw
+  raw=$(openssl rand -hex 16 2>/dev/null || true)
+  case "$raw" in
+    [a-f0-9][a-f0-9][a-f0-9][a-f0-9]*) ;;
+    *)
+      raw=$(printf '%s' "${BASHPID:-$$}-$(date +%s 2>/dev/null)-$RANDOM$RANDOM$RANDOM" \
+        | fm_decision_hash_text)
+      ;;
+  esac
+  raw=$(printf '%s' "$raw" | tr 'A-F' 'a-f' | tr -cd 'a-f0-9' | cut -c1-32)
+  [ "${#raw}" -eq 32 ] || return 1
+  printf '%s%s]\n' "$FM_CLASSIFY_DECISION_CUTOVER_MARK_PREFIX_DEFAULT" "$raw"
+}
+
+fm_decision_cutover_ensure_status() {  # <status-file>
+  local f=$1 parent marker
+  parent=${f%/*}
+  [ "$parent" != "$f" ] || return 1
+  if [ ! -e "$parent" ] && [ ! -L "$parent" ]; then
+    mkdir -p "$parent" || return 1
+  fi
+  [ -d "$parent" ] && [ ! -L "$parent" ] || return 1
+  if [ -e "$f" ] || [ -L "$f" ]; then
+    [ -f "$f" ] && [ ! -L "$f" ] || return 1
+    return 0
+  fi
+  marker=$(fm_decision_status_marker) || return 1
+  if ( set -C; printf '%s\n' "$marker" > "$f" ) 2>/dev/null; then
+    fm_decision_stream_id "$f" >/dev/null || return 1
+    return 0
+  fi
+  [ -f "$f" ] && [ ! -L "$f" ] || return 1
+  return 0
+}
+
+# Drop the record for <key> from a newline-terminated
+# "<key>\t<verb>\t<instance>\t<authority>\t<note>" set.
 # Portable (no associative arrays) so the fold runs on bash 3.2 as well as 4+.
 _fm_decision_drop() {  # <open-set> <key>
   local set=$1 key=$2 line out=''
@@ -208,18 +435,52 @@ $set
 EOF
   printf '%s' "$out"
 }
+# Print the internal record currently held for <key>, or nothing.
+_fm_decision_get() {  # <open-set> <key>
+  local set=$1 key=$2 line
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    case "$line" in
+      "$key"$'\t'*) printf '%s' "$line"; return 0 ;;
+    esac
+  done <<EOF
+$set
+EOF
+  return 1
+}
 # Fold the WHOLE status stream into the set of decisions still open. Prints one
 # TAB-separated "<key>\t<verb>\t<summary>" line per still-open decision, in
-# most-recently-opened-last order; prints nothing when none are open. Pure read of
-# the file, no globals beyond the optional FM_CLASSIFY_RESOLVE_VERB override. This
-# is the durable open-set the fleet snapshot and any point-in-time consumer must use
+# most-recently-opened-last order; prints nothing when none are open.
+# "--with-instance" inserts the occurrence identifier before the summary for the
+# answer-issuance boundary. Pure read of the file and of the paired answer
+# records; no mutation.
+# This is the durable open-set the fleet snapshot and any point-in-time consumer must use
 # instead of trusting the last status line.
-status_open_decisions() {  # <status-file>
-  local f=$1 line verb key note resolve held open='' stripped
+#
+# A post-cutover needs-decision request additionally requires a correlated
+# answer token to close (see the answer-correlation contract above), so an
+# uncorrelated resolution leaves it open. A blocked line still closes on a
+# plain keyed resolution: clearing a blocker is work, not an exercise of
+# authority.
+status_open_decisions() {  # <status-file> [--with-instance]
+  local f=$1 view=${2:-} line verb key note resolve held open='' stripped
+  local answers held_rec held_fields held_verb held_instance held_authority ans
+  local position=0 instance authority=legacy stream_id=''
+  local out_key out_verb out_instance _out_authority out_note
+  case "$view" in
+    ''|--with-instance) ;;
+    *) return 2 ;;
+  esac
   [ -f "$f" ] || return 0
   resolve=${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}
   held=${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}
+  answers=$(fm_decision_answers_file "$f")
   while IFS= read -r line || [ -n "$line" ]; do
+    position=$((position + 1))
+    if stream_id=$(fm_decision_marker_line_id "$line"); then
+      authority=correlated
+      continue
+    fi
     stripped=${line//[[:space:]]/}
     [ -n "$stripped" ] || continue
     verb=$(status_line_verb "$line")
@@ -227,17 +488,115 @@ status_open_decisions() {  # <status-file>
     case "$verb" in
       needs-decision|blocked)
         note=$(status_line_note "$line")
+        instance=$(fm_decision_instance_id "$position" "$stream_id") || continue
         open=$(_fm_decision_drop "$open" "$key")
         [ -n "$open" ] && open="${open}"$'\n'
-        open="${open}${key}"$'\t'"${verb}"$'\t'"${note}"$'\n'
+        open="${open}${key}"$'\t'"${verb}"$'\t'"${instance}"$'\t'"${authority}"$'\t'"${note}"$'\n'
         ;;
-      "$resolve"|"$held")
+      "$resolve")
+        # Only a correlated answer closes a request for authority.
+        if held_rec=$(_fm_decision_get "$open" "$key"); then
+          held_fields=${held_rec#*$'\t'}
+          held_verb=${held_fields%%$'\t'*}
+          held_fields=${held_fields#*$'\t'}
+          held_instance=${held_fields%%$'\t'*}
+          held_fields=${held_fields#*$'\t'}
+          held_authority=${held_fields%%$'\t'*}
+          if [ "$held_verb" = needs-decision ] && [ "$held_authority" = correlated ]; then
+            ans=$(_fm_decision_answer "$line")
+            fm_decision_answer_matches "$answers" "$ans" "$key" "$held_instance" \
+              || continue
+          fi
+        fi
+        open=$(_fm_decision_drop "$open" "$key")
+        [ -n "$open" ] && open="${open}"$'\n'
+        ;;
+      "$held")
         open=$(_fm_decision_drop "$open" "$key")
         [ -n "$open" ] && open="${open}"$'\n'
         ;;
     esac
   done < "$f"
-  printf '%s' "$open"
+  while IFS=$'\t' read -r out_key out_verb out_instance _out_authority out_note || [ -n "$out_key" ]; do
+    [ -n "$out_key" ] || continue
+    if [ "$view" = --with-instance ]; then
+      printf '%s\t%s\t%s\t%s\n' "$out_key" "$out_verb" "$out_instance" "$out_note"
+    else
+      printf '%s\t%s\t%s\n' "$out_key" "$out_verb" "$out_note"
+    fi
+  done <<EOF
+$open
+EOF
+}
+
+status_open_needs_decisions() {  # <status-file>
+  local f=$1 key verb instance summary
+  while IFS=$'\t' read -r key verb instance summary || [ -n "$key" ]; do
+    [ "$verb" = needs-decision ] || continue
+    printf '%s\t%s\t%s\n' "$key" "$instance" "$summary"
+  done <<EOF
+$(status_open_decisions "$f" --with-instance)
+EOF
+}
+
+status_open_token_needs_decisions() {  # <status-file>
+  local f=$1 stream key instance summary
+  stream=$(fm_decision_stream_id "$f") || return 0
+  while IFS=$'\t' read -r key instance summary || [ -n "$key" ]; do
+    [ -n "$key" ] || continue
+    printf '%s\t%s.%s\t%s\n' "$key" "$stream" "$instance" "$summary"
+  done <<EOF
+$(status_open_needs_decisions "$f")
+EOF
+}
+
+status_has_open_token_needs_decision() {  # <status-file>
+  local key _occurrence _summary
+  while IFS=$'\t' read -r key _occurrence _summary || [ -n "$key" ]; do
+    [ -n "$key" ] && return 0
+  done <<EOF
+$(status_open_token_needs_decisions "$1")
+EOF
+  return 1
+}
+
+status_latest_needs_decision_is_open_token_occurrence() {  # <status-file>
+  local f=$1 line marker stripped latest='' position=0 latest_position=0
+  local stream='' latest_stream='' key instance open_key open_instance _summary
+  fm_decision_stream_id "$f" >/dev/null || return 1
+  while IFS= read -r line || [ -n "$line" ]; do
+    position=$((position + 1))
+    if marker=$(fm_decision_marker_line_id "$line"); then
+      stream=$marker
+      continue
+    fi
+    stripped=${line//[[:space:]]/}
+    [ -n "$stripped" ] || continue
+    latest=$line
+    latest_position=$position
+    latest_stream=$stream
+  done < "$f"
+  [ "$(status_line_verb "$latest")" = needs-decision ] || return 1
+  key=$(_fm_decision_key "$latest") || return 1
+  instance=$(fm_decision_instance_id "$latest_position" "$latest_stream") || return 1
+  while IFS=$'\t' read -r open_key open_instance _summary || [ -n "$open_key" ]; do
+    [ "$open_key" = "$key" ] || continue
+    [ "$open_instance" = "$instance" ] || continue
+    return 0
+  done <<EOF
+$(status_open_needs_decisions "$f")
+EOF
+  return 1
+}
+
+status_has_open_needs_decision() {  # <status-file>
+  local key _instance _summary
+  while IFS=$'\t' read -r key _instance _summary || [ -n "$key" ]; do
+    [ -n "$key" ] && return 0
+  done <<EOF
+$(status_open_needs_decisions "$1")
+EOF
+  return 1
 }
 
 # Fold material routed-work phases in the same keyed event stream.
@@ -305,11 +664,12 @@ window_to_task() {
 }
 
 # 0 (actionable) if ANY status file listed in a "signal:" wake carries a
-# captain-relevant last line; 1 otherwise. Pass the space-separated file list that
-# follows the "signal:" prefix. Non-.status arguments (e.g. .turn-ended markers,
-# which never carry a verb) are skipped. A 1 here is NOT "benign" on its own: a
-# no-verb signal (a bare turn-end, a working: note) is only benign when the crew is
-# also provably working (signal_crew_provably_working below); otherwise it surfaces.
+# captain-relevant last line; 1 otherwise.
+# Pass the space-separated file list that follows the "signal:" prefix.
+# Non-.status arguments (e.g. .turn-ended markers, which never carry a
+# verb) are skipped. A 1 here is NOT "benign" on its own: a no-verb signal (a
+# bare turn-end, a working: note) is only benign when the crew is also provably
+# working (signal_crew_provably_working below); otherwise it surfaces.
 signal_reason_is_actionable() {  # <file> ...
   local f last
   for f in "$@"; do
@@ -317,6 +677,10 @@ signal_reason_is_actionable() {  # <file> ...
     case "$f" in *.status) ;; *) continue ;; esac
     last=$(last_status_line "$f")
     [ -n "$last" ] || continue
+    if [ "$(status_line_verb "$last")" = needs-decision ] \
+      && status_latest_needs_decision_is_open_token_occurrence "$f"; then
+      continue
+    fi
     status_is_captain_relevant "$last" && return 0
   done
   return 1
@@ -393,13 +757,16 @@ signal_crew_provably_working() {  # <file> ...
   return 0
 }
 
-# 0 (terminal/actionable) if a stale window's last status line is
-# captain-relevant; 1 otherwise, including the no-status case. A 1 only means
-# "non-terminal"; the always-on watcher then applies crew_is_provably_working,
-# while the away-mode daemon applies its persistence recheck.
+# 0 (terminal/actionable) if a stale window has a folded open needs-decision or
+# its last status line is captain-relevant; 1 otherwise, including the no-status
+# case. A 1 only means "non-terminal"; the always-on watcher then applies
+# crew_is_provably_working, while the away-mode daemon applies its persistence
+# recheck.
 stale_is_terminal() {  # <window> <state>
-  local win=$1 state=$2 last
-  last=$(last_status_line "$state/$(window_to_task "$win" "$state").status")
+  local win=$1 state=$2 last f
+  f="$state/$(window_to_task "$win" "$state").status"
+  status_has_open_needs_decision "$f" && return 0
+  last=$(last_status_line "$f")
   [ -n "$last" ] && status_is_captain_relevant "$last"
 }
 
@@ -416,6 +783,23 @@ scan_captain_relevant_statuses() {  # <state>
     status_is_captain_relevant "$last" || continue
     task=$(basename "$f"); task="${task%.status}"
     printf '%s\t%s\t%s\n' "$f" "$task" "$last"
+  done
+  return 0
+}
+
+# Print one row per folded open token-era needs-decision occurrence:
+# "<file>\t<task>\t<instance>\t<key>\t<summary>".
+scan_open_needs_decisions() {  # <state>
+  local state=$1 f task key instance summary
+  for f in "$state"/*.status; do
+    [ -e "$f" ] || continue
+    task=$(basename "$f"); task="${task%.status}"
+    while IFS=$'\t' read -r key instance summary || [ -n "$key" ]; do
+      [ -n "$key" ] || continue
+      printf '%s\t%s\t%s\t%s\t%s\n' "$f" "$task" "$instance" "$key" "$summary"
+    done <<EOF
+$(status_open_token_needs_decisions "$f")
+EOF
   done
   return 0
 }

@@ -532,11 +532,30 @@ heartbeat_scan_finds_actionable() {
   local f task last surfaced
   while IFS=$(printf '\t') read -r f task last; do
     [ -n "$f" ] || continue
+    if [ "$(status_line_verb "$last")" = needs-decision ] \
+      && status_latest_needs_decision_is_open_token_occurrence "$f"; then
+      continue
+    fi
     surfaced=$(cat "$(_hb_surfaced_path "$task")" 2>/dev/null || true)
     [ "$surfaced" = "$last" ] && continue
     return 0
   done < <(scan_captain_relevant_statuses "$STATE")
   return 1
+}
+
+enqueue_all_pending_open_decisions() {
+  local f rc found=1
+  for f in "$STATE"/*.status; do
+    [ -e "$f" ] || continue
+    enqueue_pending_open_decisions "$f"
+    rc=$?
+    case "$rc" in
+      0) found=0 ;;
+      1) ;;
+      *) return "$rc" ;;
+    esac
+  done
+  return "$found"
 }
 
 # event_wait_or_sleep: the terminal wait of each supervision cycle. For a home
@@ -784,6 +803,17 @@ while :; do
 $pending
 EOF
     reason="signal:$files"
+    decision_enqueued=0
+    for f in $files; do
+      case "$f" in *.status) ;; *) continue ;; esac
+      enqueue_pending_open_decisions "$f"
+      rc=$?
+      case "$rc" in
+        0) decision_enqueued=1 ;;
+        1) ;;
+        *) exit 1 ;;
+      esac
+    done
     # Triage: a signal is ACTIONABLE when any of these holds (cheapest first):
     #   - the away-mode daemon owns triage (afk) and wants every wake;
     #   - any status file carries a captain-relevant verb;
@@ -797,18 +827,26 @@ EOF
     # will not re-fire, log, and keep blocking without enqueuing. The provably-working
     # check is the only costly one (it may run a bounded no-mistakes call), so the ||
     # ordering evaluates it ONLY for a non-afk, no-captain-verb signal.
+    signal_actionable=0
     # shellcheck disable=SC2086  # $files is a space-separated status-path list (ids carry no spaces)
-    if afk_present || signal_reason_is_actionable $files || ! signal_crew_provably_working $files; then
-      while IFS=$(printf '\t') read -r sf sig f; do
-        [ -n "$sf" ] || continue
-        fm_wake_append signal "$(basename "$f")" "$reason" || exit 1
-      done <<EOF
+    if afk_present || signal_reason_is_actionable $files; then
+      signal_actionable=1
+    elif [ "$decision_enqueued" -eq 0 ] && ! signal_crew_provably_working $files; then
+      signal_actionable=1
+    fi
+    if [ "$decision_enqueued" -eq 1 ] || [ "$signal_actionable" -eq 1 ]; then
+      if [ "$signal_actionable" -eq 1 ]; then
+        while IFS=$(printf '\t') read -r sf sig f; do
+          [ -n "$sf" ] || continue
+          fm_wake_append signal "$(basename "$f")" "$reason" || exit 1
+        done <<EOF
 $pending
 EOF
+      fi
       while IFS=$(printf '\t') read -r sf sig f; do
         [ -n "$sf" ] || continue
         printf '%s' "$sig" > "$sf"
-        mark_surfaced "$f"
+        [ "$signal_actionable" -eq 0 ] || mark_surfaced "$f"
       done <<EOF
 $pending
 EOF
@@ -998,6 +1036,11 @@ EOF
       fm_wake_append heartbeat heartbeat heartbeat || exit 1
       touch "$STATE/.last-heartbeat"
       wake "heartbeat"
+    elif enqueue_all_pending_open_decisions; then
+      touch "$STATE/.last-heartbeat"
+      wake "heartbeat"
+    elif [ "$?" -gt 1 ]; then
+      exit 1
     elif heartbeat_scan_finds_actionable; then
       # Backstop: a captain-relevant status the per-wake path absorbed by mistake.
       # Enqueue first, then mark every captain-relevant status surfaced so the next

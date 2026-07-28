@@ -296,7 +296,7 @@ The task worker that starts a no-mistakes run drives the pipeline and owns every
 Firstmate never invokes `no-mistakes axi respond` for a crew-owned run.
 
 An ask-user finding returns as `needs-decision`; firstmate decides only when the configured authority permits, otherwise escalates to the captain.
-Send the same worker one exact decision naming the decision key, step, action, affected finding IDs, instructions where needed, and exact response command.
+Send the same worker one exact answer through `bin/fm-send.sh`'s `--decision` mode for the open decision key, naming the step, action, affected finding IDs, instructions where needed, and exact response command.
 Require the matching `resolved` event, forbid `--yes`, and require the worker to process every synchronous return until completion or a genuinely new escalation.
 Resume fleet supervision immediately after the decision lands.
 

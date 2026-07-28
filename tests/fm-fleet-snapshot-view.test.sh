@@ -5,6 +5,8 @@ set -u
 # shellcheck source=tests/lib.sh
 # shellcheck disable=SC1091
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=/dev/null
+. "$ROOT/bin/fm-classify-lib.sh"
 
 SNAPSHOT="$ROOT/bin/fm-fleet-snapshot.sh"
 VIEW="$ROOT/bin/fm-fleet-view.sh"
@@ -154,7 +156,7 @@ test_fixture_snapshot_json() {
       and .current_state.source == "pane"
       and .pr.url == "https://github.com/kunchenguid/firstmate/pull/9"
       and .backlog.body_excerpt == "Preserve this detail for bearings."
-      and .hints.pending_decision == false
+      and .hints.pending_decision == true
       and .paths.status_log.kind == "event_history"
   ' >/dev/null || fail "ship task state, PR, body, and stale event hints wrong"
   printf '%s' "$out" | jq -e '
@@ -391,11 +393,11 @@ test_event_hints_follow_reconciled_current_state() {
       and task("active-blocked").current_state.state == "blocked"
       and task("active-blocked").hints.blocked_event == true
       and task("stale-decision").current_state.state == "working"
-      and task("stale-decision").hints.pending_decision == false
+      and task("stale-decision").hints.pending_decision == true
       and task("stale-blocked").current_state.state == "working"
       and task("stale-blocked").hints.blocked_event == false
   ' >/dev/null || fail "event hints must follow reconciled current state"
-  pass "snapshot event hints follow reconciled current state"
+  pass "snapshot lifecycle reconciliation preserves decisions and clears stale blockers"
 }
 
 test_scout_reports_include_teardown_reports() {
@@ -640,6 +642,38 @@ test_secondmate_open_decision_survives_live_endpoint() {
   pass "a live secondmate endpoint preserves unrelated open decisions"
 }
 
+test_uncorrelated_resolution_survives_active_ordinary_lifecycle() {
+  local home fakebin out status
+  home=$(make_home active-ordinary-decision)
+  mkdir -p "$home/projects/ordinary"
+  fm_write_meta "$home/state/authority-ship-task.meta" \
+    "window=firstmate:fm-authority-ship-task" \
+    "worktree=$home/projects/ordinary" \
+    "project=alpha" \
+    "harness=codex" \
+    "kind=ship" \
+    "mode=ship"
+  status="$home/state/authority-ship-task.status"
+  fm_decision_cutover_ensure_status "$status" \
+    || fail "could not establish a post-cutover ordinary-task fixture"
+  {
+    printf 'needs-decision [key=route]: choose the release route\n'
+    printf 'resolved [key=route]: consumed a queued generic command\n'
+    printf 'working: resumed without correlated authority\n'
+  } >> "$status"
+  fakebin=$(make_fakebin "$home")
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --json)
+  printf '%s' "$out" | jq -e '
+    .tasks[] | select(.id == "authority-ship-task")
+    | .current_state.state == "working"
+      and .current_state.source == "pane"
+      and .hints.pending_decision == true
+      and (.hints.open_decisions | length) == 1
+      and .hints.open_decisions[0].key == "route"
+  ' >/dev/null || fail "active lifecycle evidence cleared an uncorrelated captain decision: $out"
+  pass "active ordinary work cannot clear an uncorrelated captain decision"
+}
+
 # An open decision clears ONLY on an explicit resolution referencing its key, never
 # on an unrelated terminal line.
 test_open_decision_transfers_to_captain_hold() {
@@ -668,7 +702,7 @@ test_open_decision_transfers_to_captain_hold() {
 }
 
 test_open_decision_clears_on_keyed_resolution() {
-  local home fakebin out
+  local home fakebin out token
   home=$(make_home resolution)
   mkdir -p "$home/secondmate-home"
   fm_write_meta "$home/state/resolved-decision.meta" \
@@ -680,9 +714,23 @@ test_open_decision_clears_on_keyed_resolution() {
     "mode=secondmate" \
     "home=$home/secondmate-home" \
     "projects=alpha"
-  printf 'needs-decision [key=race]: fix the reconcile-before-subscribe race\n' > "$home/state/resolved-decision.status"
+  fm_decision_cutover_ensure_status "$home/state/resolved-decision.status" \
+    || fail "could not establish a post-cutover snapshot fixture"
+  printf 'needs-decision [key=race]: fix the reconcile-before-subscribe race\n' >> "$home/state/resolved-decision.status"
   printf 'done: an unrelated subtask finished\n' >> "$home/state/resolved-decision.status"
-  printf 'resolved [key=race]: captain chose subscribe-then-reconcile\n' >> "$home/state/resolved-decision.status"
+  # The resolution carries the answer token firstmate minted against this exact
+  # open request, which is the only thing that closes a request for authority.
+  token=$(bash -c '
+    . "$1/bin/fm-classify-lib.sh"
+    IFS="$(printf "\t")" read -r key verb instance summary <<EOF
+$(status_open_decisions "$2" --with-instance)
+EOF
+    t=$(fm_decision_mint_answer_token "$instance") || exit 1
+    fm_decision_record_answer "$(fm_decision_answers_file "$2")" "$t" race "$instance"' \
+    _ "$ROOT" "$home/state/resolved-decision.status") \
+    || fail "could not mint a correlated answer token for the resolution fixture"
+  printf 'resolved [key=race] [ans=%s]: captain chose subscribe-then-reconcile\n' "$token" \
+    >> "$home/state/resolved-decision.status"
   fakebin=$(make_fakebin "$home")
   out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --json)
   printf '%s' "$out" | jq -e '
@@ -693,15 +741,10 @@ test_open_decision_clears_on_keyed_resolution() {
   pass "durable fold clears a decision only on a keyed resolution"
 }
 
-# A COMPLETED scout report must never be read as a pending decision. A scout that
-# raised a needs-decision and then finished (done) - its report delivered, its
-# decision either answered or captured in the report for the captain - must surface
-# only as a report POINTER, not a reopened pending decision, even when the report
-# body and the stale status line contain decision-like prose. This is the Lavish-103
-# defect: a terminal single-owner task's stale, never-keyed-resolved needs-decision
-# must not linger as pending. Decisions come purely from the keyed fold reconciled
-# against the crew lifecycle; report prose never opens or reopens a decision.
-test_completed_scout_report_is_pointer_not_pending() {
+# A terminal scout report remains a useful pointer, but terminal lifecycle
+# evidence cannot substitute for the captain's correlated answer or a verified
+# captain-held transfer.
+test_completed_scout_decision_stays_pending_until_closed() {
   local home fakebin out
   home=$(make_home completed-scout)
   mkdir -p "$home/projects/scout-wt" "$home/data/lavish-103"
@@ -722,11 +765,11 @@ test_completed_scout_report_is_pointer_not_pending() {
   printf '%s' "$out" | jq -e '
     .tasks[] | select(.id == "lavish-103")
     | .current_state.state == "done"
-      and .hints.pending_decision == false
-      and (.hints.open_decisions | length) == 0
+      and .hints.pending_decision == true
+      and (.hints.open_decisions | length) == 1
       and .hints.scout_report_present == true
-  ' >/dev/null || fail "a completed scout report must be a pointer, not a pending decision: $out"
-  pass "a completed scout's stale decision surfaces as a report pointer, not pending"
+  ' >/dev/null || fail "terminal scout lifecycle evidence cleared an unanswered decision: $out"
+  pass "a completed scout keeps its report pointer and unanswered decision"
 }
 
 # The complementary safety property: a scout still PARKED at a decision (its last
@@ -762,9 +805,10 @@ test_normalized_roles_and_plural_blocker_readiness
 test_event_hints_follow_reconciled_current_state
 test_open_decision_survives_later_unrelated_event
 test_secondmate_open_decision_survives_live_endpoint
+test_uncorrelated_resolution_survives_active_ordinary_lifecycle
 test_open_decision_transfers_to_captain_hold
 test_open_decision_clears_on_keyed_resolution
-test_completed_scout_report_is_pointer_not_pending
+test_completed_scout_decision_stays_pending_until_closed
 test_parked_scout_decision_stays_pending
 test_scout_reports_include_teardown_reports
 test_backlog_tasks_axi_forms_and_overrides

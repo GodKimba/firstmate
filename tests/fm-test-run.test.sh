@@ -118,6 +118,7 @@ init_changed_fixture_repo() {
   done
   : >"$repo/tests/lib.sh"
   : >"$repo/tests/fm-backend-herdr-eventwait.test.py"
+  : >"$repo/bin/fm-classify-lib.sh"
   : >"$repo/bin/fm-supervisor-target-lib.sh"
   : >"$repo/bin/unmapped-source.sh"
   printf '# .claude/settings.json\n# .pi/extensions/fm-primary-turnend-guard.ts\n' \
@@ -161,6 +162,16 @@ test_changed_dependency_selection_and_unmapped_failure() {
   assert_contains "$listed" "tests/fm-afk-return.test.sh" "supervisor target selects afk coverage"
   git -C "$repo" add bin/fm-supervisor-target-lib.sh
   git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm supervisor-change
+
+  printf '\n' >>"$repo/bin/fm-classify-lib.sh"
+  listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD)
+  assert_contains "$listed" "tests/fm-brief.test.sh" "classifier selects pure contract consumers"
+  assert_contains "$listed" "tests/fm-daemon.test.sh" "classifier selects watcher consumers"
+  assert_contains "$listed" "tests/fm-bearings-snapshot.test.sh" "classifier selects snapshot consumers"
+  assert_contains "$listed" "tests/fm-afk-return.test.sh" "classifier selects AFK consumers"
+  assert_contains "$listed" "tests/fm-backend.test.sh" "classifier selects backend dispatch consumers"
+  git -C "$repo" add bin/fm-classify-lib.sh
+  git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm classifier-change
 
   printf '\n' >>"$repo/.agents/skills/example/SKILL.md"
   printf '\n' >>"$repo/.claude/settings.json"
@@ -551,7 +562,15 @@ exit 1
 SH
   cat >"$repo/$a" <<'SH'
 #!/usr/bin/env bash
-sleep 0.5
+attempt=0
+while [ ! -e "$SCHED_EVIDENCE/replacement-started" ] && [ "$attempt" -lt 100 ]; do
+  sleep 0.05
+  attempt=$((attempt + 1))
+done
+[ -e "$SCHED_EVIDENCE/replacement-started" ] || {
+  echo "not ok - replacement fixture never started while the oldest worker was active"
+  exit 1
+}
 touch "$SCHED_EVIDENCE/slow-done"
 echo "ok - slow fixture"
 SH
@@ -566,6 +585,7 @@ if [ -e "$SCHED_EVIDENCE/slow-done" ]; then
   echo "not ok - scheduler waited for oldest worker"
   exit 1
 fi
+touch "$SCHED_EVIDENCE/replacement-started"
 echo "ok - replacement fixture started before slow fixture finished"
 SH
   chmod +x "$runner" "$repo/$a" "$repo/$b" "$repo/$c" "$fake_bin/stat"

@@ -103,6 +103,8 @@ PRIMARY_HARNESS=$("$SCRIPT_DIR/fm-harness.sh" 2>/dev/null || printf unknown)
 . "$SCRIPT_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-tasks-axi-lib.sh
 . "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
+# shellcheck source=bin/fm-classify-lib.sh
+. "$SCRIPT_DIR/fm-classify-lib.sh"
 
 STATUS_TAIL=${FM_SESSION_START_STATUS_TAIL:-5}
 case "$STATUS_TAIL" in ''|*[!0-9]*) STATUS_TAIL=5 ;; esac
@@ -214,9 +216,19 @@ print_backlog_compact() {
 }
 
 print_status_tail() {
-  local status=$1
+  local status=$1 prefix
   printf 'status tail (last %s line(s), wake-EVENT history, not current state; full log: %s):\n' "$STATUS_TAIL" "$status"
-  tail -n "$STATUS_TAIL" "$status"
+  prefix=$FM_CLASSIFY_DECISION_CUTOVER_MARK_PREFIX_DEFAULT
+  tail -n "$((STATUS_TAIL + 1))" "$status" \
+    | LC_ALL=C awk -v prefix="$prefix" '
+        function marker(s, id) {
+          if (index(s, prefix) != 1 || length(s) != length(prefix) + 33 || substr(s, length(s), 1) != "]") return 0
+          id = substr(s, length(prefix) + 1, 32)
+          return id !~ /[^a-f0-9]/
+        }
+        !marker($0)
+      ' \
+    | tail -n "$STATUS_TAIL"
 }
 
 hash_file() {

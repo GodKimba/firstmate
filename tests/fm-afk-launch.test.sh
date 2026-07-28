@@ -104,16 +104,16 @@ unit_fresh_vs_refresh() {
 # still present (so its flush is not a no-op), and clears .afk last.
 # ---------------------------------------------------------------------------
 unit_stop_ordering() {
-  local st lock marker daemon_pid
+  local st lock term_marker daemon_pid
   st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-stop.XXXXXX")
   mkdir -p "$st/state"
   date '+%s' > "$st/state/.afk"
-  marker="$st/afk-at-term"
+  term_marker="$st/afk-at-term"
   # A fake daemon: on SIGTERM, record whether .afk was still present, then exit.
   bash -c '
     trap "if [ -f \"$1/state/.afk\" ]; then echo present > \"$2\"; else echo absent > \"$2\"; fi; exit 0" TERM
     while :; do sleep 0.2; done
-  ' _ "$st" "$marker" &
+  ' _ "$st" "$term_marker" &
   daemon_pid=$!
   lock="$st/state/.supervise-daemon.lock"
   mkdir -p "$lock"
@@ -121,7 +121,7 @@ unit_stop_ordering() {
   ( . "$ROOT/bin/fm-wake-lib.sh"; fm_pid_identity "$daemon_pid" > "$lock/pid-identity" 2>/dev/null ) || true
   printf 'none\t-\tnative\n' > "$st/state/.afk-daemon-terminal"
   FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" stop >/dev/null 2>&1
-  if [ "$(cat "$marker" 2>/dev/null || echo missing)" = present ]; then
+  if [ "$(cat "$term_marker" 2>/dev/null || echo missing)" = present ]; then
     pass "stop-ordering: daemon SIGTERM'd while .afk still present (flush is not a no-op)"
   else
     fail "stop-ordering: .afk was already cleared when the daemon got SIGTERM"
@@ -209,16 +209,16 @@ unit_concurrent_start_serialized() {
 }
 
 unit_lock_initialization_grace() {
-  local st marker initializer
+  local st initialization_marker initializer
   st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-lock-init.XXXXXX")
-  marker="$st/initialized"
+  initialization_marker="$st/initialized"
   mkdir -p "$st/state/.afk-launch.lock"
   (
     sleep 0.15
     if [ -d "$st/state/.afk-launch.lock" ]; then
       printf '%s' "$$" > "$st/state/.afk-launch.lock/pid"
       ( . "$ROOT/bin/fm-wake-lib.sh"; fm_pid_identity "$$" > "$st/state/.afk-launch.lock/pid-identity" 2>/dev/null ) || true
-      : > "$marker"
+      : > "$initialization_marker"
       sleep 0.15
       rm -rf "$st/state/.afk-launch.lock"
     fi
@@ -228,7 +228,7 @@ unit_lock_initialization_grace() {
     . "$1"
     fm_afk_launch_lock_acquire
     fm_afk_launch_lock_release
-  ' _ "$LAUNCH" && [ -e "$marker" ]; then
+  ' _ "$LAUNCH" && [ -e "$initialization_marker" ]; then
     pass "launcher lock: incomplete publication receives initialization grace"
   else
     fail "launcher lock: contender removed a lock during initialization"

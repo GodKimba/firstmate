@@ -122,7 +122,7 @@ test_scan_captain_relevant_statuses_classifier() {
 }
 
 test_classifier_primitives() {
-  local dir state open activity canonical late
+  local dir state open activity canonical late token instance _key _verb _summary
   dir=$(make_case classify-primitives); state="$dir/state"
   printf 'working: a\n\ndone: b\n\n' > "$state/x.status"
   [ "$(last_status_line "$state/x.status")" = "done: b" ] || fail "last_status_line did not return the last non-blank line"
@@ -168,11 +168,24 @@ test_classifier_primitives() {
     && fail "a late key token silently opened or closed the default decision"
   printf '%s' "$open" | grep -F $'bad key\t' >/dev/null \
     && fail "an invalid key slug entered the open-decision set"
-  printf 'needs-decision [key=route]: choose north or south\n' > "$state/canonical-key.status"
+  fm_decision_cutover_ensure_status "$state/canonical-key.status" \
+    || fail "could not establish a post-cutover decision fixture"
+  printf 'needs-decision [key=route]: choose north or south\n' >> "$state/canonical-key.status"
   canonical=$(status_open_decisions "$state/canonical-key.status")
   printf '%s' "$canonical" | grep -F $'route\tneeds-decision\tchoose north or south' >/dev/null \
     || fail "the canonical early-key form did not open the intended decision"
   printf 'resolved [key=route]: captain chose north\n' >> "$state/canonical-key.status"
+  printf '%s' "$(status_open_decisions "$state/canonical-key.status")" | grep -F $'route\t' >/dev/null \
+    || fail "an uncorrelated resolution silently closed a request for authority"
+  IFS=$'\t' read -r _key _verb instance _summary <<EOF
+$(status_open_decisions "$state/canonical-key.status" --with-instance)
+EOF
+  token=$(fm_decision_mint_answer_token "$instance") || fail "could not mint a decision answer token"
+  fm_decision_record_answer \
+    "$(fm_decision_answers_file "$state/canonical-key.status")" \
+    "$token" route "$instance" >/dev/null \
+    || fail "could not record the minted answer token"
+  printf 'resolved [key=route] [ans=%s]: captain chose north\n' "$token" >> "$state/canonical-key.status"
   [ -z "$(status_open_decisions "$state/canonical-key.status")" ] \
     || fail "the canonical matching resolved event did not close the intended decision"
   printf 'needs-decision: legacy default choice\nresolved: answered route [key=route]\nneeds-decision: choose north or south [key=route]\n' > "$state/late-key.status"
@@ -1198,6 +1211,116 @@ test_heartbeat_backstop_surfaces_unsurfaced_status() {
   pass "heartbeat backstop fail-safe surfaces a captain-relevant status the per-wake path missed"
 }
 
+test_retained_decision_surfaces_signal_and_heartbeat_once() {
+  local dir state fakebin out status_file instance marker pid sig out2 queue drain_out
+  dir=$(make_case retained-decision-signal); state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"
+  status_file="$state/retained.status"
+  fm_decision_cutover_ensure_status "$status_file" || fail "could not establish retained-decision signal fixture"
+  printf '%s\n' \
+    'needs-decision [key=route]: captain must choose the route' \
+    'resolved [key=route]: queued generic command was not authority' \
+    'working: worker resumed after consuming the queue' >> "$status_file"
+  instance=$(status_open_token_needs_decisions "$status_file" | awk -F '\t' 'NR == 1 { print $2 }')
+  [ -n "$instance" ] || fail "retained-decision occurrence was not folded open"
+  export FM_FAKE_CREW_STATE='state: working · source: run-step · worker active'
+  watch_bg "$state" "$fakebin" "$out"
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "active worker's retained decision was absorbed on the signal path"
+  grep -F "signal: $status_file" "$out" >/dev/null \
+    || fail "retained decision did not surface through live signal notification"
+  marker="$state/.hb-surfaced-decision-$instance"
+  [ "$(cat "$marker" 2>/dev/null || true)" = "$instance" ] \
+    || fail "signal path did not deduplicate the retained decision by occurrence"
+  queue=$(cat "$state/.wake-queue")
+  printf '%s' "$queue" | grep -F $'\tdecision\t'"$instance"$'\t' >/dev/null \
+    || fail "signal path did not enqueue the retained decision by occurrence"
+  assert_contains "$queue" "[key=route] [occurrence=$instance]: captain must choose the route" \
+    "retained-decision wake omitted its key, occurrence, or summary"
+  drain_out="$dir/drain.out"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null \
+    || fail "retained-decision wake drain failed"
+  assert_contains "$(cat "$drain_out")" \
+    "[key=route] [occurrence=$instance]: captain must choose the route" \
+    "drained wake replaced the retained decision with the latest working event"
+
+  printf 'working: later status append after the decision wake\n' >> "$status_file"
+  out2="$dir/watch-second.out"
+  PATH="$fakebin:$PATH" FM_FAKE_CREW_STATE='state: working · source: run-step · worker active' \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out2" &
+  pid=$!
+  if ! wait_live "$pid" 30; then
+    reap "$pid"
+    fail "later status append re-surfaced an already-announced occurrence: $(cat "$out2")"
+  fi
+  reap "$pid"
+
+  dir=$(make_case retained-decision-heartbeat); state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"
+  status_file="$state/retained.status"
+  fm_decision_cutover_ensure_status "$status_file" || fail "could not establish retained-decision heartbeat fixture"
+  printf '%s\n' \
+    'needs-decision [key=route]: captain must choose the route' \
+    'resolved [key=route]: queued generic command was not authority' \
+    'working: worker resumed after consuming the queue' >> "$status_file"
+  instance=$(status_open_token_needs_decisions "$status_file" | awk -F '\t' 'NR == 1 { print $2 }')
+  sig=$(seen_sig "$status_file"); printf '%s' "$sig" > "$state/.seen-retained_status"
+  PATH="$fakebin:$PATH" FM_FAKE_CREW_STATE='state: working · source: run-step · worker active' \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=1 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "heartbeat did not surface an active worker's retained decision"
+  grep -Fx heartbeat "$out" >/dev/null || fail "retained decision did not surface through heartbeat notification"
+  marker="$state/.hb-surfaced-decision-$instance"
+  [ "$(cat "$marker" 2>/dev/null || true)" = "$instance" ] \
+    || fail "heartbeat did not deduplicate the retained decision by occurrence"
+  queue=$(cat "$state/.wake-queue")
+  printf '%s' "$queue" | grep -F $'\tdecision\t'"$instance"$'\t' >/dev/null \
+    || fail "heartbeat did not enqueue the retained decision by occurrence"
+
+  out2="$dir/watch-second.out"
+  rm -f "$state/.last-heartbeat"
+  PATH="$fakebin:$PATH" FM_FAKE_CREW_STATE='state: working · source: run-step · worker active' \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=1 "$WATCH" > "$out2" &
+  pid=$!
+  if ! wait_live "$pid" 30; then
+    reap "$pid"
+    fail "retained decision re-surfaced after its occurrence marker was recorded: $(cat "$out2")"
+  fi
+  reap "$pid"
+  unset FM_FAKE_CREW_STATE
+  pass "retained decisions surface through signal and heartbeat once per occurrence while workers remain active"
+}
+
+test_malformed_decision_behind_open_decision_surfaces() {
+  local dir state fakebin out status_file instance marker pid queue
+  dir=$(make_case malformed-behind-open-decision); state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"
+  status_file="$state/malformed.status"
+  fm_decision_cutover_ensure_status "$status_file" \
+    || fail "could not establish malformed-decision signal fixture"
+  printf 'needs-decision [key=route]: captain must choose the route\n' >> "$status_file"
+  instance=$(status_open_token_needs_decisions "$status_file" | awk -F '\t' 'NR == 1 { print $2 }')
+  [ -n "$instance" ] || fail "valid predecessor decision was not folded open"
+  marker="$state/.hb-surfaced-decision-$instance"
+  printf '%s' "$instance" > "$marker"
+  printf 'needs-decision: choose a fallback [key=fallback]\n' >> "$status_file"
+  status_latest_needs_decision_is_open_token_occurrence "$status_file" \
+    && fail "malformed latest opening matched an unrelated folded occurrence"
+  export FM_FAKE_CREW_STATE='state: working · source: run-step · worker active'
+  watch_bg "$state" "$fakebin" "$out"
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "active worker caused a malformed decision behind an open request to be absorbed"
+  grep -F "signal: $status_file" "$out" >/dev/null \
+    || fail "malformed decision did not surface through live signal notification"
+  queue=$(cat "$state/.wake-queue")
+  printf '%s' "$queue" | grep "$(printf '\tsignal\t')" >/dev/null \
+    || fail "malformed decision did not enqueue an ordinary signal wake"
+  printf '%s' "$queue" | grep "$(printf '\tdecision\t')" >/dev/null \
+    && fail "already-surfaced predecessor decision was re-enqueued"
+  unset FM_FAKE_CREW_STATE
+  pass "malformed decisions behind open occurrences still surface while workers remain active"
+}
+
 # --- beacon stays fresh while absorbing -------------------------------------
 
 test_beacon_stays_fresh_while_absorbing() {
@@ -1318,6 +1441,8 @@ test_nonterminal_stale_repairs_missing_or_corrupt_timer
 test_triage_log_size_cap_accepts_spaced_wc_counts
 test_heartbeat_no_change_absorbed
 test_heartbeat_backstop_surfaces_unsurfaced_status
+test_retained_decision_surfaces_signal_and_heartbeat_once
+test_malformed_decision_behind_open_decision_surfaces
 test_beacon_stays_fresh_while_absorbing
 test_afk_present_reverts_watcher_to_one_shot
 test_afk_paused_changed_pane_hands_off_plain_stale

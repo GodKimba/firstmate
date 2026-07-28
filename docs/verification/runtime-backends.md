@@ -381,3 +381,60 @@ The host-tool sequence was:
 Observed guarantee: a Desktop-owned thread can write Firstmate lifecycle files when the prompt provides an authorized absolute path, and create, send, read, and archive work at the Desktop host-tool layer.
 The missing guarantee remains a supported shell-callable bridge that lets Firstmate perform those operations against the same visible Desktop endpoint.
 App-server partial methods and raw socket experiments do not satisfy that bridge contract.
+
+## Decision-answer correlation across runtimes and backends
+
+Verified on 2026-07-28 against every supported primary harness (`claude`, `codex`, `opencode`, `pi`, `pi-signed`, `grok`, `kimi`) and every runtime backend adapter (`tmux`, `herdr`, `zellij`, `orca`, `cmux`).
+This record supports the current guarantee that the answer-correlation boundary is a single shell-side contract with no per-runtime and no per-backend surface.
+[`../../bin/fm-classify-lib.sh`](../../bin/fm-classify-lib.sh) owns the contract itself.
+
+Decision vocabulary was searched across every backend adapter and every tracked harness runtime asset:
+
+```sh
+grep -rlE '\[ans=|\[key=|needs-decision|captain-held' bin/backends/ | wc -l
+grep -rlE '\[ans=|\[key=|needs-decision|captain-held' .claude .codex .grok .opencode .pi bin/fm-kimi-turnend-hook.sh | wc -l
+grep -rlE 'status_line_verb|status_open_decisions|fm_decision_' bin/backends/ bin/fm-harness.sh | wc -l
+```
+
+Observed output: `0`, `0`, and `0`.
+
+Runtime consumers reach the fold through the shared library.
+Its direct source sites are:
+
+```sh
+grep -rlnE '^[[:space:]]*\. .*fm-classify-lib\.sh' bin/ | LC_ALL=C sort
+```
+
+Observed output:
+
+```text
+bin/fm-afk-return.sh
+bin/fm-brief.sh
+bin/fm-crew-state.sh
+bin/fm-decision-hold.sh
+bin/fm-fleet-snapshot.sh
+bin/fm-push-transition-lib.sh
+bin/fm-send.sh
+bin/fm-session-start.sh
+bin/fm-supervise-daemon.sh
+bin/fm-wake-lib.sh
+```
+
+`fm-watch.sh` loads the same owner transitively through `fm-push-transition-lib.sh`, and wake-queue consumers load it through `fm-wake-lib.sh`.
+
+Observed guarantee: a runtime carries the answer message as opaque text and a backend carries it as opaque keystrokes, so neither can weaken, forge, or bypass the correlation.
+`fm-send.sh --decision` mints and records the token before any backend dispatch, and `fm_backend_send_text_submit` receives an already-composed message, so the refusal to answer a request that is not open is identical on every backend.
+The status stream a worker appends is a plain file folded only through that shared library, so a new harness or backend adds no correlation surface and needs no per-adapter change.
+
+Token-era initialization, legacy compatibility, lifecycle retention, and retained-decision notification are pinned by:
+
+```sh
+tests/fm-decision-answer-authority.test.sh
+tests/fm-brief.test.sh
+tests/fm-fleet-snapshot-view.test.sh
+tests/fm-watch-triage.test.sh
+```
+
+Expected compatibility matrix: brief scaffolding gives each new status stream a unique self-describing token-era marker, while an existing unmarked stream remains byte-for-byte legacy-compatible and is never retroactively marked by scaffolding.
+Expected notification matrix: active and terminal lifecycle evidence may retire stale blockers, but cannot clear a folded `needs-decision`; the correlated-resolution requirement applies only to token-era requests, while unmarked legacy requests retain the compatibility behavior above.
+Expected wake matrix: a token-era decision retained past an uncorrelated resolution is queued with its key, stream occurrence, and summary, then later status appends do not reannounce that occurrence.
