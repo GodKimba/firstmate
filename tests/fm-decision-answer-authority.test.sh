@@ -209,9 +209,11 @@ test_token_for_an_earlier_position_cannot_close_a_later_request() {
   fm_decision_record_answer "$(fm_decision_answers_file "$f")" "$token" red-test "$instance" \
     >/dev/null \
     || fail "could not record the early token"
-  printf 'working: still deciding whether to ask\n' >> "$f"
-  printf 'needs-decision [key=red-test]: accept the red test, or keep fixing?\n' >> "$f"
-  printf 'resolved [key=red-test] [ans=%s]: replayed an early token\n' "$token" >> "$f"
+  {
+    printf 'working: still deciding whether to ask\n'
+    printf 'needs-decision [key=red-test]: accept the red test, or keep fixing?\n'
+    printf 'resolved [key=red-test] [ans=%s]: replayed an early token\n' "$token"
+  } >> "$f"
   assert_contains "$(open_set "$f")" "red-test|needs-decision|" \
     "a token minted before the request existed closed it anyway"
   pass "a token for an earlier stream position never closes a later request"

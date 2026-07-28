@@ -827,8 +827,8 @@ EOF
     # will not re-fire, log, and keep blocking without enqueuing. The provably-working
     # check is the only costly one (it may run a bounded no-mistakes call), so the ||
     # ordering evaluates it ONLY for a non-afk, no-captain-verb signal.
-    # shellcheck disable=SC2086  # $files is a space-separated status-path list (ids carry no spaces)
     signal_actionable=0
+    # shellcheck disable=SC2086  # $files is a space-separated status-path list (ids carry no spaces)
     if afk_present || signal_reason_is_actionable $files; then
       signal_actionable=1
     elif [ "$decision_enqueued" -eq 0 ] && ! signal_crew_provably_working $files; then
