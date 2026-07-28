@@ -649,6 +649,17 @@ test_retention_transition_and_conflicting_records_are_distinguished() {
   run_decisions "$home" verify "$id" >/dev/null \
     || fail "the identical retention transition state was rejected"
 
+  printf '\n' >> "$backlog"
+  if run_decisions "$home" verify "$id" > "$home/raw-conflict.out" 2> "$home/raw-conflict.err"; then
+    fail "byte-distinct active and archived records were accepted"
+  fi
+  assert_grep "differs between the active backlog and the archive" "$home/raw-conflict.err" \
+    "a raw duplicate mismatch must name both stores"
+  sed -i.bak '$d' "$backlog"
+  rm -f "$backlog.bak"
+  run_decisions "$home" verify "$id" >/dev/null \
+    || fail "restoring byte-identical records did not restore verification"
+
   # Divergent copies are a genuine conflict this script must not resolve.
   sed -i.bak "s/^- \[x\] $hold - Choose the retention route/- [x] $hold - Choose a different route/" "$backlog"
   rm -f "$backlog.bak"
@@ -669,6 +680,29 @@ test_unusable_archived_records_refuse_and_preserve_cleanup_refusal() {
   pristine="$home/pristine-archive.md"
   cp "$archive" "$pristine"
 
+  cat > "$home/fakebin/tasks-axi" <<'EOF'
+#!/usr/bin/env bash
+if [ "${1:-}" = show ] && [ "${2:-}" = sample-archive-review-decision-route ]; then
+  has_file=0
+  for arg in "$@"; do
+    [ "$arg" = --file ] && has_file=1
+  done
+  if [ "$has_file" -eq 0 ]; then
+    printf 'error: "active backlog could not be parsed"\ncode: VALIDATION_ERROR\n'
+    exit 2
+  fi
+fi
+exec "$REAL_TASKS_AXI" "$@"
+EOF
+  chmod +x "$home/fakebin/tasks-axi"
+  case_name=active-unusable
+  if run_decisions "$home" verify "$id" > "$home/$case_name.out" 2> "$home/$case_name.err"; then
+    fail "an active-store parse failure degraded into absence"
+  fi
+  assert_grep "active decision store could not be read" "$home/$case_name.err" \
+    "an unusable active store must refuse the durable lookup"
+  rm -f "$home/fakebin/tasks-axi"
+
   # A second archived row for the same identity: two candidate decisions.
   case_name=duplicate
   sed -n '/^- \[x\]/p' "$pristine" | sed 's/Choose the retention route/Choose a rival route/' >> "$archive"
@@ -687,7 +721,7 @@ test_unusable_archived_records_refuse_and_preserve_cleanup_refusal() {
 
   # A malformed row under this identity reads as corrupt, never as absent.
   case_name=malformed
-  sed 's/^- \[x\]/- [X]/' "$pristine" > "$archive"
+  sed 's/^- \[x\] /- [x]/' "$pristine" > "$archive"
   if run_decisions "$home" verify "$id" > "$home/$case_name.out" 2> "$home/$case_name.err"; then
     fail "a malformed archived record was accepted"
   fi

@@ -162,8 +162,7 @@ archive_file() {  # prints the archive path, or nothing when this home has none
   [ -z "$backend" ] || [ "$backend" = markdown ] || return 0
   archive=$(toml_value markdown archive)
   if [ -z "$archive" ]; then
-    backlog=$(toml_value markdown path)
-    [ -n "$backlog" ] || backlog=backlog.md
+    backlog=$(backlog_file)
     dir=$(dirname "$backlog")
     if [ "$dir" = . ]; then archive=done-archive.md; else archive="$dir/done-archive.md"; fi
   fi
@@ -173,50 +172,108 @@ archive_file() {  # prints the archive path, or nothing when this home has none
   esac
 }
 
-# Prints the archived record's own lines for <id>, or a `refuse: <reason>` line
-# when the archive holds an ambiguous or unusable record under that identity.
-# Only a column-zero checkbox row is a record, so indented body prose never
-# counts; a mangled row under this identity refuses instead of reading as absent.
-archive_rows() {  # <archive-file> <id>
-  awk -v id="$2" '
-    function is_record(line) { return line ~ /^-[[:space:]]*\[[^]]*\][[:space:]]/ }
-    function record_id(line,   rest) {
+backlog_file() {  # prints the active markdown backlog path
+  local backend backlog
+  backend=$(toml_value '' backend)
+  [ -z "$backend" ] || [ "$backend" = markdown ] || return 0
+  backlog=$(toml_value markdown path)
+  if [ -z "$backlog" ]; then
+    if [ -e "$FM_HOME/backlog.md" ]; then
+      backlog=backlog.md
+    elif [ -e "$FM_HOME/data/backlog.md" ]; then
+      backlog=data/backlog.md
+    else
+      backlog=backlog.md
+    fi
+  fi
+  case "$backlog" in
+    /*) printf '%s\n' "$backlog" ;;
+    *) printf '%s\n' "$FM_HOME/$backlog" ;;
+  esac
+}
+
+record_rows() {  # <store-file> <id> <active|archive>
+  awk -v id="$2" -v store="$3" '
+    function is_checkbox_row(line) {
+      return line ~ /^-[[:space:]]*\[[^]]*\]/
+    }
+    function is_top_row(line) {
+      return line ~ /^-[[:space:]]/ || line ~ /^-\[/ || line ~ /^-\*\*/
+    }
+    function is_candidate(line,   rest, tail) {
+      if (!is_checkbox_row(line)) return 0
       rest = line
       sub(/^-[[:space:]]*\[[^]]*\][[:space:]]*/, "", rest)
-      sub(/[[:space:]].*$/, "", rest)
-      return rest
+      if (substr(rest, 1, length(id)) != id) return 0
+      tail = substr(rest, length(id) + 1)
+      return tail ~ /^[[:space:]]*-[[:space:]]/
+    }
+    function refuse(message) {
+      printf "refuse: %s\n", message
+      refused = 1
+      exit
     }
     {
-      if (is_record($0) && record_id($0) == id) {
-        if (index($0, "- [x] " id " -") == 1) {
+      if (is_candidate($0)) {
+        if (index($0, "- [x] " id " - ") == 1) {
           starts++
           capture = 1
           block = block $0 "\n"
           next
         }
-        if (index($0, "- [ ] " id " -") == 1) {
-          printf "refuse: archived record %s is not a completed record\n", id
-          exit 0
+        if (index($0, "- [ ] " id " - ") == 1) {
+          if (store == "archive") {
+            refuse("archived record " id " is not a completed record")
+          }
+          starts++
+          capture = 1
+          block = block $0 "\n"
+          next
         }
-        printf "refuse: archived record %s is not in canonical form\n", id
-        exit 0
+        refuse(store " record " id " is not in canonical form")
       }
-      if (capture && (is_record($0) || $0 ~ /^##/)) { capture = 0 }
+      if (capture && (is_top_row($0) || $0 ~ /^##/)) { capture = 0 }
       if (capture) { block = block $0 "\n" }
     }
     END {
-      if (starts > 1) {
-        printf "refuse: archive holds %d conflicting records for %s\n", starts, id
-        exit 0
+      if (!refused && starts > 1) {
+        printf "refuse: %s holds %d conflicting records for %s\n", store, starts, id
       }
-      if (starts == 1) { printf "%s", block }
+      if (!refused && starts == 1) { printf "%s", block }
     }
   ' "$1"
 }
 
-# 0 = found (stdout is the record), 1 = absent, 3 = refused (stdout is why).
-archive_lookup() {  # <id>
-  local id=$1 archive rows tmp show rc=0
+record_source() {  # <store-file> <id> <active|archive> <raw-output>
+  local file=$1 id=$2 store=$3 raw=$4 first
+  record_rows "$file" "$id" "$store" > "$raw" 2>/dev/null || {
+    printf '%s decision store could not be read: %s\n' "$store" "$file"
+    return 3
+  }
+  first=$(sed -n '1p' "$raw")
+  case "$first" in
+    'refuse: '*) printf '%s\n' "${first#refuse: }"; return 3 ;;
+  esac
+  [ -s "$raw" ] || return 1
+}
+
+active_record() {  # <id> <raw-output>
+  local id=$1 raw=$2 backlog
+  backlog=$(backlog_file)
+  [ -n "$backlog" ] || {
+    printf 'active decision store could not be located for %s\n' "$id"
+    return 3
+  }
+  [ -e "$backlog" ] || return 1
+  if [ ! -f "$backlog" ]; then
+    printf 'active decision store is not a regular file: %s\n' "$backlog"
+    return 3
+  fi
+  record_source "$backlog" "$id" active "$raw"
+}
+
+archive_record() {  # <id> <raw-output>
+  local id=$1 raw=$2 archive
   archive=$(archive_file)
   [ -n "$archive" ] || return 1
   if [ -L "$archive" ]; then
@@ -228,21 +285,13 @@ archive_lookup() {  # <id>
     printf 'archived decision store is not a regular file: %s\n' "$archive"
     return 3
   fi
-  rows=$(archive_rows "$archive" "$id") || {
-    printf 'archived decision store could not be read: %s\n' "$archive"
-    return 3
-  }
-  case "$rows" in
-    'refuse: '*) printf '%s\n' "${rows#refuse: }"; return 3 ;;
-    '') return 1 ;;
-  esac
-  tmp=$(umask 077; mktemp "${TMPDIR:-/tmp}/fm-decision-archive.XXXXXX") || {
-    printf 'could not stage the archived record for %s\n' "$id"
-    return 3
-  }
-  { printf '## In flight\n\n## Queued\n\n## Done\n'; printf '%s' "$rows"; } > "$tmp"
-  show=$(tasks_axi show "$id" --file "$tmp" --full 2>/dev/null) || rc=$?
-  rm -f "$tmp"
+  record_source "$archive" "$id" archive "$raw"
+}
+
+archive_show() {  # <id> <raw-record> <projected-file>
+  local id=$1 raw=$2 projected=$3 show rc=0
+  { printf '## In flight\n\n## Queued\n\n## Done\n'; awk '{ print }' "$raw"; } > "$projected"
+  show=$(tasks_axi show "$id" --file "$projected" --full 2>&1) || rc=$?
   if [ "$rc" -ne 0 ]; then
     printf 'archived record %s could not be parsed by tasks-axi\n' "$id"
     return 3
@@ -250,26 +299,89 @@ archive_lookup() {  # <id>
   printf '%s\n' "$show"
 }
 
+active_lookup() {  # <id>
+  local id=$1 show rc=0
+  show=$(tasks_axi show "$id" --full 2>&1) || rc=$?
+  if [ "$rc" -eq 0 ]; then
+    printf '%s\n' "$show"
+    return 0
+  fi
+  if printf '%s\n' "$show" | grep -Fx 'code: NOT_FOUND' >/dev/null; then
+    return 1
+  fi
+  printf 'active decision store could not be read for %s\n' "$id"
+  return 3
+}
+
 # The one identity lookup for this script: a decision is durable whether it is
 # still in the active backlog or has already been archived by retention.
 # 0 = found (stdout is the record), 1 = absent, 3 = refused (stdout is why).
 lookup_task() {  # <id>
-  local id=$1 active archived active_rc=0 archived_rc=0
-  active=$(tasks_axi show "$id" --full 2>/dev/null) || active_rc=$?
-  archived=$(archive_lookup "$id") || archived_rc=$?
-  [ "$archived_rc" -ne 3 ] || { printf '%s\n' "$archived"; return 3; }
-  if [ "$active_rc" -eq 0 ] && [ "$archived_rc" -eq 0 ]; then
-    # A prune writes the archive before rewriting the backlog, so identical
-    # copies are the one legitimate transition state. Anything else is a
-    # conflict this script must not resolve on its own.
-    [ "$active" = "$archived" ] \
-      || { printf 'durable record %s differs between the active backlog and the archive\n' "$id"; return 3; }
-    printf '%s\n' "$active"
-    return 0
+  local id=$1 active archived active_message archive_message tmp active_raw archived_raw projected
+  local active_rc=0 archived_record_rc=0 archived_rc=1 active_record_rc=1 result_rc=1 result=
+  tmp=$(umask 077; mktemp -d "${TMPDIR:-/tmp}/fm-decision-lookup.XXXXXX") || {
+    printf 'could not stage durable record lookup for %s\n' "$id"
+    return 3
+  }
+  active_raw="$tmp/active"
+  archived_raw="$tmp/archive"
+  projected="$tmp/projected"
+  active=$(active_lookup "$id") || active_rc=$?
+  archive_message=$(archive_record "$id" "$archived_raw") || archived_record_rc=$?
+
+  if [ "$active_rc" -eq 1 ]; then
+    active_record_rc=0
+    active_message=$(active_record "$id" "$active_raw") || active_record_rc=$?
+    if [ "$active_record_rc" -eq 0 ]; then
+      active="active record $id could not be parsed by tasks-axi"
+      active_rc=3
+    elif [ "$active_record_rc" -eq 3 ]; then
+      active=$active_message
+      active_rc=3
+    fi
+  elif [ "$active_rc" -eq 0 ] && [ "$archived_record_rc" -eq 0 ]; then
+    active_record_rc=0
+    active_message=$(active_record "$id" "$active_raw") || active_record_rc=$?
+    if [ "$active_record_rc" -ne 0 ]; then
+      if [ "$active_record_rc" -eq 3 ]; then
+        active=$active_message
+      else
+        active="active record $id could not be located for duplicate comparison"
+      fi
+      active_rc=3
+    elif ! cmp -s "$active_raw" "$archived_raw"; then
+      active="durable record $id differs between the active backlog and the archive"
+      active_rc=3
+    fi
   fi
-  [ "$active_rc" -ne 0 ] || { printf '%s\n' "$active"; return 0; }
-  [ "$archived_rc" -ne 0 ] || { printf '%s\n' "$archived"; return 0; }
-  return 1
+
+  if [ "$active_rc" -eq 3 ]; then
+    result=$active
+    result_rc=3
+  elif [ "$archived_record_rc" -eq 3 ]; then
+    result=$archive_message
+    result_rc=3
+  else
+    if [ "$archived_record_rc" -eq 0 ]; then
+      archived_rc=0
+      archived=$(archive_show "$id" "$archived_raw" "$projected") || archived_rc=$?
+    fi
+    if [ "$archived_rc" -eq 3 ]; then
+      result=$archived
+      result_rc=3
+    elif [ "$active_rc" -eq 0 ]; then
+      result=$active
+      result_rc=0
+    elif [ "$archived_rc" -eq 0 ]; then
+      result=$archived
+      result_rc=0
+    fi
+  fi
+
+  rm -f "$active_raw" "$archived_raw" "$projected"
+  rmdir "$tmp"
+  [ "$result_rc" -eq 1 ] || printf '%s\n' "$result"
+  return "$result_rc"
 }
 
 show_field() {  # <show-output> <field>
