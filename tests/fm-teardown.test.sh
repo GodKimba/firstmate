@@ -39,17 +39,20 @@
 #   (p) fm-pr-check when local HEAD lags                        -> record remote PR head
 #   (q) no-mistakes + NO pr= recorded, PR discovered by branch  -> ALLOW  (yolo/no-CI merge)
 #   (r) no-mistakes + open PR with auto-merge enabled           -> REFUSE (not landed)
+#   (s) landed + ignored files, managed and generic routes      -> ALLOW  (ignore fix)
+#   (t) landed + untracked non-ignored file, both routes         -> REFUSE (safety)
+#   (u) generic helper + late untracked non-ignored file         -> REFUSE (safety)
 #
 # Also covers backlog teardown-lock-race: a git index.lock left in the worktree by a
 # killed crew process (bin/fm-teardown.sh's teardown_treehouse_return).
-#   (s) provably-stale index.lock (old mtime, no live holder) -> lock removed, ALLOW
-#   (t) index.lock with a live holder, any age                -> lock kept, REFUSE
-#   (u) lsof error while checking index.lock                  -> lock kept, REFUSE
-#   (v) dirty worktree after stale lock cleanup               -> lock removed, REFUSE
-#   (w) non-linked repo index.lock                            -> lock removed, ALLOW
-#   (x) index.lock mtime read failure                         -> lock kept, REFUSE
-#   (y) transient lock cleared after first failed return      -> retry ALLOW
-#   (z) persistent lock (never clears, not provably stale)    -> REFUSE loudly
+#   (v) provably-stale index.lock (old mtime, no live holder) -> lock removed, ALLOW
+#   (w) index.lock with a live holder, any age                -> lock kept, REFUSE
+#   (x) lsof error while checking index.lock                  -> lock kept, REFUSE
+#   (y) dirty worktree after stale lock cleanup               -> lock removed, REFUSE
+#   (z) non-linked repo index.lock                            -> lock removed, ALLOW
+#   (aa) index.lock mtime read failure                        -> lock kept, REFUSE
+#   (ab) transient lock cleared after first failed return     -> retry ALLOW
+#   (ac) persistent lock (never clears, not provably stale)   -> REFUSE loudly
 set -u
 
 # shellcheck source=tests/lib.sh disable=SC1091
@@ -57,6 +60,7 @@ set -u
 fm_git_identity fmtest fmtest@example.invalid
 
 TEARDOWN="$ROOT/bin/fm-teardown.sh"
+GENERIC_RETURN="$ROOT/bin/fm-treehouse-generic-return.sh"
 PROMOTE="$ROOT/bin/fm-promote.sh"
 PR_CHECK="$ROOT/bin/fm-pr-check.sh"
 TMP_ROOT=$(fm_test_tmproot fm-teardown-tests)
@@ -1001,6 +1005,129 @@ test_content_fallback_refreshes_stale_origin_ref() {
   expect_code 0 "$rc" "content-stale-ref: teardown should use the freshly fetched default branch"
   ! grep -q REFUSED "$case_dir/stderr" || fail "content-stale-ref: teardown printed a REFUSED line"
   pass "content fallback refreshes origin default before comparing trees"
+}
+
+test_ignored_infrastructure_from_standard_excludes_allows() {
+  local case_dir rc route source wt
+  for route in managed generic; do
+    for source in gitignore info-exclude global-excludes; do
+      case_dir=$(make_case "ignored-$route-$source")
+      write_meta "$case_dir" no-mistakes ship
+      wt_commit "$case_dir" "landed ignored-infrastructure work"
+      git -C "$case_dir/wt" push -q origin fm/task-x1
+      git -C "$case_dir/project" fetch -q origin
+      [ "$route" != generic ] || configure_generic_pool_case "$case_dir"
+      wt=$(grep '^worktree=' "$case_dir/state/task-x1.meta" | cut -d= -f2-)
+
+      case "$source" in
+        gitignore)
+          printf '%s\n' '.env' '.eslintcache' 'node_modules/' > "$wt/.gitignore"
+          git -C "$wt" add .gitignore
+          git -C "$wt" -c user.email=t@t -c user.name=t commit -q -m 'ignore runtime infrastructure'
+          git -C "$wt" push -q origin fm/task-x1
+          git -C "$case_dir/project" fetch -q origin
+          ;;
+        info-exclude)
+          printf '%s\n' '.env' '.eslintcache' 'node_modules/' >> "$case_dir/project/.git/info/exclude"
+          ;;
+        global-excludes)
+          printf '%s\n' '.env' '.eslintcache' 'node_modules/' > "$case_dir/global-excludes"
+          git -C "$wt" config core.excludesFile "$case_dir/global-excludes"
+          ;;
+      esac
+      printf '%s\n' 'runtime secret' > "$wt/.env"
+      printf '%s\n' 'cache' > "$wt/.eslintcache"
+      mkdir -p "$wt/node_modules/package"
+      printf '%s\n' 'dependency' > "$wt/node_modules/package/index.js"
+
+      [ -z "$(git -C "$wt" status --porcelain)" ] \
+        || fail "ignored-$route-$source: fixture is not clean under ordinary git status"
+      [ -z "$(git -C "$wt" ls-files --others --exclude-standard)" ] \
+        || fail "ignored-$route-$source: standard excludes did not hide fixture infrastructure"
+      [ -n "$(git -C "$wt" ls-files --others)" ] \
+        || fail "ignored-$route-$source: counterfactual did not expose ignored files without exclude handling"
+
+      set +e
+      run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+      rc=$?
+      set -e
+
+      expect_code 0 "$rc" \
+        "ignored-$route-$source: standard Git excludes should not make a clean worktree dirty"
+      ! grep -q REFUSED "$case_dir/stderr" \
+        || fail "ignored-$route-$source: teardown printed a REFUSED line"
+      if [ "$route" = generic ]; then
+        assert_grep "generic worktree removed: $wt" "$case_dir/stdout" \
+          "ignored-$route-$source: generic provider helper did not complete"
+      fi
+    done
+  done
+  pass "ignored runtime infrastructure from every standard Git exclude source does not block either provider route"
+}
+
+test_untracked_non_ignored_file_refuses() {
+  local case_dir rc route wt
+  for route in managed generic; do
+    case_dir=$(make_case "untracked-non-ignored-$route")
+    write_meta "$case_dir" no-mistakes ship
+    wt_commit "$case_dir" "landed before untracked file"
+    git -C "$case_dir/wt" push -q origin fm/task-x1
+    git -C "$case_dir/project" fetch -q origin
+    [ "$route" != generic ] || configure_generic_pool_case "$case_dir"
+    wt=$(grep '^worktree=' "$case_dir/state/task-x1.meta" | cut -d= -f2-)
+    printf '%s\n' 'uncommitted work' > "$wt/notes.txt"
+
+    [ "$(git -C "$wt" ls-files --others --exclude-standard)" = notes.txt ] \
+      || fail "untracked-non-ignored-$route: fixture file was unexpectedly excluded"
+
+    set +e
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+    rc=$?
+    set -e
+
+    expect_code 1 "$rc" \
+      "untracked-non-ignored-$route: teardown must refuse an untracked non-ignored file"
+    assert_grep "uncommitted changes" "$case_dir/stderr" \
+      "untracked-non-ignored-$route: refusal did not cite uncommitted changes"
+    [ -f "$wt/notes.txt" ] \
+      || fail "untracked-non-ignored-$route: refusal discarded the file"
+  done
+  pass "untracked non-ignored files remain protected on both provider routes"
+}
+
+test_generic_helper_independently_refuses_untracked_non_ignored_file() {
+  local case_dir head pool rc state wt
+  case_dir=$(make_case generic-helper-untracked)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit "$case_dir" "landed before generic helper refusal"
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  git -C "$case_dir/project" fetch -q origin
+  configure_generic_pool_case "$case_dir"
+  wt=$(grep '^worktree=' "$case_dir/state/task-x1.meta" | cut -d= -f2-)
+  pool=$(dirname "$(dirname "$wt")")
+  state="$pool/treehouse-state.json"
+  head=$(git -C "$wt" rev-parse HEAD)
+  printf '%s\n' 'late uncommitted work' > "$wt/notes.txt"
+
+  set +e
+  FM_TREEHOUSE_RETURN_AUTHORIZED=1 \
+    "$GENERIC_RETURN" "$case_dir/project" "$wt" "$pool" fm/task-x1 \
+      "$head" landed "$case_dir/state/task-x1.meta" \
+      > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" \
+    "generic-helper-untracked: helper must refuse an untracked non-ignored file"
+  assert_grep "generic Treehouse worktree is not clean" "$case_dir/stderr" \
+    "generic-helper-untracked: refusal did not cite the independent cleanliness check"
+  [ -f "$wt/notes.txt" ] \
+    || fail "generic-helper-untracked: refusal discarded the file"
+  [ "$(jq --arg path "$wt" '[.worktrees[]? | select(.path == $path)] | length' "$state")" = 1 ] \
+    || fail "generic-helper-untracked: refusal changed provider state"
+  git -C "$case_dir/project" show-ref --verify --quiet refs/heads/fm/task-x1 \
+    || fail "generic-helper-untracked: refusal deleted the acquisition branch"
+  pass "generic provider independently preserves untracked non-ignored files"
 }
 
 test_dirty_worktree_refuses() {
@@ -2174,6 +2301,9 @@ test_pr_check_does_not_refresh_stale_pr_head
 test_pr_check_records_remote_head_when_local_lags
 test_content_in_default_fallback_allows
 test_content_fallback_refreshes_stale_origin_ref
+test_ignored_infrastructure_from_standard_excludes_allows
+test_untracked_non_ignored_file_refuses
+test_generic_helper_independently_refuses_untracked_non_ignored_file
 test_dirty_worktree_refuses
 test_provider_refusal_preserves_task_records
 test_late_dirty_mutation_after_quiesce_refuses
