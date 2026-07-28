@@ -435,6 +435,6 @@ tests/fm-fleet-snapshot-view.test.sh
 tests/fm-watch-triage.test.sh
 ```
 
-Expected compatibility matrix: brief scaffolding gives each new status stream a unique self-describing token-era marker, while an existing unmarked stream remains byte-for-byte legacy-compatible until `fm-decision-token-cutover-migration` marks it.
+Expected compatibility matrix: brief scaffolding gives each new status stream a unique self-describing token-era marker, while an existing unmarked stream remains byte-for-byte legacy-compatible and is never retroactively marked by scaffolding.
 Expected notification matrix: active and terminal lifecycle evidence may retire stale blockers, but cannot clear a folded `needs-decision`; the correlated-resolution requirement applies only to token-era requests, while unmarked legacy requests retain the compatibility behavior above.
 Expected wake matrix: a token-era decision retained past an uncorrelated resolution is queued with its key, stream occurrence, and summary, then later status appends do not reannounce that occurrence.
