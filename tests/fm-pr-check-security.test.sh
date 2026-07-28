@@ -73,10 +73,29 @@ case " $* " in
     ;;
 esac
 SH
-  cat > "$fakebin/gh-axi" <<'SH'
+cat > "$fakebin/gh-axi" <<'SH'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$FM_TEST_GH_AXI_LOG"
-exit "${FM_TEST_GH_AXI_RC:-0}"
+if [ "${1:-}" = --version ]; then
+  printf '%s\n' 'gh-axi 0.1.28'
+  exit 0
+fi
+if [ "${1:-}" = api ] && [ "${2:-}" = --help ]; then
+  printf '%s\n' 'usage: gh-axi api [<method>] <path> [flags]' \
+    '  --field <key=value>, --header <key:value>, --paginate, --jq <expression>, --template <format>'
+  exit 0
+fi
+[ "${FM_TEST_GH_AXI_RC:-0}" -eq 0 ] || exit "$FM_TEST_GH_AXI_RC"
+case "${1:-} ${2:-}" in
+  "api /repos/"*)
+    printf '%s\n' \
+      'auto_merge_enabled: false' \
+      'merged: true' \
+      'merged_at: "2026-07-27T21:58:23Z"' \
+      'state: closed'
+    ;;
+esac
+exit 0
 SH
   # Plain glab, reproducing the real CLI's contract: its field output on stdout
   # and exit 0 on success, and a non-zero exit with no stdout on any failure.
@@ -550,6 +569,8 @@ test_valid_recording_and_merge_derivation() {
     >/dev/null 2>/dev/null || fail "valid merge wrapper failed"
   grep -qxF 'pr merge 37 --repo my-org/repo_name.with-dots --merge' "$dir/gh-axi.log" \
     || fail "merge wrapper did not preserve repository derivation and method"
+  grep -qxF "api /repos/my-org/repo_name.with-dots/pulls/37 --jq {state: .state, merged: .merged, merged_at: .merged_at, auto_merge_enabled: (.auto_merge != null)}" "$dir/gh-axi.log" \
+    || fail "merge wrapper did not verify the current GitHub state"
   set +e
   FM_TEST_GH_STATE=MERGED run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/merged-watch.out" 2> "$dir/merged-watch.err"
   rc=$?

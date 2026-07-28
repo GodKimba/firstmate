@@ -6,14 +6,19 @@
 # fm-pr-check.sh trigger never fires.
 #
 # Matrix:
-#   (a) merge records pr= and pr_head= before merging, and merges
-#   (b) merge is refused when gh-axi pr merge itself fails (no silent success)
+#   (a) merge records pr= and pr_head= before merging, and verifies the merge
+#   (b) merge command failures are verified and only confirmed merges succeed
 #   (c) extra gh-axi pr merge args are forwarded after number and --repo
 #   (d) merge is refused before gh-axi when task meta is missing
 #   (e) PR URL is parsed to number + --repo for gh-axi (defaults to --squash)
 #   (f) malformed PR URL fails fast without calling gh-axi
 #   (g) explicit merge method is not overridden by the default --squash
-#   (h) repo override args fail fast because the repo comes from the URL
+#   (h) repository and hostname overrides fail fast because the URL owns both
+#   (i) newly enabled and already queued auto-merges stay open and monitored
+#   (j) an auto request that merges immediately is reported as actually merged
+#   (k) unreadable or contradictory post-command GitHub state refuses safely
+#   (l) ambient GH_HOST cannot redirect mutation or verification
+#   (m) stale-session gh-axi incompatibility refuses before mutation
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -42,15 +47,30 @@ make_case() {
   printf '%s\n' "$case_dir"
 }
 
-# gh-axi mock recording every invocation to a log file, and gh mock answering
-# headRefOid for fm-pr-check.sh's pr_head lookup. Args: case_dir head_sha
+# gh-axi mock recording every invocation, reproducing gh-axi 0.1.28's
+# misleading `merged` success block, and returning a deterministic authoritative
+# state fixture. The plain gh mock answers fm-pr-check.sh's headRefOid lookup.
+# Args: case_dir head_sha [state [merged [merged_at [auto_merge_enabled]]]]
 add_gh_mocks() {
-  local case_dir=$1 head=$2
-  cat > "$case_dir/fakebin/gh-axi" <<'SH'
+  local case_dir=$1 head=$2 state=${3:-closed} merged=${4:-true}
+  local merged_at=${5:-\"2026-07-27T21:58:23Z\"} auto_merge=${6:-false}
+  printf '%s\n' \
+    "auto_merge_enabled: $auto_merge" \
+    "merged: $merged" \
+    "merged_at: $merged_at" \
+    "state: $state" > "$case_dir/pr-state.out"
+  cat > "$case_dir/fakebin/gh-axi.behavior" <<'SH'
 #!/usr/bin/env bash
-printf '%s\n' "$*" >> "$FM_TEST_GH_AXI_LOG"
+case "${1:-} ${2:-}" in
+  "pr merge")
+    printf '%s\n' 'merged:' '  number: 9' '  status: ok' '  method: squash'
+    exit 0
+    ;;
+  "api /repos/"*) cat "$FM_TEST_PR_STATE_FILE" ; exit 0 ;;
+esac
 exit 0
 SH
+  add_gh_axi_compatibility_wrapper "$case_dir"
   cat > "$case_dir/fakebin/gh" <<SH
 #!/usr/bin/env bash
 case "\${1:-} \${2:-}" in
@@ -62,26 +82,89 @@ case "\${1:-} \${2:-}" in
 esac
 exit 0
 SH
-  chmod +x "$case_dir/fakebin/gh-axi" "$case_dir/fakebin/gh"
+  chmod +x "$case_dir/fakebin/gh" "$case_dir/fakebin/gh-axi.behavior"
+}
+
+add_gh_axi_compatibility_wrapper() {
+  local case_dir=$1
+  cat > "$case_dir/fakebin/gh-axi" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FM_TEST_GH_AXI_LOG"
+if [ "${1:-}" = --version ]; then
+  printf '%s\n' "${FM_TEST_GH_AXI_VERSION:-gh-axi 0.1.28}"
+  exit 0
+fi
+if [ "${1:-}" = api ] && [ "${2:-}" = --help ]; then
+  if [ "${FM_TEST_GH_AXI_API_JQ:-1}" = 1 ]; then
+    printf '%s\n' 'usage: gh-axi api [<method>] <path> [flags]' \
+      '  --field <key=value>, --header <key:value>, --paginate, --jq <expression>, --template <format>'
+  else
+    printf '%s\n' 'usage: gh-axi api [<method>] <path> [flags]' \
+      '  --field <key=value>, --header <key:value>, --paginate'
+  fi
+  exit 0
+fi
+exec "${0}.behavior" "$@"
+SH
+  chmod +x "$case_dir/fakebin/gh-axi"
+}
+
+add_gh_mocks_state_unreadable() {
+  local case_dir=$1
+  add_gh_mocks "$case_dir" aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  cat > "$case_dir/fakebin/gh-axi.behavior" <<'SH'
+#!/usr/bin/env bash
+case "${1:-} ${2:-}" in
+  "pr merge") printf '%s\n' 'merged:' '  status: ok' ; exit 0 ;;
+  "api /repos/"*) echo 'error: API unavailable' >&2 ; exit 1 ;;
+esac
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/gh-axi.behavior"
 }
 
 # gh-axi mock that fails the merge call but succeeds everything else, so a
 # real merge failure is distinguishable from the recording step.
 add_gh_mocks_merge_fails() {
-  local case_dir=$1
-  cat > "$case_dir/fakebin/gh-axi" <<'SH'
+  local case_dir=$1 state=${2:-open} merged=${3:-false}
+  local merged_at=${4:-null} auto_merge=${5:-false}
+  add_gh_mocks "$case_dir" aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+    "$state" "$merged" "$merged_at" "$auto_merge"
+  cat > "$case_dir/fakebin/gh-axi.behavior" <<'SH'
 #!/usr/bin/env bash
-printf '%s\n' "$*" >> "$FM_TEST_GH_AXI_LOG"
 case "${1:-} ${2:-}" in
   "pr merge") echo "error: pr merge failed" >&2 ; exit 1 ;;
+  "api /repos/"*) cat "$FM_TEST_PR_STATE_FILE" ; exit 0 ;;
 esac
 exit 0
 SH
-  cat > "$case_dir/fakebin/gh" <<'SH'
+  chmod +x "$case_dir/fakebin/gh-axi.behavior"
+}
+
+add_gh_mocks_host_sensitive() {
+  local case_dir=$1
+  add_gh_mocks "$case_dir" aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa open false null true
+  cat > "$case_dir/fakebin/gh-axi.behavior" <<'SH'
 #!/usr/bin/env bash
+printf '%s\n' "${GH_HOST:-}" >> "$FM_TEST_GH_HOST_LOG"
+case "${1:-} ${2:-}" in
+  "pr merge") exit 0 ;;
+  "api /repos/"*)
+    if [ "${GH_HOST:-}" = github.com ]; then
+      cat "$FM_TEST_PR_STATE_FILE"
+    else
+      printf '%s\n' \
+        'auto_merge_enabled: false' \
+        'merged: true' \
+        'merged_at: "2026-07-27T21:58:23Z"' \
+        'state: closed'
+    fi
+    exit 0
+    ;;
+esac
 exit 0
 SH
-  chmod +x "$case_dir/fakebin/gh-axi" "$case_dir/fakebin/gh"
+  chmod +x "$case_dir/fakebin/gh-axi.behavior"
 }
 
 run_pr_merge() {
@@ -89,6 +172,10 @@ run_pr_merge() {
   FM_ROOT_OVERRIDE="$ROOT" \
   FM_STATE_OVERRIDE="$case_dir/state" \
   FM_TEST_GH_AXI_LOG="$case_dir/gh-axi.log" \
+  FM_TEST_GH_HOST_LOG="$case_dir/gh-host.log" \
+  FM_TEST_PR_STATE_FILE="$case_dir/pr-state.out" \
+  FM_TEST_GH_AXI_VERSION="${FM_TEST_GH_AXI_VERSION:-gh-axi 0.1.28}" \
+  FM_TEST_GH_AXI_API_JQ="${FM_TEST_GH_AXI_API_JQ:-1}" \
   PATH="$case_dir/fakebin:$PATH" \
     "$PR_MERGE" "$@"
   rc=$?
@@ -119,14 +206,20 @@ test_records_pr_and_head_before_merging() {
     "records-before-merge: pr_head= was not recorded"
   grep -qxF 'pr merge 9 --repo example/repo --squash' "$case_dir/gh-axi.log" \
     || fail "records-before-merge: gh-axi pr merge was not invoked with number, --repo, and default --squash"
-  pass "fm-pr-merge records pr= and pr_head= before invoking gh-axi pr merge"
+  grep -qxF "api /repos/example/repo/pulls/9 --jq {state: .state, merged: .merged, merged_at: .merged_at, auto_merge_enabled: (.auto_merge != null)}" "$case_dir/gh-axi.log" \
+    || fail "records-before-merge: current GitHub state was not read after the merge command"
+  assert_grep 'merged: https://github.com/example/repo/pull/9' "$case_dir/stdout" \
+    "records-before-merge: verified actual merge was not reported"
+  assert_no_grep '^merged:$' "$case_dir/stdout" \
+    "records-before-merge: human-oriented gh-axi merge label leaked through"
+  pass "fm-pr-merge records metadata and reports merged only after a live GitHub state read"
 }
 
 test_merge_failure_propagates_after_recording() {
   local case_dir rc
   case_dir=$(make_case merge-fails)
   mkdir -p "$case_dir/wt"
-  add_gh_mocks_merge_fails "$case_dir"
+  add_gh_mocks_merge_fails "$case_dir" open false null true
   : > "$case_dir/gh-axi.log"
 
   set +e
@@ -138,7 +231,33 @@ test_merge_failure_propagates_after_recording() {
   expect_code 1 "$rc" "merge-fails: fm-pr-merge should propagate the gh-axi merge failure"
   assert_grep 'pr=https://github.com/example/repo/pull/13' "$case_dir/state/task-x1.meta" \
     "merge-fails: pr= should already be recorded even though the merge itself failed"
-  pass "fm-pr-merge propagates a real merge failure without silently succeeding"
+  grep -qxF "api /repos/example/repo/pulls/13 --jq {state: .state, merged: .merged, merged_at: .merged_at, auto_merge_enabled: (.auto_merge != null)}" "$case_dir/gh-axi.log" \
+    || fail "merge-fails: current GitHub state was not read after the failed merge command"
+  assert_grep 'merge command failed and the PR was not verified as merged' "$case_dir/stderr" \
+    "merge-fails: unconfirmed command failure was not preserved"
+  assert_no_grep 'auto-merge enabled:' "$case_dir/stdout" \
+    "merge-fails: open auto-merge state overrode the command failure"
+  pass "fm-pr-merge verifies and preserves an unconfirmed merge command failure"
+}
+
+test_post_merge_command_failure_uses_confirmed_state() {
+  local case_dir
+  case_dir=$(make_case post-merge-command-failure)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks_merge_fails "$case_dir" closed true '"2026-07-27T21:58:23Z"' false
+  : > "$case_dir/gh-axi.log"
+
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/14 -- --delete-branch \
+    > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "post-merge-command-failure: confirmed merge did not override the command failure"
+
+  grep -qxF 'pr merge 14 --repo example/repo --squash --delete-branch' "$case_dir/gh-axi.log" \
+    || fail "post-merge-command-failure: delete-branch argument was not forwarded"
+  grep -qxF "api /repos/example/repo/pulls/14 --jq {state: .state, merged: .merged, merged_at: .merged_at, auto_merge_enabled: (.auto_merge != null)}" "$case_dir/gh-axi.log" \
+    || fail "post-merge-command-failure: current GitHub state was not read after the failed command"
+  assert_grep 'merged: https://github.com/example/repo/pull/14' "$case_dir/stdout" \
+    "post-merge-command-failure: authoritative merged state was not reported"
+  pass "confirmed merged state overrides a post-merge command failure"
 }
 
 test_extra_merge_args_forwarded() {
@@ -256,6 +375,31 @@ test_repo_override_args_refuse_before_recording() {
   pass "fm-pr-merge refuses repo override args before recording state"
 }
 
+test_hostname_override_args_refuse_before_recording() {
+  local case_dir rc
+  case_dir=$(make_case hostname-override)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" 9999999999999999999999999999999999999999
+  : > "$case_dir/gh-axi.log"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/right/repo/pull/6 -- --hostname=ghe.example.com \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "hostname-override: fm-pr-merge should refuse"
+  assert_grep 'extra merge arguments must not override the hostname' "$case_dir/stderr" \
+    "hostname-override: refusal did not explain the hostname override"
+  assert_no_grep 'pr=https://github.com/right/repo/pull/6' "$case_dir/state/task-x1.meta" \
+    "hostname-override: PR URL was recorded before rejecting hostname override"
+  assert_absent "$case_dir/state/task-x1.check.sh" \
+    "hostname-override: hostname override armed a merge poll"
+  [ ! -s "$case_dir/gh-axi.log" ] \
+    || fail "hostname-override: gh-axi pr merge was invoked despite hostname override"
+  pass "fm-pr-merge refuses hostname override args before recording state"
+}
+
 test_explicit_merge_method_not_overridden() {
   local case_dir
   case_dir=$(make_case explicit-merge-method)
@@ -301,13 +445,220 @@ test_parses_pr_url_for_gh_axi() {
   pass "fm-pr-merge parses a GitHub PR URL into gh-axi number and --repo arguments"
 }
 
+test_auto_merge_enabled_waits_and_preserves_monitoring() {
+  local case_dir rc
+  case_dir=$(make_case auto-merge-newly-enabled)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" 1111111111111111111111111111111111111111 open false null true
+  : > "$case_dir/gh-axi.log"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/31 -- --auto \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 3 "$rc" "auto-merge-newly-enabled: queued auto-merge should have a distinct waiting result"
+  assert_grep 'auto-merge enabled: https://github.com/example/repo/pull/31; waiting on checks' "$case_dir/stdout" \
+    "auto-merge-newly-enabled: waiting outcome was not explicit"
+  assert_no_grep 'merged:' "$case_dir/stdout" \
+    "auto-merge-newly-enabled: queued auto-merge was described as merged"
+  assert_grep 'pr=https://github.com/example/repo/pull/31' "$case_dir/state/task-x1.meta" \
+    "auto-merge-newly-enabled: PR metadata was not preserved"
+  [ -f "$case_dir/state/task-x1.check.sh" ] \
+    || fail "auto-merge-newly-enabled: ordinary merge monitoring was not preserved"
+  pass "red open PR with newly enabled auto-merge remains monitored and is not reported as landed"
+}
+
+test_already_queued_auto_merge_waits() {
+  local case_dir rc
+  case_dir=$(make_case auto-merge-already-queued)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" 2222222222222222222222222222222222222222 open false null true
+  : > "$case_dir/gh-axi.log"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/32 -- --auto \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 3 "$rc" "auto-merge-already-queued: idempotent queued auto-merge should still be waiting"
+  assert_grep 'auto-merge enabled: https://github.com/example/repo/pull/32; waiting on checks' "$case_dir/stdout" \
+    "auto-merge-already-queued: queued state was not reported truthfully"
+  [ -f "$case_dir/state/task-x1.check.sh" ] \
+    || fail "auto-merge-already-queued: merge monitoring disappeared"
+  pass "already queued auto-merge remains a waiting outcome"
+}
+
+test_implicit_merge_queue_auto_merge_waits() {
+  local case_dir rc
+  case_dir=$(make_case auto-merge-implicit-queue)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" 5555555555555555555555555555555555555555 open false null true
+  : > "$case_dir/gh-axi.log"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/36 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 3 "$rc" "auto-merge-implicit-queue: implicit queued auto-merge should be waiting"
+  assert_grep 'auto-merge enabled: https://github.com/example/repo/pull/36; waiting on checks' "$case_dir/stdout" \
+    "auto-merge-implicit-queue: authoritative queued state was not reported truthfully"
+  [ -f "$case_dir/state/task-x1.check.sh" ] \
+    || fail "auto-merge-implicit-queue: merge monitoring disappeared"
+  pass "implicit merge-queue auto-merge remains a waiting outcome"
+}
+
+test_ambient_host_cannot_redirect_merge_truth() {
+  local case_dir rc
+  case_dir=$(make_case ambient-host)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks_host_sensitive "$case_dir"
+  : > "$case_dir/gh-axi.log"
+  : > "$case_dir/gh-host.log"
+
+  set +e
+  GH_HOST=ghe.example.com \
+    run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/38 \
+      > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 3 "$rc" "ambient-host: canonical GitHub auto-merge should remain waiting"
+  [ "$(wc -l < "$case_dir/gh-host.log" | tr -d ' ')" -eq 2 ] \
+    || fail "ambient-host: merge and verification did not both record their target host"
+  ! grep -vxF github.com "$case_dir/gh-host.log" >/dev/null \
+    || fail "ambient-host: a gh-axi call inherited the adversarial ambient host"
+  assert_grep 'auto-merge enabled: https://github.com/example/repo/pull/38; waiting on checks' "$case_dir/stdout" \
+    "ambient-host: state from another GitHub host authorized a false merge"
+  pass "canonical PR host binds merge and authoritative verification"
+}
+
+test_auto_merge_that_completes_immediately_is_merged() {
+  local case_dir
+  case_dir=$(make_case auto-merge-immediate)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" 3333333333333333333333333333333333333333
+  : > "$case_dir/gh-axi.log"
+
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/33 -- --auto \
+    > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "auto-merge-immediate: actually merged PR was not accepted"
+
+  assert_grep 'merged: https://github.com/example/repo/pull/33' "$case_dir/stdout" \
+    "auto-merge-immediate: actual merged state was not reported"
+  pass "auto request that GitHub completes immediately is reported as an actual merge"
+}
+
+test_unreadable_state_refuses_after_merge_command() {
+  local case_dir rc
+  case_dir=$(make_case state-unreadable)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks_state_unreadable "$case_dir"
+  : > "$case_dir/gh-axi.log"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/34 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "state-unreadable: API read failure must refuse"
+  assert_no_grep 'merged:' "$case_dir/stdout" \
+    "state-unreadable: unverified merge was reported as merged"
+  assert_grep 'state could not be verified' "$case_dir/stderr" \
+    "state-unreadable: refusal did not explain the verification failure"
+  [ -f "$case_dir/state/task-x1.check.sh" ] \
+    || fail "state-unreadable: merge monitoring was not preserved"
+  pass "unreadable post-command GitHub state preserves work and monitoring"
+}
+
+test_contradictory_state_refuses_after_merge_command() {
+  local case_dir rc
+  case_dir=$(make_case state-contradictory)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" 4444444444444444444444444444444444444444 \
+    open true '"2026-07-27T21:58:23Z"' true
+  : > "$case_dir/gh-axi.log"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/35 -- --auto \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "state-contradictory: contradictory API fields must refuse"
+  assert_no_grep 'merged:' "$case_dir/stdout" \
+    "state-contradictory: contradictory response was described as merged"
+  assert_grep 'contradicted the requested merge outcome' "$case_dir/stderr" \
+    "state-contradictory: refusal did not explain the contradiction"
+  [ -f "$case_dir/state/task-x1.check.sh" ] \
+    || fail "state-contradictory: merge monitoring was not preserved"
+  pass "contradictory post-command GitHub state cannot authorize cleanup"
+}
+
+test_incompatible_stale_session_refuses_before_mutation() {
+  local label version api_jq case_dir rc n
+  n=0
+  while IFS='^' read -r label version api_jq; do
+    [ -n "$label" ] || continue
+    n=$((n + 1))
+    case_dir=$(make_case "incompatible-gh-axi-$n")
+    mkdir -p "$case_dir/wt"
+    add_gh_mocks "$case_dir" aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa open false null true
+    : > "$case_dir/gh-axi.log"
+
+    set +e
+    FM_TEST_GH_AXI_VERSION="$version" FM_TEST_GH_AXI_API_JQ="$api_jq" \
+      run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/36 \
+      > "$case_dir/stdout" 2> "$case_dir/stderr"
+    rc=$?
+    set -e
+
+    expect_code 1 "$rc" "$label: incompatible gh-axi must refuse"
+    assert_grep 'approve the gh-axi update and retry' "$case_dir/stderr" \
+      "$label: refusal did not request explicit update approval"
+    assert_no_grep 'pr merge ' "$case_dir/gh-axi.log" \
+      "$label: incompatible gh-axi reached the PR merge mutation"
+    assert_no_grep 'api /repos/' "$case_dir/gh-axi.log" \
+      "$label: incompatible gh-axi reached authoritative post-mutation verification"
+    assert_grep '--version' "$case_dir/gh-axi.log" \
+      "$label: merge boundary did not recheck the installed version"
+    if [ "$api_jq" = 0 ]; then
+      assert_grep 'api --help' "$case_dir/gh-axi.log" \
+        "$label: merge boundary did not recheck api --jq support"
+    fi
+    assert_grep 'pr=https://github.com/example/repo/pull/36' "$case_dir/state/task-x1.meta" \
+      "$label: safe PR metadata was not preserved before refusal"
+    [ -f "$case_dir/state/task-x1.check.sh" ] \
+      || fail "$label: ordinary merge monitoring was not preserved"
+  done <<'ROWS'
+stale bootstrap evidence cannot authorize gh-axi 0.1.27^gh-axi 0.1.27^1
+minimum gh-axi without api jq cannot mutate a PR^gh-axi 0.1.28^0
+ROWS
+  pass "fm-pr-merge rechecks gh-axi compatibility before every PR mutation"
+}
+
 test_records_pr_and_head_before_merging
 test_merge_failure_propagates_after_recording
+test_post_merge_command_failure_uses_confirmed_state
 test_extra_merge_args_forwarded
 test_missing_meta_refuses_before_merge
 test_malformed_url_refuses_before_merge
 test_rejects_unsafe_url_segments_before_recording
 test_repo_override_args_refuse_before_recording
+test_hostname_override_args_refuse_before_recording
 test_explicit_merge_method_not_overridden
 test_method_equals_merge_method_not_overridden
 test_parses_pr_url_for_gh_axi
+test_auto_merge_enabled_waits_and_preserves_monitoring
+test_already_queued_auto_merge_waits
+test_implicit_merge_queue_auto_merge_waits
+test_ambient_host_cannot_redirect_merge_truth
+test_auto_merge_that_completes_immediately_is_merged
+test_unreadable_state_refuses_after_merge_command
+test_contradictory_state_refuses_after_merge_command
+test_incompatible_stale_session_refuses_before_mutation
