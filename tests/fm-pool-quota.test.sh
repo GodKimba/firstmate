@@ -175,12 +175,12 @@ test_identity_is_masked_everywhere() {
   root=$(fm_test_tmproot fm-pool-quota-mask)
   pool="$root/pool"
   fakebin="$root/fakebin"
-  panel="$root/panel.html"
   make_pool "$pool"
   make_quota_axi "$fakebin" healthy
 
-  out=$(run_pool "$pool" "$fakebin" --accounts --panel --panel-path "$panel") \
+  out=$(run_pool "$pool" "$fakebin" --accounts --panel --json) \
     || fail "masked run failed"
+  panel=$(printf '%s' "$out" | jq -r '.panel')
 
   assert_not_contains "$out" "$EMAIL_A" "a full account address reached stdout"
   assert_not_contains "$out" "$EMAIL_B" "a full account address reached stdout"
@@ -304,13 +304,13 @@ test_credentials_never_reach_argv_stdout_panel_or_cache() {
   root=$(fm_test_tmproot fm-pool-quota-secret)
   pool="$root/pool"
   fakebin="$root/fakebin"
-  panel="$root/panel.html"
   probe="$root/probe.log"
   make_pool "$pool"
   make_quota_axi "$fakebin" healthy "$probe"
 
-  out=$(run_pool "$pool" "$fakebin" --accounts --panel --panel-path "$panel" 2>&1) \
+  out=$(run_pool "$pool" "$fakebin" --accounts --panel --json 2>&1) \
     || fail "secret-containment run failed"
+  panel=$(printf '%s' "$out" | jq -r '.panel')
 
   assert_not_contains "$out" "$TOKEN_MARK" "a credential reached stdout"
   assert_no_grep "$TOKEN_MARK" "$panel" "a credential reached the panel"
@@ -349,7 +349,7 @@ test_private_workspace_is_cleaned_up() {
   [ "$before" = "$after" ] || fail "the private workspace outlived the run"
 
   # An interrupt must clean up too.
-  PATH="$fakebin:$PATH" FM_POOL_QUOTA_DIR="$pool" FM_POOL_QUOTA_NOW="$PINNED_NOW" \
+  PATH="$fakebin:$PATH" FM_HOME="$root/home" FM_POOL_QUOTA_DIR="$pool" FM_POOL_QUOTA_NOW="$PINNED_NOW" \
     "$CMD" --json >/dev/null 2>&1 &
   local pid=$!
   kill -TERM "$pid" 2>/dev/null || true
@@ -388,15 +388,15 @@ test_output_is_deterministic_and_panel_is_regenerated() {
 }
 
 test_panel_is_self_contained_local_and_private() {
-  local root pool fakebin panel body
+  local root pool fakebin panel body out code
   root=$(fm_test_tmproot fm-pool-quota-panel)
   pool="$root/pool"
   fakebin="$root/fakebin"
-  panel="$root/panel.html"
   make_pool "$pool"
   make_quota_axi "$fakebin" healthy
 
-  run_pool "$pool" "$fakebin" --panel --panel-path "$panel" >/dev/null || fail "panel run failed"
+  out=$(run_pool "$pool" "$fakebin" --panel --json) || fail "panel run failed"
+  panel=$(printf '%s' "$out" | jq -r '.panel')
   body=$(cat "$panel")
 
   # No external fetch at view time: this artifact renders credential-derived
@@ -416,6 +416,22 @@ test_panel_is_self_contained_local_and_private() {
 
   [ "$(stat -f '%Lp' "$panel" 2>/dev/null || stat -c '%a' "$panel")" = 600 ] \
     || fail "the panel is not written with private permissions"
+
+  mkdir "$root/outside"
+  rm "$panel"
+  ln -s "$root/outside/escaped.html" "$panel"
+  run_pool "$pool" "$fakebin" --json >/dev/null || fail "panel leaf-symlink replacement failed"
+  [ ! -L "$panel" ] || fail "the canonical panel remained a symlink"
+  assert_absent "$root/outside/escaped.html" "the panel followed a leaf symlink outside its private directory"
+
+  rm "$panel"
+  rmdir "$root/home/.lavish"
+  ln -s "$root/outside" "$root/home/.lavish"
+  code=0
+  out=$(run_pool "$pool" "$fakebin" --json 2>&1) || code=$?
+  expect_code 2 "$code" "a symlinked panel directory must be refused"
+  assert_contains "$out" "panel directory must not be a symlink" "the panel-directory refusal is not explained"
+  assert_absent "$root/outside/pool-quota.html" "the panel escaped through a symlinked private directory"
   pass "the panel is self-contained, complete, and marked private"
 }
 
@@ -458,6 +474,12 @@ test_missing_pool_and_bad_arguments_stop_safely() {
   assert_contains "$out" "unknown argument" "the refusal did not name the bad argument"
 
   code=0
+  out=$(run_pool "$root/absent-pool" "$fakebin" --panel-path "$root/escaped.html" 2>&1) || code=$?
+  expect_code 2 "$code" "the removed panel-path option must be refused"
+  assert_contains "$out" "unknown argument" "the removed panel-path option was not rejected"
+  assert_absent "$root/escaped.html" "the removed panel-path option wrote outside the private panel directory"
+
+  code=0
   out=$(PATH="$fakebin:$PATH" FM_POOL_QUOTA_DIR="$root/absent-pool" \
     FM_POOL_QUOTA_MAX_BYTES=0 "$CMD" --json 2>&1) || code=$?
   expect_code 2 "$code" "a zero size bound must be refused"
@@ -474,7 +496,7 @@ test_the_reader_never_writes_to_the_pool() {
   make_quota_axi "$fakebin" healthy
 
   before=$(cd "$pool" && find . | sort | while read -r f; do printf '%s %s\n' "$f" "$(wc -c < "$f" 2>/dev/null || echo dir)"; done)
-  run_pool "$pool" "$fakebin" --accounts --panel --panel-path "$root/panel.html" >/dev/null \
+  run_pool "$pool" "$fakebin" --accounts --panel >/dev/null \
     || fail "read-only run failed"
   after=$(cd "$pool" && find . | sort | while read -r f; do printf '%s %s\n' "$f" "$(wc -c < "$f" 2>/dev/null || echo dir)"; done)
   [ "$before" = "$after" ] || fail "the pool directory changed during a read"

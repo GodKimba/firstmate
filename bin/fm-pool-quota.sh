@@ -58,7 +58,6 @@
 #   fm-pool-quota.sh --json               the same model as JSON
 #   fm-pool-quota.sh --accounts           also reveal masked account/window rows
 #   fm-pool-quota.sh --panel              explicitly request the default panel
-#   fm-pool-quota.sh --panel-path <file>  write the required panel to this path
 #   fm-pool-quota.sh --help               print this usage
 #
 # Environment:
@@ -80,7 +79,8 @@ POOL_DIR=${FM_POOL_QUOTA_DIR:-$HOME/.cli-proxy-api}
 MAX_BYTES=${FM_POOL_QUOTA_MAX_BYTES:-65536}
 READ_TIMEOUT=${FM_POOL_QUOTA_TIMEOUT:-25}
 QUOTA_BIN=${FM_POOL_QUOTA_BIN:-quota-axi}
-PANEL_DEFAULT="$FM_HOME/.lavish/pool-quota.html"
+PANEL_DIR="$FM_HOME/.lavish"
+PANEL_PATH="$PANEL_DIR/pool-quota.html"
 
 usage() {
   awk '
@@ -101,18 +101,11 @@ validate_bound FM_POOL_QUOTA_TIMEOUT "$READ_TIMEOUT"
 FORMAT=toon
 SHOW_ACCOUNTS=0
 WRITE_PANEL=1
-PANEL_PATH=$PANEL_DEFAULT
 while [ $# -gt 0 ]; do
   case "$1" in
     --json) FORMAT=json ;;
     --accounts) SHOW_ACCOUNTS=1 ;;
     --panel) WRITE_PANEL=1 ;;
-    --panel-path)
-      [ $# -ge 2 ] || die "--panel-path needs a file path"
-      WRITE_PANEL=1
-      PANEL_PATH=$2
-      shift
-      ;;
     -h|--help) usage; exit 0 ;;
     *) die "unknown argument '$1' (see --help)" ;;
   esac
@@ -431,10 +424,19 @@ MODEL=$(jq -sc \
 ' "$RECORDS") || die "cannot assemble the pool model"
 
 # --- local panel -------------------------------------------------------------
-render_panel() {  # <path>
-  local out=$1 dir tmp
-  dir=$(dirname "$out")
-  mkdir -p "$dir" || die "cannot create the panel directory"
+render_panel() {
+  local out=$PANEL_PATH tmp
+  if [ -L "$PANEL_DIR" ]; then
+    die "panel directory must not be a symlink"
+  fi
+  if [ -e "$PANEL_DIR" ] && [ ! -d "$PANEL_DIR" ]; then
+    die "panel directory is not a directory"
+  fi
+  mkdir -p "$PANEL_DIR" || die "cannot create the panel directory"
+  if [ -L "$PANEL_DIR" ] || [ ! -d "$PANEL_DIR" ]; then
+    die "panel directory is not a private local directory"
+  fi
+  chmod 700 "$PANEL_DIR" 2>/dev/null || die "cannot make the panel directory private"
   tmp="$PRIVATE_ROOT/panel.html"
   {
     cat <<'HTML_HEAD'
@@ -560,7 +562,7 @@ HTML_TAIL
 }
 
 if [ "$WRITE_PANEL" -eq 1 ]; then
-  render_panel "$PANEL_PATH"
+  render_panel
   MODEL=$(printf '%s' "$MODEL" | jq -c --arg p "$PANEL_PATH" '. + {panel: $p}') \
     || die "cannot record the panel path"
 fi
