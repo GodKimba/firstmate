@@ -56,6 +56,7 @@ set -u
 fm_git_identity fmtest fmtest@example.invalid
 
 TEARDOWN="$ROOT/bin/fm-teardown.sh"
+PROMOTE="$ROOT/bin/fm-promote.sh"
 PR_CHECK="$ROOT/bin/fm-pr-check.sh"
 TMP_ROOT=$(fm_test_tmproot fm-teardown-tests)
 REAL_GIT_FOR_TEST=$(command -v git)
@@ -1200,7 +1201,7 @@ test_generic_return_removes_exact_worktree_without_force() {
   pass "generic return removes only the exact authorized worktree without forcing Git"
 }
 
-test_missing_private_router_preserves_managed_return() {
+test_explicit_current_main_capability_gap_preserves_managed_return() {
   local case_dir rc
   case_dir=$(make_case staged-managed-route)
   write_meta "$case_dir" no-mistakes ship
@@ -1211,7 +1212,10 @@ test_missing_private_router_preserves_managed_return() {
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "${FM_FAKE_TREEHOUSE_LOG:?}"
 case "${1:-}" in
-  firstmate-return-route) exit 2 ;;
+  firstmate-return-route)
+    printf 'firstmate-return-route: unsupported-current-main'
+    exit 2
+    ;;
   return) exit 0 ;;
 esac
 exit 90
@@ -1223,10 +1227,69 @@ SH
   rc=$?
   set -e
 
-  expect_code 0 "$rc" "staged-managed-route: absent private router must retain managed return"
+  expect_code 0 "$rc" "staged-managed-route: explicit current-main capability gap must retain managed return"
   grep -F 'return --force' "$case_dir/treehouse.log" >/dev/null \
-    || fail "staged-managed-route: missing router activated generic removal"
-  pass "generic removal activates only after an explicit private-router decision"
+    || fail "staged-managed-route: explicit capability gap did not preserve managed return"
+  pass "managed compatibility requires an explicit current-main capability-gap result"
+}
+
+test_router_failures_preserve_generic_worktrees() {
+  local case_dir mode rc wt state
+  for mode in error empty false-capability; do
+    case_dir=$(make_case "route-failure-$mode")
+    write_meta "$case_dir" no-mistakes ship
+    wt_commit "$case_dir" "landed route-failure work"
+    git -C "$case_dir/wt" push -q origin fm/task-x1
+    git -C "$case_dir/project" fetch -q origin
+    configure_generic_pool_case "$case_dir"
+    wt=$(grep '^worktree=' "$case_dir/state/task-x1.meta" | cut -d= -f2-)
+    state=$(cat "$case_dir/config/fake-generic-state")
+    cat > "$case_dir/fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "${FM_FAKE_TREEHOUSE_LOG:?}"
+case "${1:-}" in
+  firstmate-return-route)
+    case "${FM_FAKE_ROUTE_MODE:?}" in
+      error)
+        echo "router transport unavailable" >&2
+        exit 75
+        ;;
+      empty)
+        exit 0
+        ;;
+      false-capability)
+        printf 'firstmate-return-route: unsupported-current-main'
+        exit 1
+        ;;
+    esac
+    ;;
+  return)
+    : > "${FM_FAKE_UNSAFE_RETURN:?}"
+    exit 0
+    ;;
+esac
+exit 90
+SH
+    chmod +x "$case_dir/fakebin/treehouse"
+
+    set +e
+    FM_FAKE_ROUTE_MODE="$mode" FM_FAKE_UNSAFE_RETURN="$case_dir/unsafe-return" \
+      run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+    rc=$?
+    set -e
+
+    expect_code 1 "$rc" "route-failure-$mode: unsafe route result must refuse teardown"
+    [ -d "$wt" ] || fail "route-failure-$mode: generic worktree was removed"
+    [ -f "$case_dir/state/task-x1.meta" ] \
+      || fail "route-failure-$mode: task metadata was cleared"
+    [ ! -e "$case_dir/unsafe-return" ] \
+      || fail "route-failure-$mode: managed return ran after an unproven route"
+    git -C "$case_dir/project" show-ref --verify --quiet refs/heads/fm/task-x1 \
+      || fail "route-failure-$mode: acquisition branch was deleted"
+    [ "$(jq --arg path "$wt" '[.worktrees[]? | select(.path == $path)] | length' "$state")" = 1 ] \
+      || fail "route-failure-$mode: generic provider state changed"
+  done
+  pass "router errors and ambiguous capability results preserve generic worktrees"
 }
 
 test_generic_postcondition_failure_restores_worktree() {
@@ -1330,6 +1393,78 @@ test_legacy_branchless_scout_metadata_remains_supported() {
       || fail "scout-legacy-$style: task metadata remains after successful cleanup"
   done
   pass "legacy branchless scout metadata remains cleanup-compatible"
+}
+
+test_scout_promotion_records_exact_acquisition_branch() {
+  local case_dir style rc
+  for style in branchless absent legacy; do
+    case_dir=$(make_case "scout-promotion-$style")
+    write_meta "$case_dir" no-mistakes scout
+    case "$style" in
+      absent)
+        grep -v '^acquisition_branch=' "$case_dir/state/task-x1.meta" \
+          > "$case_dir/state/task-x1.meta.tmp"
+        mv "$case_dir/state/task-x1.meta.tmp" "$case_dir/state/task-x1.meta"
+        ;;
+      legacy)
+        sed 's|^acquisition_branch=.*|acquisition_branch=fm/task-x1|' \
+          "$case_dir/state/task-x1.meta" > "$case_dir/state/task-x1.meta.tmp"
+        mv "$case_dir/state/task-x1.meta.tmp" "$case_dir/state/task-x1.meta"
+        ;;
+    esac
+    git -C "$case_dir/wt" checkout -q --detach main
+    git -C "$case_dir/project" branch -D -- fm/task-x1 >/dev/null
+
+    FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$case_dir" \
+      FM_STATE_OVERRIDE="$case_dir/state" "$PROMOTE" task-x1 \
+      > "$case_dir/promote.stdout" 2> "$case_dir/promote.stderr" \
+      || fail "scout-promotion-$style: promotion failed"
+
+    [ "$(grep -c '^kind=ship$' "$case_dir/state/task-x1.meta")" = 1 ] \
+      || fail "scout-promotion-$style: ship kind was not recorded exactly once"
+    [ "$(grep -c '^acquisition_branch=fm/task-x1$' "$case_dir/state/task-x1.meta")" = 1 ] \
+      || fail "scout-promotion-$style: exact acquisition branch was not recorded once"
+    [ "$(grep -c '^kind=' "$case_dir/state/task-x1.meta")" = 1 ] \
+      || fail "scout-promotion-$style: ambiguous kind metadata remains"
+    [ "$(grep -c '^acquisition_branch=' "$case_dir/state/task-x1.meta")" = 1 ] \
+      || fail "scout-promotion-$style: ambiguous acquisition metadata remains"
+
+    if [ "$style" = branchless ]; then
+      git -C "$case_dir/wt" checkout -q -b fm/task-x1
+      set +e
+      run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr"
+      rc=$?
+      set -e
+      expect_code 0 "$rc" "scout-promotion-$style: promoted ship teardown should accept its exact branch"
+    fi
+  done
+  pass "scout promotion atomically records exact ship branch provenance"
+}
+
+test_scout_promotion_failure_preserves_metadata() {
+  local case_dir rc
+  case_dir=$(make_case scout-promotion-atomic-failure)
+  write_meta "$case_dir" no-mistakes scout
+  cp "$case_dir/state/task-x1.meta" "$case_dir/state/task-x1.before"
+  cat > "$case_dir/fakebin/mv" <<'SH'
+#!/usr/bin/env bash
+exit 73
+SH
+  chmod +x "$case_dir/fakebin/mv"
+
+  set +e
+  PATH="$case_dir/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$case_dir" \
+    FM_STATE_OVERRIDE="$case_dir/state" "$PROMOTE" task-x1 \
+    > "$case_dir/promote.stdout" 2> "$case_dir/promote.stderr"
+  rc=$?
+  set -e
+
+  expect_code 73 "$rc" "scout-promotion-atomic-failure: publication failure must propagate"
+  cmp -s "$case_dir/state/task-x1.before" "$case_dir/state/task-x1.meta" \
+    || fail "scout-promotion-atomic-failure: partial metadata update escaped"
+  [ -z "$(find "$case_dir/state" -maxdepth 1 -name '.fm-promote.*' -print -quit)" ] \
+    || fail "scout-promotion-atomic-failure: temporary metadata remains"
+  pass "scout promotion publication failure preserves original metadata"
 }
 
 test_generic_return_retries_guarded_branch_cleanup() {
@@ -1947,10 +2082,13 @@ test_only_exact_generated_artifacts_are_exempt
 test_exact_generated_artifact_is_removed_before_final_validation
 test_switched_branch_refuses_without_deleting_acquisition_branch
 test_generic_return_removes_exact_worktree_without_force
-test_missing_private_router_preserves_managed_return
+test_explicit_current_main_capability_gap_preserves_managed_return
+test_router_failures_preserve_generic_worktrees
 test_generic_postcondition_failure_restores_worktree
 test_report_gated_scout_cleanup_remains_supported
 test_legacy_branchless_scout_metadata_remains_supported
+test_scout_promotion_records_exact_acquisition_branch
+test_scout_promotion_failure_preserves_metadata
 test_generic_return_retries_guarded_branch_cleanup
 test_gh_error_and_content_absent_refuses
 test_stale_index_lock_cleared_and_teardown_succeeds

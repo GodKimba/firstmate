@@ -773,17 +773,27 @@ cleanup_stale_lock_for_safety_check() {
 
 treehouse_return_route() {
   local dir=$1 cd_dir=$2 out rc
-  if out=$( ( cd "$cd_dir" && treehouse firstmate-return-route "$dir" ) 2>/dev/null); then
+  if out=$( ( cd "$cd_dir" && treehouse firstmate-return-route "$dir" ) 2>&1); then
     rc=0
   else
     rc=$?
   fi
-  if [ "$rc" -ne 0 ] || [ -z "$out" ]; then
+  if [ "$rc" -eq 2 ] \
+     && [ "$out" = "firstmate-return-route: unsupported-current-main" ]; then
     printf 'managed'
     return 0
   fi
+  if [ "$rc" -ne 0 ]; then
+    echo "REFUSED: treehouse return router failed with exit $rc for $dir." >&2
+    [ -z "$out" ] || printf '%s\n' "$out" >&2
+    return 1
+  fi
   case "$out" in
     generic|managed) printf '%s' "$out" ;;
+    '')
+      echo "REFUSED: treehouse return router reported no route for $dir." >&2
+      return 1
+      ;;
     *)
       echo "REFUSED: treehouse return router reported invalid route '$out' for $dir." >&2
       return 1
