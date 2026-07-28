@@ -73,9 +73,18 @@ case " $* " in
     ;;
 esac
 SH
-  cat > "$fakebin/gh-axi" <<'SH'
+cat > "$fakebin/gh-axi" <<'SH'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$FM_TEST_GH_AXI_LOG"
+if [ "${1:-}" = --version ]; then
+  printf '%s\n' 'gh-axi 0.1.28'
+  exit 0
+fi
+if [ "${1:-}" = api ] && [ "${2:-}" = --help ]; then
+  printf '%s\n' 'usage: gh-axi api [<method>] <path> [flags]' \
+    '  --field <key=value>, --header <key:value>, --paginate, --jq <expression>, --template <format>'
+  exit 0
+fi
 [ "${FM_TEST_GH_AXI_RC:-0}" -eq 0 ] || exit "$FM_TEST_GH_AXI_RC"
 case "${1:-} ${2:-}" in
   "api /repos/"*)

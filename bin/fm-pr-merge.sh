@@ -12,6 +12,7 @@
 # means GitHub verifies the PR is merged; exit 3 means auto-merge is enabled on
 # an open PR and the existing merge poll must keep watching; every unreadable or
 # contradictory result exits 1 and preserves the task work.
+# The shared gh-axi compatibility probe must pass immediately before mutation.
 # Usage: fm-pr-merge.sh <task-id> <pr-url> [-- <extra gh-axi pr merge args>]
 set -eu
 
@@ -22,6 +23,8 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
+# shellcheck source=bin/fm-gh-axi-lib.sh
+. "$SCRIPT_DIR/fm-gh-axi-lib.sh"
 
 if [ "$#" -lt 2 ]; then
   echo "error: invalid PR merge request" >&2
@@ -96,6 +99,11 @@ grep -qxF "pr=$URL" "$META" || {
 merge_args=()
 if ! caller_has_merge_method "$@"; then
   merge_args=(--squash)
+fi
+
+if ! fm_gh_axi_compatible; then
+  echo "error: gh-axi $(fm_gh_axi_min_version) or newer with api --jq support is required before PR merge; approve the gh-axi update and retry" >&2
+  exit 1
 fi
 
 # gh-axi 0.1.28 labels every successful `gh pr merge` invocation as `merged`,

@@ -18,6 +18,7 @@
 #   (j) an auto request that merges immediately is reported as actually merged
 #   (k) unreadable or contradictory post-command GitHub state refuses safely
 #   (l) ambient GH_HOST cannot redirect mutation or verification
+#   (m) stale-session gh-axi incompatibility refuses before mutation
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -58,9 +59,8 @@ add_gh_mocks() {
     "merged: $merged" \
     "merged_at: $merged_at" \
     "state: $state" > "$case_dir/pr-state.out"
-  cat > "$case_dir/fakebin/gh-axi" <<'SH'
+  cat > "$case_dir/fakebin/gh-axi.behavior" <<'SH'
 #!/usr/bin/env bash
-printf '%s\n' "$*" >> "$FM_TEST_GH_AXI_LOG"
 case "${1:-} ${2:-}" in
   "pr merge")
     printf '%s\n' 'merged:' '  number: 9' '  status: ok' '  method: squash'
@@ -70,6 +70,7 @@ case "${1:-} ${2:-}" in
 esac
 exit 0
 SH
+  add_gh_axi_compatibility_wrapper "$case_dir"
   cat > "$case_dir/fakebin/gh" <<SH
 #!/usr/bin/env bash
 case "\${1:-} \${2:-}" in
@@ -81,22 +82,45 @@ case "\${1:-} \${2:-}" in
 esac
 exit 0
 SH
-  chmod +x "$case_dir/fakebin/gh-axi" "$case_dir/fakebin/gh"
+  chmod +x "$case_dir/fakebin/gh" "$case_dir/fakebin/gh-axi.behavior"
+}
+
+add_gh_axi_compatibility_wrapper() {
+  local case_dir=$1
+  cat > "$case_dir/fakebin/gh-axi" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FM_TEST_GH_AXI_LOG"
+if [ "${1:-}" = --version ]; then
+  printf '%s\n' "${FM_TEST_GH_AXI_VERSION:-gh-axi 0.1.28}"
+  exit 0
+fi
+if [ "${1:-}" = api ] && [ "${2:-}" = --help ]; then
+  if [ "${FM_TEST_GH_AXI_API_JQ:-1}" = 1 ]; then
+    printf '%s\n' 'usage: gh-axi api [<method>] <path> [flags]' \
+      '  --field <key=value>, --header <key:value>, --paginate, --jq <expression>, --template <format>'
+  else
+    printf '%s\n' 'usage: gh-axi api [<method>] <path> [flags]' \
+      '  --field <key=value>, --header <key:value>, --paginate'
+  fi
+  exit 0
+fi
+exec "${0}.behavior" "$@"
+SH
+  chmod +x "$case_dir/fakebin/gh-axi"
 }
 
 add_gh_mocks_state_unreadable() {
   local case_dir=$1
   add_gh_mocks "$case_dir" aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
-  cat > "$case_dir/fakebin/gh-axi" <<'SH'
+  cat > "$case_dir/fakebin/gh-axi.behavior" <<'SH'
 #!/usr/bin/env bash
-printf '%s\n' "$*" >> "$FM_TEST_GH_AXI_LOG"
 case "${1:-} ${2:-}" in
   "pr merge") printf '%s\n' 'merged:' '  status: ok' ; exit 0 ;;
   "api /repos/"*) echo 'error: API unavailable' >&2 ; exit 1 ;;
 esac
 exit 0
 SH
-  chmod +x "$case_dir/fakebin/gh-axi"
+  chmod +x "$case_dir/fakebin/gh-axi.behavior"
 }
 
 # gh-axi mock that fails the merge call but succeeds everything else, so a
@@ -106,24 +130,22 @@ add_gh_mocks_merge_fails() {
   local merged_at=${4:-null} auto_merge=${5:-false}
   add_gh_mocks "$case_dir" aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
     "$state" "$merged" "$merged_at" "$auto_merge"
-  cat > "$case_dir/fakebin/gh-axi" <<'SH'
+  cat > "$case_dir/fakebin/gh-axi.behavior" <<'SH'
 #!/usr/bin/env bash
-printf '%s\n' "$*" >> "$FM_TEST_GH_AXI_LOG"
 case "${1:-} ${2:-}" in
   "pr merge") echo "error: pr merge failed" >&2 ; exit 1 ;;
   "api /repos/"*) cat "$FM_TEST_PR_STATE_FILE" ; exit 0 ;;
 esac
 exit 0
 SH
-  chmod +x "$case_dir/fakebin/gh-axi"
+  chmod +x "$case_dir/fakebin/gh-axi.behavior"
 }
 
 add_gh_mocks_host_sensitive() {
   local case_dir=$1
   add_gh_mocks "$case_dir" aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa open false null true
-  cat > "$case_dir/fakebin/gh-axi" <<'SH'
+  cat > "$case_dir/fakebin/gh-axi.behavior" <<'SH'
 #!/usr/bin/env bash
-printf '%s\n' "$*" >> "$FM_TEST_GH_AXI_LOG"
 printf '%s\n' "${GH_HOST:-}" >> "$FM_TEST_GH_HOST_LOG"
 case "${1:-} ${2:-}" in
   "pr merge") exit 0 ;;
@@ -142,7 +164,7 @@ case "${1:-} ${2:-}" in
 esac
 exit 0
 SH
-  chmod +x "$case_dir/fakebin/gh-axi"
+  chmod +x "$case_dir/fakebin/gh-axi.behavior"
 }
 
 run_pr_merge() {
@@ -152,6 +174,8 @@ run_pr_merge() {
   FM_TEST_GH_AXI_LOG="$case_dir/gh-axi.log" \
   FM_TEST_GH_HOST_LOG="$case_dir/gh-host.log" \
   FM_TEST_PR_STATE_FILE="$case_dir/pr-state.out" \
+  FM_TEST_GH_AXI_VERSION="${FM_TEST_GH_AXI_VERSION:-gh-axi 0.1.28}" \
+  FM_TEST_GH_AXI_API_JQ="${FM_TEST_GH_AXI_API_JQ:-1}" \
   PATH="$case_dir/fakebin:$PATH" \
     "$PR_MERGE" "$@"
   rc=$?
@@ -576,6 +600,48 @@ test_contradictory_state_refuses_after_merge_command() {
   pass "contradictory post-command GitHub state cannot authorize cleanup"
 }
 
+test_incompatible_stale_session_refuses_before_mutation() {
+  local label version api_jq case_dir rc n
+  n=0
+  while IFS='^' read -r label version api_jq; do
+    [ -n "$label" ] || continue
+    n=$((n + 1))
+    case_dir=$(make_case "incompatible-gh-axi-$n")
+    mkdir -p "$case_dir/wt"
+    add_gh_mocks "$case_dir" aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa open false null true
+    : > "$case_dir/gh-axi.log"
+
+    set +e
+    FM_TEST_GH_AXI_VERSION="$version" FM_TEST_GH_AXI_API_JQ="$api_jq" \
+      run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/36 \
+      > "$case_dir/stdout" 2> "$case_dir/stderr"
+    rc=$?
+    set -e
+
+    expect_code 1 "$rc" "$label: incompatible gh-axi must refuse"
+    assert_grep 'approve the gh-axi update and retry' "$case_dir/stderr" \
+      "$label: refusal did not request explicit update approval"
+    assert_no_grep 'pr merge ' "$case_dir/gh-axi.log" \
+      "$label: incompatible gh-axi reached the PR merge mutation"
+    assert_no_grep 'api /repos/' "$case_dir/gh-axi.log" \
+      "$label: incompatible gh-axi reached authoritative post-mutation verification"
+    assert_grep '--version' "$case_dir/gh-axi.log" \
+      "$label: merge boundary did not recheck the installed version"
+    if [ "$api_jq" = 0 ]; then
+      assert_grep 'api --help' "$case_dir/gh-axi.log" \
+        "$label: merge boundary did not recheck api --jq support"
+    fi
+    assert_grep 'pr=https://github.com/example/repo/pull/36' "$case_dir/state/task-x1.meta" \
+      "$label: safe PR metadata was not preserved before refusal"
+    [ -f "$case_dir/state/task-x1.check.sh" ] \
+      || fail "$label: ordinary merge monitoring was not preserved"
+  done <<'ROWS'
+stale bootstrap evidence cannot authorize gh-axi 0.1.27^gh-axi 0.1.27^1
+minimum gh-axi without api jq cannot mutate a PR^gh-axi 0.1.28^0
+ROWS
+  pass "fm-pr-merge rechecks gh-axi compatibility before every PR mutation"
+}
+
 test_records_pr_and_head_before_merging
 test_merge_failure_propagates_after_recording
 test_post_merge_command_failure_uses_confirmed_state
@@ -595,3 +661,4 @@ test_ambient_host_cannot_redirect_merge_truth
 test_auto_merge_that_completes_immediately_is_merged
 test_unreadable_state_refuses_after_merge_command
 test_contradictory_state_refuses_after_merge_command
+test_incompatible_stale_session_refuses_before_mutation
