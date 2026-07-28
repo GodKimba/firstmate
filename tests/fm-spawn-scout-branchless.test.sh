@@ -22,6 +22,8 @@ set -u
 
 SPAWN="$ROOT/bin/fm-spawn.sh"
 TMP_ROOT=$(fm_test_tmproot fm-spawn-scout-branchless)
+REAL_GIT_FOR_TEST=$(command -v git)
+export REAL_GIT_FOR_TEST
 
 # make_scout_fakebin <dir>: a fake tmux reporting the worktree as the pane cwd
 # (the pane has already settled, so the settle loop confirms on its second read)
@@ -49,6 +51,23 @@ exit 0
 SH
   chmod +x "$fakebin/tmux"
   fm_fake_exit0 "$fakebin" treehouse
+  cat > "$fakebin/git" <<'SH'
+#!/usr/bin/env bash
+case " $* " in
+  *" symbolic-ref --quiet --short HEAD "*)
+    if [ -n "${FM_FAKE_SYMBOLIC_REF_ERROR_AT:-}" ]; then
+      count=0
+      [ ! -f "${FM_FAKE_SYMBOLIC_REF_COUNT:?}" ] \
+        || read -r count < "$FM_FAKE_SYMBOLIC_REF_COUNT"
+      count=$((count + 1))
+      printf '%s\n' "$count" > "$FM_FAKE_SYMBOLIC_REF_COUNT"
+      [ "$count" != "$FM_FAKE_SYMBOLIC_REF_ERROR_AT" ] || exit 128
+    fi
+    ;;
+esac
+exec "${REAL_GIT_FOR_TEST:?}" "$@"
+SH
+  chmod +x "$fakebin/git"
   printf '%s\n' "$fakebin"
 }
 
@@ -90,6 +109,8 @@ run_scout_spawn() {
     FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" \
     FM_WORKTREE_SETTLE_INTERVAL=0.01 \
     FM_FAKE_PANE_PATH="$WT_DIR" \
+    FM_FAKE_SYMBOLIC_REF_ERROR_AT="${FM_FAKE_SYMBOLIC_REF_ERROR_AT:-}" \
+    FM_FAKE_SYMBOLIC_REF_COUNT="${FM_FAKE_SYMBOLIC_REF_COUNT:-}" \
     PATH="$FAKEBIN_DIR:$PATH" \
     "$SPAWN" "$id" "$PROJ_DIR" "$@" 2>&1
 }
@@ -241,6 +262,31 @@ test_unestablishable_invariant_refuses_before_launching() {
   pass "a scout whose branchless invariant cannot be established refuses before the harness launches"
 }
 
+test_head_inspection_errors_refuse_before_launching() {
+  local error_at id out rec status
+  for error_at in 1 2; do
+    id="scout-head-error-b${error_at}"
+    rec=$(make_scout_case "scout-head-error-$error_at" "$id" managed)
+    read_scout_record "$rec"
+
+    out=$(FM_FAKE_SYMBOLIC_REF_ERROR_AT="$error_at" \
+      FM_FAKE_SYMBOLIC_REF_COUNT="$HOME_DIR/state/symbolic-ref-count" \
+      run_scout_spawn "$id" --scout)
+    status=$?
+    expect_code 1 "$status" \
+      "HEAD inspection failure $error_at must refuse the launch"
+    assert_contains "$out" "cannot prove scout worktree $WT_DIR is detached" \
+      "HEAD inspection failure $error_at did not report the unproven invariant"
+    assert_contains "$out" "HEAD inspection failed with status 128" \
+      "HEAD inspection failure $error_at did not preserve the git status"
+    assert_not_contains "$out" "spawned $id" \
+      "HEAD inspection failure $error_at launched the harness"
+    assert_absent "$HOME_DIR/state/$id.meta" \
+      "HEAD inspection failure $error_at recorded meta"
+  done
+  pass "HEAD inspection errors before and after detaching refuse before the harness launches"
+}
+
 # A ship task owns branch fm/<id> and creates it itself. No acquisition step may
 # detach or rewrite that branch, so a ship spawn must leave the worktree exactly
 # as the provider handed it over.
@@ -266,6 +312,7 @@ test_generic_scout_acquisition_is_an_exact_no_op
 test_same_task_recovery_preserves_work_in_the_existing_copy
 test_dirty_managed_pool_scout_still_becomes_branchless
 test_unestablishable_invariant_refuses_before_launching
+test_head_inspection_errors_refuse_before_launching
 test_ship_acquisition_never_detaches_its_branch
 
 echo "# all fm-spawn-scout-branchless tests passed"

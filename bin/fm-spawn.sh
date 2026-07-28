@@ -1372,15 +1372,37 @@ if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   # tasks are deliberately untouched: they own branch fm/<id> and create it
   # themselves, so no path here may detach or rewrite a ship branch.
   if [ "$KIND" = scout ]; then
-    scout_head_branch=$(git -C "$WT" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
-    if [ -n "$scout_head_branch" ]; then
-      git -C "$WT" checkout --detach -q 2>/dev/null || true
-      scout_head_branch=$(git -C "$WT" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
+    if scout_head_branch=$(git -C "$WT" symbolic-ref --quiet --short HEAD 2>/dev/null); then
+      scout_head_status=0
+    else
+      scout_head_status=$?
     fi
-    if [ -n "$scout_head_branch" ]; then
-      echo "error: scout worktree $WT is still attached to branch $scout_head_branch after detaching; refusing to launch a scout whose recorded branchless provenance guarded cleanup could never honor. Inspect target $T" >&2
-      exit 1
-    fi
+    case "$scout_head_status" in
+      0)
+        git -C "$WT" checkout --detach -q 2>/dev/null || true
+        if scout_head_branch=$(git -C "$WT" symbolic-ref --quiet --short HEAD 2>/dev/null); then
+          scout_head_status=0
+        else
+          scout_head_status=$?
+        fi
+        case "$scout_head_status" in
+          0)
+            echo "error: scout worktree $WT is still attached to branch $scout_head_branch after detaching; refusing to launch a scout whose recorded branchless provenance guarded cleanup could never honor. Inspect target $T" >&2
+            exit 1
+            ;;
+          1) ;;
+          *)
+            echo "error: cannot prove scout worktree $WT is detached after detaching because HEAD inspection failed with status $scout_head_status; refusing to launch. Inspect target $T" >&2
+            exit 1
+            ;;
+        esac
+        ;;
+      1) ;;
+      *)
+        echo "error: cannot prove scout worktree $WT is detached because HEAD inspection failed with status $scout_head_status; refusing to launch. Inspect target $T" >&2
+        exit 1
+        ;;
+    esac
   fi
 fi
 
