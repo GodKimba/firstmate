@@ -289,6 +289,37 @@ The locked bootstrap inheritance pass uses the same per-home changed-set and rer
 That live discovery starts from `state/*.meta` records with `kind=secondmate`; `data/secondmates.md` only backfills `home=` for older or incomplete meta records.
 Skipped items, such as a destination checkout that does not yet gitignore the item, are visible warnings but not hard failures.
 
+## Subscription pool quota view (`/poolquota`)
+
+`/poolquota` reports how much subscription capacity the local account pool has left and whether every account is answering.
+It is read-only and display-only: it changes no dispatch profile, account selection, or proxy routing, and it never writes to the pool.
+
+Activation is deliberately minimal, so that a capacity question never becomes a reason to loosen the proxy's own security posture:
+
+- `quota-axi` must be installed, from the universal toolchain in "Toolchain" above.
+  It remains the sole owner of provider quota semantics; the view only presents what it reports per account.
+- The pool's account directory must be readable by the firstmate home's user.
+  It defaults to `~/.cli-proxy-api` and is overridable with `FM_POOL_QUOTA_DIR`.
+- Nothing else is required.
+  The proxy service does not need to be running, its management interface does not need to be enabled, and no additional network access is used.
+  A capacity read that fails is reported as a failed read, never as a reason to enable a management route or restart the service.
+
+Account discovery is generic.
+Every regular `*.json` file in that directory is a candidate, each file's own type field selects the provider, and an account the pool has disabled is skipped and reported as skipped.
+No account identity, file name, or account count is assumed, so adding or retiring a pooled account needs no configuration change.
+
+Account files are treated as hostile input.
+A candidate that is a symlink, is not a regular file, is empty, exceeds `FM_POOL_QUOTA_MAX_BYTES`, or does not parse into the expected shape is refused with a reason rather than read further.
+Credentials are copied file-to-file into a private per-account workspace that is removed on every exit path, never appear on a command line or in the environment, and never reach output, the panel, or the shared quota cache.
+Account identity is always masked, and a full address is never printed or written.
+
+`bin/fm-pool-quota.sh --help` owns the exact flags, bounds, environment overrides, and output contract.
+
+The `--panel` artifact is private local operational detail about paid subscriptions.
+Open it only with `lavish-axi <path>`; it carries no credential and no full account address, but it must not be published, shared, or attached to an issue, a pull request, or a commit.
+
+GitHub stays with `gh-axi`; this view is subscription quota only.
+
 ## X mode (.env)
 
 X mode lets a firstmate instance answer public `@myfirstmate` mentions and act on normal reversible mention requests through firstmate's normal lifecycle.
@@ -451,6 +482,11 @@ FM_FLEET_SYNC_PACKED_REFS_LOCK_AGE_SECS=30       # min mtime age before fm-fleet
 FM_BUSY_REGEX=          # optional global override for every harness-scoped busy-pane matcher; unset uses each recorded harness's verified signature
 FM_COMPOSER_IDLE_RE=    # optional empty-composer regex, applied after ghost and border stripping
 FM_COMPOSER_GHOST_LUMA_MAX=128   # fleet-wide: max perceived luminance (0.299R+0.587G+0.114B, 0-255) for a TRUECOLOR foreground to count as de-emphasised ghost/placeholder text and be stripped; dim/faint (SGR 2) is stripped regardless. Assumes a dark terminal theme (bin/fm-composer-lib.sh's fm_composer_strip_ghost, shared by the tmux and herdr composer readers)
+FM_POOL_QUOTA_DIR=~/.cli-proxy-api   # subscription-pool account directory read by /poolquota
+FM_POOL_QUOTA_MAX_BYTES=65536        # per-file size bound; a larger account file is refused unread
+FM_POOL_QUOTA_TIMEOUT=25             # seconds allowed per account quota read
+FM_POOL_QUOTA_NOW=                   # optional epoch pin for deterministic /poolquota output, mainly for tests
+FM_POOL_QUOTA_BIN=quota-axi          # quota-axi command name; it owns provider quota semantics
 GROK_HOME=              # optional Grok config home for firstmate's global grok turn-end hook; defaults to ~/.grok
 FM_SEND_RETRIES=3       # fm-send Enter-retry attempts after typing the line once
 FM_SEND_SLEEP=0.4       # seconds between fm-send submit checks
