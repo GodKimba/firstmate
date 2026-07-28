@@ -24,8 +24,9 @@ PINNED_NOW=1785265200  # 2026-07-28T19:00:00Z
 # --- fixtures ---------------------------------------------------------------
 
 # make_pool <dir>: a pool with one enabled Claude account, one enabled Codex
-# account, one disabled account, one malformed file, one symlink, one oversized
-# file, one empty file, one wrong-type file, and a logs subdirectory.
+# account, one disabled account, malformed disabled flags, one malformed file,
+# one symlink, one oversized file, one empty file, one wrong-type file, and a
+# logs subdirectory.
 make_pool() {
   local dir=$1
   mkdir -p "$dir/logs"
@@ -36,7 +37,7 @@ JSON
 {"access_token":"$TOKEN_MARK-CODEX","account_id":"$ACCOUNT_ID_MARK","disabled":false,"email":"$EMAIL_B","expired":"2026-08-01T10:00:00-03:00","id_token":"$TOKEN_MARK-ID","refresh_token":"$TOKEN_MARK-REFRESH","type":"codex"}
 JSON
   cat > "$dir/charlie.json" <<JSON
-{"access_token":"$TOKEN_MARK-DISABLED","disabled":true,"email":"charlie@example.com","expired":"2026-08-01T10:00:00-03:00","type":"claude"}
+{"disabled":true,"email":"charlie@example.com","expired":"2026-08-01T10:00:00-03:00","type":"claude"}
 JSON
   printf 'this is not json' > "$dir/delta.json"
   ln -s alpha.json "$dir/echo.json"
@@ -52,11 +53,15 @@ JSON
   } > "$dir/hotel.json"
   printf '["not","an","object"]\n' > "$dir/india.json"
   printf '{"disabled":false,"email":"juliet@example.com","expired":"2026-08-01T10:00:00-03:00","type":"claude"}\n' > "$dir/juliet.json"
+  printf '{"access_token":"%s-STRING-DISABLED","disabled":"true","type":"claude"}\n' "$TOKEN_MARK" > "$dir/kilo.json"
+  printf '{"access_token":"%s-NUMBER-DISABLED","disabled":1,"type":"claude"}\n' "$TOKEN_MARK" > "$dir/lima.json"
+  printf '{"access_token":"%s-OBJECT-DISABLED","disabled":{},"type":"claude"}\n' "$TOKEN_MARK" > "$dir/mike.json"
+  printf '{"access_token":"%s-MISSING-DISABLED","type":"claude"}\n' "$TOKEN_MARK" > "$dir/november.json"
 }
 
 # make_quota_axi <fakebin> <mode> [probe-log]: a fake quota-axi that answers from
 # its own fixture data and records the environment and argv it was handed.
-# Modes: healthy, tight, partial (codex fails hard), authfail.
+# Modes: healthy, tight, unknown, partial (codex fails hard), authfail.
 make_quota_axi() {
   local fakebin=$1 mode=$2 PROBE_LOG=${3:-$1/../probe.log}
   mkdir -p "$fakebin"
@@ -89,7 +94,12 @@ if [ "\$prov" = claude ]; then
   case "\$mode" in
     tight)
       cat <<'J'
-{"generatedAt":"2026-07-28T19:00:00Z","schemaVersion":2,"providers":[{"provider":"claude","label":"Claude","source":"oauth","plan":"max","account":{"email":"alpha@example.com","organization":"Acme"},"windows":[{"id":"five_hour","label":"5-hour session","kind":"session","percentUsed":97,"percentRemaining":3,"resetsAt":"2026-07-28T20:30:00Z"}],"quotaSemantics":{"effectiveAvailability":[{"scope":"all_models","status":"known","effectivePercentRemaining":3,"limitingWindowIds":["five_hour"]}]},"state":{"status":"fresh","stale":false,"sourcesTried":["oauth"]}}]}
+{"generatedAt":"2026-07-28T19:00:00Z","schemaVersion":2,"providers":[{"provider":"claude","label":"Claude","source":"oauth","plan":"max","account":{"email":"alpha@example.com","organization":"Acme"},"windows":[{"id":"five_hour","label":"5-hour session","kind":"session","percentUsed":97,"percentRemaining":3,"resetsAt":"2026-07-28T20:30:00Z","resetText":"in 1h 30m"}],"quotaSemantics":{"effectiveAvailability":[{"scope":"all_models","status":"known","effectivePercentRemaining":3,"limitingWindowIds":["five_hour"]}]},"state":{"status":"fresh","stale":false,"sourcesTried":["oauth"]}}]}
+J
+      ;;
+    unknown)
+      cat <<'J'
+{"generatedAt":"2026-07-28T19:00:00Z","schemaVersion":2,"providers":[{"provider":"claude","label":"Claude","source":"oauth","plan":"max","account":{"email":"alpha@example.com","organization":"Acme"},"windows":[{"id":"five_hour","label":"5-hour session","kind":"session","percentUsed":35,"resetsAt":"2026-07-28T21:00:00Z","resetText":"in 2 hours"}],"quotaSemantics":{"effectiveAvailability":[{"scope":"all_models","status":"unknown","limitingWindowIds":[]}]},"state":{"status":"fresh","stale":false,"sourcesTried":["oauth"]}}]}
 J
       ;;
     authfail)
@@ -99,7 +109,7 @@ J
       ;;
     *)
       cat <<'J'
-{"generatedAt":"2026-07-28T19:00:00Z","schemaVersion":2,"providers":[{"provider":"claude","label":"Claude","source":"oauth","plan":"max","account":{"email":"alpha@example.com","organization":"Acme"},"windows":[{"id":"five_hour","label":"5-hour session","kind":"session","percentUsed":30,"percentRemaining":70,"resetsAt":"2026-07-28T22:00:00Z"},{"id":"seven_day","label":"Weekly","kind":"weekly","percentUsed":55,"percentRemaining":45,"resetsAt":"2026-08-02T00:00:00Z"},{"id":"model:opus","label":"Opus weekly","kind":"model","percentUsed":80,"resetsAt":"2026-08-02T00:00:00Z"}],"quotaSemantics":{"description":"per provider","effectiveAvailability":[{"scope":"all_models","status":"known","effectivePercentRemaining":45,"limitingWindowIds":["seven_day"]}]},"state":{"status":"fresh","stale":false,"sourcesTried":["oauth"]}}]}
+{"generatedAt":"2026-07-28T19:00:00Z","schemaVersion":2,"providers":[{"provider":"claude","label":"Claude","source":"oauth","plan":"max","account":{"email":"alpha@example.com","organization":"Acme"},"windows":[{"id":"five_hour","label":"5-hour session","kind":"session","percentUsed":30,"percentRemaining":70,"resetsAt":"2026-07-28T22:00:00Z","resetText":"in 3 hours"},{"id":"seven_day","label":"Weekly","kind":"weekly","percentUsed":55,"percentRemaining":45,"resetsAt":"2026-08-02T00:00:00Z","resetText":"in 4d 5h"},{"id":"model:opus","label":"Opus weekly","kind":"model","percentUsed":80,"resetsAt":"2026-08-02T00:00:00Z","resetText":"in 4d 5h"}],"quotaSemantics":{"description":"per provider","effectiveAvailability":[{"scope":"all_models","status":"known","effectivePercentRemaining":45,"limitingWindowIds":["seven_day"]}]},"state":{"status":"fresh","stale":false,"sourcesTried":["oauth"]}}]}
 J
       ;;
   esac
@@ -109,7 +119,7 @@ case "\$mode" in
   partial) printf 'upstream exploded\n' >&2; exit 1 ;;
 esac
 cat <<'J'
-{"generatedAt":"2026-07-28T19:00:00Z","schemaVersion":2,"providers":[{"provider":"codex","label":"Codex","source":"oauth","plan":"pro","account":{"email":"bravo@example.org","accountId":"ACCOUNTIDMARKER"},"windows":[{"id":"weekly","label":"Weekly","kind":"weekly","percentUsed":10,"percentRemaining":90,"resetsAt":"2026-08-03T00:00:00Z","windowSeconds":604800}],"quotaSemantics":{"effectiveAvailability":[{"scope":"all_models","status":"known","effectivePercentRemaining":90,"limitingWindowIds":["weekly"]}]},"state":{"status":"fresh","stale":false,"sourcesTried":["oauth"]}}]}
+{"generatedAt":"2026-07-28T19:00:00Z","schemaVersion":2,"providers":[{"provider":"codex","label":"Codex","source":"oauth","plan":"pro","account":{"email":"bravo@example.org","accountId":"ACCOUNTIDMARKER"},"windows":[{"id":"weekly","label":"Weekly","kind":"weekly","percentUsed":10,"percentRemaining":90,"resetsAt":"2026-08-03T00:00:00Z","resetText":"in 5d 5h","windowSeconds":604800}],"quotaSemantics":{"effectiveAvailability":[{"scope":"all_models","status":"known","effectivePercentRemaining":90,"limitingWindowIds":["weekly"]}]},"state":{"status":"fresh","stale":false,"sourcesTried":["oauth"]}}]}
 J
 SH
   chmod +x "$fakebin/quota-axi"
@@ -121,6 +131,7 @@ run_pool() {
   local pool=$1 fakebin=$2
   shift 2
   PATH="$fakebin:$PATH" \
+  FM_HOME="${pool%/*}/home" \
   FM_POOL_QUOTA_DIR="$pool" \
   FM_POOL_QUOTA_NOW="$PINNED_NOW" \
     "$CMD" "$@"
@@ -207,6 +218,8 @@ test_hostile_credential_files_are_refused() {
   assert_contains "$reasons" "not a JSON object" "a non-object credential file was not refused"
   assert_contains "$reasons" "unsupported account type" "an unknown provider type was not refused"
   assert_contains "$reasons" "no usable credential" "a credential file with no token was not refused"
+  [ "$(printf '%s' "$out" | jq '[.refused[] | select(.reason == "malformed disabled flag")] | length')" = 4 ] \
+    || fail "malformed or missing disabled flags were not all refused"
 
   # A disabled account is skipped, not refused: the pool itself turned it off.
   [ "$(printf '%s' "$out" | jq -r '.accounts_skipped')" = 1 ] \
@@ -217,6 +230,32 @@ test_hostile_credential_files_are_refused() {
   [ "$(printf '%s' "$out" | jq -r '.accounts_enabled')" = 2 ] \
     || fail "a refused file was measured anyway"
   pass "symlinked, malformed, empty, oversized, and unsupported files are refused with reasons"
+}
+
+test_quota_axi_semantics_are_preserved_without_local_inference() {
+  local root pool fakebin out panel
+  root=$(fm_test_tmproot fm-pool-quota-semantics)
+  pool="$root/pool"
+  fakebin="$root/fakebin"
+  make_pool "$pool"
+  make_quota_axi "$fakebin" unknown
+
+  out=$(run_pool "$pool" "$fakebin" --accounts --json) || fail "unknown-semantics run failed"
+  [ "$(printf '%s' "$out" | jq -r '.providers[] | select(.provider=="claude") | .quota_status')" = unknown ] \
+    || fail "the provider lost quota-axi's unknown semantic status"
+  [ "$(printf '%s' "$out" | jq -r '.providers[] | select(.provider=="claude") | .health')" = unknown ] \
+    || fail "unknown quota semantics were relabeled healthy"
+  [ "$(printf '%s' "$out" | jq -r '.providers[] | select(.provider=="claude") | .best_remaining')" = null ] \
+    || fail "unknown effective availability was turned into a percentage"
+  [ "$(printf '%s' "$out" | jq -r '.windows[] | select(.provider=="claude") | .percent_remaining')" = null ] \
+    || fail "percent remaining was recomputed from percent used"
+  [ "$(printf '%s' "$out" | jq -r '.providers[] | select(.provider=="claude") | .soonest_reset_in')" = "in 2 hours" ] \
+    || fail "quota-axi's reset text was not preserved"
+
+  panel=$(printf '%s' "$out" | jq -r '.panel')
+  assert_present "$panel" "the default invocation did not regenerate its panel"
+  assert_grep 'unknown' "$panel" "the panel did not represent unavailable quota as unknown"
+  pass "quota percentages, reset text, and semantic status stay owned by quota-axi"
 }
 
 test_partial_provider_failure_is_reported_not_hidden() {
@@ -321,11 +360,10 @@ test_private_workspace_is_cleaned_up() {
 }
 
 test_output_is_deterministic_and_panel_is_regenerated() {
-  local root pool fakebin first second panel first_panel second_panel
+  local root pool fakebin first second changed panel first_panel second_panel
   root=$(fm_test_tmproot fm-pool-quota-determinism)
   pool="$root/pool"
   fakebin="$root/fakebin"
-  panel="$root/panel.html"
   make_pool "$pool"
   make_quota_axi "$fakebin" healthy
 
@@ -333,16 +371,19 @@ test_output_is_deterministic_and_panel_is_regenerated() {
   second=$(run_pool "$pool" "$fakebin" --accounts --json) || fail "second run failed"
   [ "$first" = "$second" ] || fail "two identical reads produced different output"
 
-  run_pool "$pool" "$fakebin" --panel --panel-path "$panel" >/dev/null || fail "panel run failed"
+  panel=$(printf '%s' "$first" | jq -r '.panel')
+  assert_present "$panel" "an ordinary invocation did not write its panel"
   first_panel=$(cat "$panel")
 
   # A changed pool must produce a changed panel: the artifact is rebuilt, never
   # reused from the previous run.
   make_quota_axi "$fakebin" tight
-  run_pool "$pool" "$fakebin" --panel --panel-path "$panel" >/dev/null || fail "second panel run failed"
+  changed=$(run_pool "$pool" "$fakebin" --json) || fail "second panel run failed"
   second_panel=$(cat "$panel")
   [ "$first_panel" != "$second_panel" ] || fail "the panel was not regenerated from a fresh read"
   assert_contains "$second_panel" "3%" "the regenerated panel does not show the new reading"
+  [ "$(printf '%s' "$changed" | jq -r '.providers[] | select(.provider=="claude") | .health')" = healthy ] \
+    || fail "a local percentage threshold replaced quota-axi's semantic status"
   pass "identical reads are byte-identical and the panel is rebuilt every run"
 }
 
@@ -443,6 +484,7 @@ test_the_reader_never_writes_to_the_pool() {
 test_multi_account_aggregation_is_per_provider
 test_identity_is_masked_everywhere
 test_hostile_credential_files_are_refused
+test_quota_axi_semantics_are_preserved_without_local_inference
 test_partial_provider_failure_is_reported_not_hidden
 test_auth_failure_scrubs_the_private_workspace_path
 test_credentials_never_reach_argv_stdout_panel_or_cache

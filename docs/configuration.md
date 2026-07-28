@@ -306,6 +306,7 @@ Activation is deliberately minimal, so that a capacity question never becomes a 
 
 Account discovery is generic.
 Every regular `*.json` file in that directory is a candidate, each file's own type field selects the provider, and an account the pool has disabled is skipped and reported as skipped.
+The `disabled` field must be a boolean; malformed or missing values are refused before the account can be measured.
 No account identity, file name, or account count is assumed, so adding or retiring a pooled account needs no configuration change.
 
 Account files are treated as hostile input.
@@ -315,7 +316,8 @@ Account identity is always masked, and a full address is never printed or writte
 
 `bin/fm-pool-quota.sh --help` owns the exact flags, bounds, environment overrides, and output contract.
 
-The `--panel` artifact is private local operational detail about paid subscriptions.
+Every `/poolquota` invocation regenerates the private local panel from its fresh read and opens it through the supported local path.
+The panel artifact is private local operational detail about paid subscriptions.
 Open it only with `lavish-axi <path>`; it carries no credential and no full account address, but it must not be published, shared, or attached to an issue, a pull request, or a commit.
 
 GitHub stays with `gh-axi`; this view is subscription quota only.

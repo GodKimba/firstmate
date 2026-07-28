@@ -1,6 +1,6 @@
 ---
 name: poolquota
-description: Show the current quota and health of the captain's local CLIProxyAPI subscription pool. Use when the captain invokes /poolquota or asks about pool quota, subscription headroom, how much Claude or Codex capacity is left, which accounts are running low, when a limit resets, or whether the pool is healthy. Reads the pool's accounts read-only through quota-axi, reports a concise provider-level summary in chat, and opens a detailed local panel on request; it changes no dispatch, account selection, or routing.
+description: Show the current quota and health of the captain's local CLIProxyAPI subscription pool. Use when the captain invokes /poolquota or asks about pool quota, subscription headroom, how much Claude or Codex capacity is left, which accounts are running low, when a limit resets, or whether the pool is healthy. Reads the pool's accounts read-only through quota-axi, reports a concise provider-level summary in chat, and opens a freshly regenerated detailed local panel; it changes no dispatch, account selection, or routing.
 user-invocable: true
 metadata:
   internal: true
@@ -20,9 +20,9 @@ When the captain asks about pull requests, checks, or review load, that is `gh-a
 ## What it does
 
 1. Runs `bin/fm-pool-quota.sh` for a fresh read; the script's header and `--help` own its exact flags, bounds, environment overrides, output contract, and safety mechanics.
-2. Reports the provider-level summary in chat: per provider, how many accounts are answering, how much the healthiest account has left, how constrained the tightest one is, and when the next window resets.
-3. Adds `--accounts` when the captain wants the masked per-account and per-window detail in the terminal rather than a panel.
-4. Adds `--panel` when the captain wants the detailed visual, then opens the written file with `lavish-axi <path>`.
+2. Opens the returned `panel` path with `lavish-axi <path>` on every invocation.
+3. Reports the provider-level summary in chat: per provider, how many accounts are answering, how much the healthiest account has left, how constrained the tightest one is, and when the next window resets.
+4. Adds `--accounts` only when the captain wants the masked per-account and per-window detail in the terminal as well.
 
 Run the command fresh every time.
 A previous run's numbers are already out of date, and the panel is rebuilt from the new read rather than reused.
@@ -42,7 +42,10 @@ Claude's session and weekly windows and Codex's weekly window measure different 
 Report each provider on its own terms.
 
 The headline number for a provider is its healthiest account, because that is the capacity actually available to the next task.
-Mention the most constrained account when it is close to exhausted, since that account will start failing first.
+Report the most constrained account's quota-axi value without assigning a local threshold or status to it.
+
+Preserve quota-axi's quota status exactly.
+If quota-axi reports unknown availability, call it unknown and do not turn it into a percentage or a healthy claim.
 
 An account that does not answer is not an account at zero.
 Say that it did not report, and say what the read gave back, rather than folding it into a capacity number.

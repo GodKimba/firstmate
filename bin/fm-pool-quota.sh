@@ -19,8 +19,9 @@
 # Credential files are treated as hostile input. Every candidate must be a
 # regular file (symlinks and non-regular entries are refused), must be non-empty
 # and within FM_POOL_QUOTA_MAX_BYTES, must parse as a JSON object, and must carry
-# a supported `type` plus a non-empty string `access_token`. Anything else is
-# refused with a reason and a masked file label instead of being read further.
+# a boolean `disabled`, a supported `type`, and a non-empty string
+# `access_token`. Anything else is refused with a reason and a masked file label
+# instead of being read further.
 #
 # Secret handling contract:
 #   - Tokens move file-to-file through jq and never enter argv, an environment
@@ -42,8 +43,8 @@
 # Output: TOON by default, `--json` for the identical model as JSON. The default
 # projection is the concise provider-level view; `--accounts` reveals the masked
 # per-account and per-window rows, and `omitted` always discloses what was
-# dropped. `--panel` additionally writes a self-contained local HTML panel with
-# the complete detail, regenerated from that same fresh read on every run.
+# dropped. Every run also regenerates a self-contained local HTML panel with the
+# complete detail from that same fresh read.
 #
 # The panel is deliberately self-contained with inline CSS and zero external
 # requests: this artifact renders subscription health next to credential-derived
@@ -53,11 +54,11 @@
 # GitHub stays out of scope: `gh-axi` already owns the GitHub dashboard.
 #
 # Usage:
-#   fm-pool-quota.sh                      concise provider view, TOON
+#   fm-pool-quota.sh                      concise provider view plus panel, TOON
 #   fm-pool-quota.sh --json               the same model as JSON
 #   fm-pool-quota.sh --accounts           also reveal masked account/window rows
-#   fm-pool-quota.sh --panel              also write the detailed local HTML panel
-#   fm-pool-quota.sh --panel-path <file>  write the panel to an explicit path
+#   fm-pool-quota.sh --panel              explicitly request the default panel
+#   fm-pool-quota.sh --panel-path <file>  write the required panel to this path
 #   fm-pool-quota.sh --help               print this usage
 #
 # Environment:
@@ -99,7 +100,7 @@ validate_bound FM_POOL_QUOTA_TIMEOUT "$READ_TIMEOUT"
 
 FORMAT=toon
 SHOW_ACCOUNTS=0
-WRITE_PANEL=0
+WRITE_PANEL=1
 PANEL_PATH=$PANEL_DEFAULT
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -247,11 +248,12 @@ if [ "$POOL_STATE" = ok ]; then
 
     shape=$(jq -r '
       if type != "object" then "not-an-object"
+      elif (has("disabled") | not) or (.disabled | type) != "boolean" then "bad-disabled"
+      elif .disabled == true then "disabled"
       elif (.type | type) != "string" or (.type | length) == 0 then "missing-type"
       elif (.type != "claude" and .type != "codex") then "unsupported-type"
       elif (.access_token | type) != "string" or (.access_token | length) == 0 then "missing-token"
       elif (.expired // "" | type) != "string" then "bad-expiry"
-      elif (.disabled // false) == true then "disabled"
       else "ok:" + .type
       end
     ' "$candidate" 2>/dev/null) || shape=malformed
@@ -260,6 +262,7 @@ if [ "$POOL_STATE" = ok ]; then
     case "$shape" in
       malformed)        refuse "$label" "not valid JSON"; continue ;;
       not-an-object)    refuse "$label" "not a JSON object"; continue ;;
+      bad-disabled)     refuse "$label" "malformed disabled flag"; continue ;;
       missing-type)     refuse "$label" "no account type"; continue ;;
       unsupported-type) refuse "$label" "unsupported account type"; continue ;;
       missing-token)    refuse "$label" "no usable credential"; continue ;;
@@ -322,28 +325,32 @@ if [ "$POOL_STATE" = ok ]; then
            status:(if $rc == "124" then "timed_out" else "unavailable" end),
            source:"none", plan:"", stale:true,
            detail:(if $rc == "124" then "the quota read timed out" else "no quota answer for this account" end),
-           effective_remaining:null, bounded_by:"", windows:[]}
+           quota_status:"unknown", effective_remaining:null, bounded_by:"", windows:[]}
         else
+          ($q.quotaSemantics.effectiveAvailability // []
+           | map(select(.scope == "all_models"))
+           | .[0] // null) as $availability
+          |
           {kind:"account", account:$account, provider:$provider,
            status:($q.state.status // "unavailable"),
            source:($q.source // "none"),
            plan:($q.plan // ""),
            stale:($q.state.stale // false),
            detail:(($q.state.error // "") | .[0:180]),
+           quota_status:($availability.status // "unknown"),
            effective_remaining:(
-             $q.quotaSemantics.effectiveAvailability // []
-             | map(select(.scope == "all_models" and .status == "known"))
-             | .[0].effectivePercentRemaining // null),
+             if $availability.status == "known"
+                and ($availability.effectivePercentRemaining | type) == "number"
+             then $availability.effectivePercentRemaining
+             else null
+             end),
            bounded_by:(
-             $q.quotaSemantics.effectiveAvailability // []
-             | map(select(.scope == "all_models"))
-             | .[0].limitingWindowIds // [] | join(", ")),
+             $availability.limitingWindowIds // [] | join(", ")),
            windows:(
              $q.windows // []
              | map({id:(.id // ""), label:(.label // ""), kind:(.kind // "unknown"),
-                    percent_remaining:(if (.percentRemaining | type) == "number" then .percentRemaining
-                                       elif (.percentUsed | type) == "number" then (100 - .percentUsed)
-                                       else null end),
+                    percent_remaining:(if (.percentRemaining | type) == "number"
+                                       then .percentRemaining else null end),
                     resets_at:(.resetsAt // ""), reset_text:(.resetText // "")}))}
         end
     ' 2>/dev/null)
@@ -351,7 +358,7 @@ if [ "$POOL_STATE" = ok ]; then
       record=$(jq -nc --arg account "$account" --arg provider "$provider" '
         {kind:"account", account:$account, provider:$provider, status:"error",
          source:"none", plan:"", stale:true, detail:"the quota answer could not be read",
-         effective_remaining:null, bounded_by:"", windows:[]}')
+         quota_status:"unknown", effective_remaining:null, bounded_by:"", windows:[]}')
     fi
     emit_record "$record"
     rm -rf "$work"
@@ -366,43 +373,12 @@ MODEL=$(jq -sc \
   --arg generated "$GENERATED" \
   --arg dir "$DISPLAY_DIR" \
   --arg pool_state "$POOL_STATE" \
-  --argjson now "$NOW" \
   --argjson discovered "$DISCOVERED" \
   --argjson enabled "$ENABLED" \
   '
-  def epoch_of($s):
-    ($s // "") as $v
-    | if ($v | type) != "string" or $v == "" then null
-      else ($v | capture("^(?<d>\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2})(\\.\\d+)?(?<z>Z|[+-]\\d{2}:\\d{2})?$") // null) as $m
-        | if $m == null then null
-          else (($m.d + "Z") | fromdateiso8601) as $base
-            | (($m.z // "Z")) as $z
-            | if $z == "Z" then $base
-              else ($z | capture("^(?<sg>[+-])(?<h>\\d{2}):(?<mi>\\d{2})$") // null) as $o
-                | if $o == null then $base
-                  else (($o.h | tonumber) * 3600 + ($o.mi | tonumber) * 60) as $off
-                    | if $o.sg == "+" then ($base - $off) else ($base + $off) end
-                  end
-              end
-          end
-      end;
-  def humanize($secs):
-    if $secs == null then ""
-    elif $secs <= 0 then "due"
-    else ($secs | floor) as $t
-      | ($t / 86400 | floor) as $d
-      | (($t % 86400) / 3600 | floor) as $h
-      | (($t % 3600) / 60 | floor) as $m
-      | if $d > 0 then "\($d)d \($h)h"
-        elif $h > 0 then "\($h)h \($m)m"
-        else "\($m)m" end
-    end;
   def usable: (.status == "fresh" or .status == "stale");
 
   (map(select(.kind == "account"))
-   | map(. + {windows: (.windows
-       | map(. + {resets_in: humanize((epoch_of(.resets_at) // null)
-                                      | if . == null then null else (. - $now) end)}))})
    | sort_by(.provider, .account)) as $accounts
   | (map(select(.kind == "refused")) | sort_by(.file)) as $refused
   | (map(select(.kind == "skipped")) | sort_by(.file)) as $skipped
@@ -410,24 +386,30 @@ MODEL=$(jq -sc \
   | ($provider_ids | map(. as $p
       | ($accounts | map(select(.provider == $p))) as $rows
       | ($rows | map(select(usable and (.effective_remaining != null)))) as $known
+      | ($rows | map(select(usable)) | map(.quota_status) | unique) as $semantic_statuses
       | ($known | max_by(.effective_remaining)) as $best
       | ($rows | map(.windows[]) | map(select(.resets_at != ""))
-         | map(epoch_of(.resets_at)) | map(select(. != null)) | sort | .[0]) as $soonest
+         | sort_by(.resets_at) | .[0] // null) as $soonest
       | {provider: $p,
          accounts: ($rows | length),
          ok: ($rows | map(select(.status == "fresh")) | length),
          degraded: ($rows | map(select(.status == "stale" or .status == "rate_limited")) | length),
          unavailable: ($rows | map(select(.status != "fresh" and .status != "stale" and .status != "rate_limited")) | length),
+         quota_status: (if ($semantic_statuses | length) == 1
+                        then $semantic_statuses[0]
+                        elif ($semantic_statuses | length) == 0 then "unknown"
+                        else "mixed" end),
          best_remaining: ($best.effective_remaining // null),
          best_account: ($best.account // ""),
          best_bounded_by: ($best.bounded_by // ""),
          worst_remaining: (($known | min_by(.effective_remaining)).effective_remaining // null),
-         soonest_reset: (if $soonest == null then "" else ($soonest | todate) end),
-         soonest_reset_in: humanize(if $soonest == null then null else ($soonest - $now) end),
+         soonest_reset: ($soonest.resets_at // ""),
+         soonest_reset_in: ($soonest.reset_text // ""),
          health: (if ($rows | map(select(.status == "fresh")) | length) == 0 then "down"
                   elif ($rows | map(select(.status != "fresh")) | length) > 0 then "partial"
-                  elif (($best.effective_remaining // 100) < 10) then "tight"
-                  else "healthy" end)})) as $providers
+                  elif ($semantic_statuses | all(.[]; . == "known")) then "healthy"
+                  elif ($semantic_statuses | length) == 1 then $semantic_statuses[0]
+                  else "partial" end)})) as $providers
   | {schema: "fm-pool-quota.v1",
      generated: $generated,
      pool_dir: $dir,
@@ -443,12 +425,12 @@ MODEL=$(jq -sc \
      accounts: $accounts | map(del(.kind, .windows)),
      windows: ($accounts | map(. as $a | .windows[] | {account: $a.account, provider: $a.provider,
                 window: .id, label: .label, kind: .kind,
-                percent_remaining: .percent_remaining, resets_at: .resets_at, resets_in: .resets_in})),
+                percent_remaining: .percent_remaining, resets_at: .resets_at, resets_in: .reset_text})),
      refused: $refused | map(del(.kind)),
      skipped: $skipped | map(del(.kind))}
 ' "$RECORDS") || die "cannot assemble the pool model"
 
-# --- optional local panel ----------------------------------------------------
+# --- local panel -------------------------------------------------------------
 render_panel() {  # <path>
   local out=$1 dir tmp
   dir=$(dirname "$out")
@@ -490,8 +472,8 @@ render_panel() {  # <path>
   td.num { text-align:right; font-variant-numeric:tabular-nums; }
   .wrap { background:var(--card); border:1px solid var(--line); border-radius:12px; overflow-x:auto; }
   .tag { display:inline-block; padding:1px 8px; border-radius:999px; font-size:12px; border:1px solid var(--line); }
-  .t-healthy, .t-fresh { color:var(--ok); border-color:rgba(74,222,128,.35); }
-  .t-partial, .t-stale, .t-tight, .t-rate_limited { color:var(--warn); border-color:rgba(251,191,36,.35); }
+  .t-healthy, .t-fresh, .t-known { color:var(--ok); border-color:rgba(74,222,128,.35); }
+  .t-partial, .t-stale, .t-rate_limited, .t-unknown, .t-mixed { color:var(--warn); border-color:rgba(251,191,36,.35); }
   .t-down, .t-unavailable, .t-error, .t-auth_required, .t-timed_out { color:var(--bad); border-color:rgba(248,113,113,.35); }
   .note { color:var(--muted); font-size:13px; }
   .bar { height:6px; border-radius:999px; background:#222836; overflow:hidden; margin-top:8px; }
@@ -505,7 +487,7 @@ render_panel() {  # <path>
 HTML_HEAD
     printf '%s' "$MODEL" | jq -r '
       def esc: tostring | @html;
-      def pct: if . == null then "-" else "\(.)%" end;
+      def pct: if . == null then "unknown" else "\(.)%" end;
       def dash: if . == null or . == "" then "-" else (. | esc) end;
       [
         "<h1>Subscription pool quota</h1>",
@@ -522,8 +504,9 @@ HTML_HEAD
         (.providers[] |
           "<div class=\"card\"><h3>\(.provider | esc)</h3>"
           + "<div class=\"metric\">\(.best_remaining | pct)<span>best account left</span></div>"
-          + "<div class=\"bar\"><i style=\"width:\(if .best_remaining == null then 0 else .best_remaining end)%\"></i></div>"
+          + (if .best_remaining == null then "" else "<div class=\"bar\"><i style=\"width:\(.best_remaining)%\"></i></div>" end)
           + "<div class=\"kv\"><span>Health</span><b><span class=\"tag t-\(.health)\">\(.health | esc)</span></b></div>"
+          + "<div class=\"kv\"><span>Quota status</span><b><span class=\"tag t-\(.quota_status)\">\(.quota_status | esc)</span></b></div>"
           + "<div class=\"kv\"><span>Accounts responding</span><b>\(.ok) of \(.accounts)</b></div>"
           + "<div class=\"kv\"><span>Most constrained account</span><b>\(.worst_remaining | pct)</b></div>"
           + "<div class=\"kv\"><span>Bounded by</span><b>\(.best_bounded_by | dash)</b></div>"
@@ -532,10 +515,11 @@ HTML_HEAD
         "<h2>Accounts</h2>",
         (if (.accounts | length) == 0 then "<p class=\"note\">No enabled account could be measured.</p>"
          else
-          "<div class=\"wrap\"><table><thead><tr><th>Account</th><th>Provider</th><th>State</th><th>Plan</th><th class=\"num\">Effective left</th><th>Bounded by</th><th>Detail</th></tr></thead><tbody>"
+          "<div class=\"wrap\"><table><thead><tr><th>Account</th><th>Provider</th><th>State</th><th>Quota status</th><th>Plan</th><th class=\"num\">Effective left</th><th>Bounded by</th><th>Detail</th></tr></thead><tbody>"
           + ([.accounts[] |
               "<tr><td>\(.account | esc)</td><td>\(.provider | esc)</td>"
               + "<td><span class=\"tag t-\(.status)\">\(.status | esc)</span>\(if .stale then " <span class=\"note\">stale</span>" else "" end)</td>"
+              + "<td><span class=\"tag t-\(.quota_status)\">\(.quota_status | esc)</span></td>"
               + "<td>\(.plan | dash)</td><td class=\"num\">\(.effective_remaining | pct)</td>"
               + "<td>\(.bounded_by | dash)</td><td class=\"note\">\(.detail | dash)</td></tr>"] | join(""))
           + "</tbody></table></div>"
