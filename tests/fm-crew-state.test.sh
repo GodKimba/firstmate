@@ -13,18 +13,15 @@
 #   (b) needs-decision/blocked log + resumed run = SUPERSEDED     -> run-step
 #   (c) genuine parked run + needs-decision log = NOT superseded  -> run-step
 #   (d) terminal run-step (passed/failed) is authoritative        -> run-step
-#   (e) cross-branch attribution: this branch's own run found via list lookup
+#   (e) coarse running rows retain fallback without detailed gate state
 #   (f) no run + busy pane                                        -> pane
 #   (g) no run + idle pane falls to the status-log verb           -> status-log
 #   (h) dead pane: no run -> unknown/none; with a run -> run-step (not the shell)
 #   (i) kind=scout skips the run lookup                           -> pane/status-log
 #   (j) torn-down worktree / missing meta                         -> unknown/none
 #   (k) crew_is_provably_working end-to-end over the REAL helper (not a canned
-#       fake fm-crew-state.sh verdict): cross-branch attribution via the runs
-#       list -> absorbed; genuinely no run anywhere + idle pane -> surfaced.
-#       This is the direct regression pair for the 2026-07-02 herdr incident,
-#       proving the watcher's own absorb-only-when-provably-working predicate
-#       benefits from the fix in both directions.
+#       fake fm-crew-state.sh verdict): detailed active status -> absorbed;
+#       coarse running status or genuinely no run + idle pane -> surfaced.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -47,6 +44,11 @@ make_repo_on_branch() {  # <dir> <branch>
   # Real worktree HEAD for run head-binding (fixtures read FM_FAKE_RUN_HEAD).
   FM_FAKE_RUN_HEAD=$(git -C "$dir" rev-parse HEAD)
   export FM_FAKE_RUN_HEAD
+}
+
+set_no_mistakes_submission_ref() {  # <repo> <branch> [commit]
+  local repo=$1 branch=$2 commit=${3:-HEAD}
+  git -C "$repo" update-ref "refs/remotes/no-mistakes/$branch" "$commit"
 }
 
 # A fakebin with a fake `no-mistakes` (serves the env-driven run output) and a
@@ -676,58 +678,60 @@ test_terminal_failed() {
   pass "terminal failed run is authoritative"
 }
 
-# (e) cross-branch attribution: `axi status` returns ANOTHER branch's run (the
-# routine case once more than one crew validates the same underlying repo
-# concurrently - they share ONE no-mistakes repo registration), so the helper
-# falls back to the real top-level `no-mistakes runs` listing to learn whether
-# THIS branch has an active run of its own. Regression coverage for the
-# 2026-07-02 herdr incident: the old fallback shelled out to `no-mistakes axi`
-# (bare) expecting a `runs[N]{...}:` TOON table that the real CLI never emits
-# (verified against the installed v1.32.2 - the `axi` surface has no
-# runs-listing subcommand at all), so attribution silently failed every time
-# the repo-wide answer was not this crew's own branch.
-test_cross_branch_attribution_via_runs_list() {
+# (e) `axi status` can report another branch while the coarse runs list reports
+# this branch as running. Even an exact coarse SHA cannot prove the run is not
+# parked, so the helper must retain its pane/status-log fallback.
+test_coarse_equal_head_requires_detailed_state() {
   reset_fakes
-  local d short; d=$(new_case crossbranch)
+  local d short; d=$(new_case coarse-equal-head)
   make_repo_on_branch "$d/wt" fm/feat-f
   short=$(git -C "$d/wt" rev-parse --short=7 HEAD)
   make_fakebin "$d" >/dev/null
   fm_write_meta "$d/state/feat-f.meta" "window=fm:fm-feat-f" "worktree=$d/wt" "kind=ship"
-  # The repo-wide active/most-recent run belongs to a different crew's branch.
+  printf 'needs-decision: review gate requires approval\n' > "$d/state/feat-f.status"
   FM_FAKE_AXI_STATUS="$(run_running fm/other-crew)"
-  # Real `no-mistakes runs` shape: plain text, newest-first, no run id, no
-  # quoting - "<status> <branch> <short-sha> <date> [<pr-url>]".
   FM_FAKE_RUNS_LIST="$(cat <<EOF
   running    fm/other-crew aaaaaaa  2026-07-02 22:10
   running    fm/feat-f ${short}  2026-07-02 22:05
 EOF
 )"
+  FM_FAKE_BUSY=0
   local out; out=$(run_crew_state "$d" feat-f)
-  assert_contains "$out" "state: working" "this branch's own run attributed via the runs list"
-  assert_contains "$out" "source: run-step" "runs-list-resolved run -> run-step source"
-  pass "cross-branch run is attributed via the real runs list"
+  assert_contains "$out" "state: parked" "equal-head coarse running row retains the parked fallback"
+  assert_contains "$out" "source: status-log" "equal-head coarse running row is not authoritative"
+  assert_not_contains "$out" "source: run-step" "equal-head coarse running row lacks detailed gate state"
+  PATH="$d/fakebin:$PATH" FM_STATE_OVERRIDE="$d/state" crew_is_provably_working feat-f \
+    && fail "an equal-head coarse running row was treated as provably working"
+  pass "equal-head coarse running row requires detailed state"
 }
 
-# The runs list is newest-first; a branch with an OLDER completed run must not
-# shadow its own newer active one - the first (topmost) matching row wins.
-test_cross_branch_attribution_picks_most_recent_row() {
+# A resolvable descendant run head is equally ambiguous without detailed gate
+# state, and its newer running row must not expose an older terminal row.
+test_coarse_descendant_head_requires_detailed_state() {
   reset_fakes
-  local d short; d=$(new_case crossbranch-mostrecent)
+  local d base_head base_short descendant_short; d=$(new_case coarse-descendant-head)
   make_repo_on_branch "$d/wt" fm/feat-fq
-  short=$(git -C "$d/wt" rev-parse --short=7 HEAD)
+  base_head=$(git -C "$d/wt" rev-parse HEAD)
+  base_short=$(git -C "$d/wt" rev-parse --short=7 HEAD)
+  git -C "$d/wt" commit -q --allow-empty -m 'isolated pipeline fix'
+  descendant_short=$(git -C "$d/wt" rev-parse --short=7 HEAD)
+  git -C "$d/wt" reset -q --hard "$base_head"
   make_fakebin "$d" >/dev/null
   fm_write_meta "$d/state/feat-fq.meta" "window=fm:fm-feat-fq" "worktree=$d/wt" "kind=ship"
+  printf 'needs-decision: review gate requires approval\n' > "$d/state/feat-fq.status"
   FM_FAKE_AXI_STATUS="$(run_running fm/other-crew)"
   FM_FAKE_RUNS_LIST="$(cat <<EOF
   running    fm/other-crew aaaaaaa  2026-07-02 22:10
-  running    fm/feat-fq ${short}  2026-07-02 21:50
-  completed  fm/feat-fq bbbbbbb  2026-07-02 20:00  https://github.com/o/r/pull/1
+  running    fm/feat-fq ${descendant_short}  2026-07-02 21:50
+  completed  fm/feat-fq ${base_short}  2026-07-02 20:00  https://github.com/o/r/pull/1
 EOF
 )"
+  FM_FAKE_BUSY=0
   local out; out=$(run_crew_state "$d" feat-fq)
-  assert_contains "$out" "state: working" "most recent (running) row wins over an older completed row"
-  assert_contains "$out" "source: run-step" "most-recent-row resolution -> run-step source"
-  pass "cross-branch attribution picks the branch's most recent row"
+  assert_contains "$out" "state: parked" "descendant-head coarse running row retains the parked fallback"
+  assert_contains "$out" "source: status-log" "descendant-head coarse running row is not authoritative"
+  assert_not_contains "$out" "run completed" "older terminal row does not shadow the newer running row"
+  pass "descendant-head coarse running row requires detailed state"
 }
 
 test_coarse_run_does_not_probe_other_branch_ci_log_for_ready_status() {
@@ -750,6 +754,141 @@ EOF
   assert_contains "$out" "source: status-log" "coarse ready status remains status-log sourced"
   assert_not_contains "$out" "state: working" "coarse ready status must not be suppressed by another branch log"
   pass "coarse run does not probe another branch's ci log"
+}
+
+# A synchronous run can rebase and apply fixes in no-mistakes' isolated gate
+# while the invoking worktree remains at the exact submitted commit. The run
+# head is then intentionally absent from (or divergent in) the invoking repo,
+# so ancestry against the evolving run head cannot prove ownership. The exact
+# no-mistakes submission ref remains bound to the worktree HEAD and is the
+# counterfactual that distinguishes this healthy active run from an idle pane.
+test_active_rebased_run_uses_exact_submission_ref() {
+  reset_fakes
+  local d; d=$(new_case active-rebased-submission)
+  make_repo_on_branch "$d/wt" fm/feat-rebased
+  set_no_mistakes_submission_ref "$d/wt" fm/feat-rebased
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-rebased.meta" "window=fm:fm-feat-rebased" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_RUN_HEAD=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  FM_FAKE_AXI_STATUS="$(run_running fm/feat-rebased)"
+  FM_FAKE_BUSY=0
+  local out; out=$(run_crew_state "$d" feat-rebased)
+  assert_contains "$out" "state: working" "active rebased run -> working"
+  assert_contains "$out" "source: run-step" "active rebased run -> run-step source"
+  assert_not_contains "$out" "source: pane" "idle pane does not mask the active run"
+  pass "active rebased run is tied to the exact submitted code while the pane is idle"
+}
+
+# Run attribution precedes every endpoint fallback, so the exact same active
+# proof must remain authoritative for every supported session backend.
+test_active_rebased_run_precedes_all_backend_fallbacks() {
+  reset_fakes
+  local d backend id out; d=$(new_case active-rebased-backends)
+  make_repo_on_branch "$d/wt" fm/feat-all-backends
+  set_no_mistakes_submission_ref "$d/wt" fm/feat-all-backends
+  make_fakebin "$d" >/dev/null
+  FM_FAKE_RUN_HEAD=eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee
+  FM_FAKE_AXI_STATUS="$(run_running fm/feat-all-backends)"
+  FM_FAKE_BUSY=0
+  for backend in tmux herdr zellij orca cmux; do
+    id="all-backends-$backend"
+    if [ "$backend" = orca ]; then
+      fm_write_meta "$d/state/$id.meta" "terminal=missing-$backend" "worktree=$d/wt" "kind=ship" "backend=$backend"
+    else
+      fm_write_meta "$d/state/$id.meta" "window=missing-$backend" "worktree=$d/wt" "kind=ship" "backend=$backend"
+    fi
+    out=$(run_crew_state "$d" "$id")
+    assert_contains "$out" "state: working" "$backend active rebased run -> working"
+    assert_contains "$out" "source: run-step" "$backend endpoint fallback does not mask the active run"
+  done
+  pass "active rebased run remains authoritative across every supported session backend"
+}
+
+# The coarse runs list cannot distinguish active work from a parked gate, so a
+# matching submission ref alone must not make its running row authoritative.
+test_cross_branch_coarse_submission_ref_requires_detailed_state() {
+  reset_fakes
+  local d; d=$(new_case crossbranch-active-rebased)
+  make_repo_on_branch "$d/wt" fm/feat-cross-rebased
+  set_no_mistakes_submission_ref "$d/wt" fm/feat-cross-rebased
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-cross-rebased.meta" "window=fm:fm-feat-cross-rebased" "worktree=$d/wt" "kind=ship"
+  printf 'needs-decision: review gate requires approval\n' > "$d/state/feat-cross-rebased.status"
+  FM_FAKE_AXI_STATUS="$(run_running fm/other-crew)"
+  FM_FAKE_RUNS_LIST=$(cat <<'EOF'
+  running    fm/other-crew aaaaaaa  2026-07-28 16:00
+  running    fm/feat-cross-rebased bbbbbbb  2026-07-28 15:59
+EOF
+)
+  FM_FAKE_BUSY=0
+  local out; out=$(run_crew_state "$d" feat-cross-rebased)
+  assert_contains "$out" "state: parked" "coarse running row retains the parked fallback state"
+  assert_contains "$out" "source: status-log" "coarse running row falls back without detailed gate state"
+  assert_not_contains "$out" "source: run-step" "submission ref alone does not attribute the coarse row"
+  PATH="$d/fakebin:$PATH" FM_STATE_OVERRIDE="$d/state" crew_is_provably_working feat-cross-rebased \
+    && fail "a coarse running row with only submission-ref identity was treated as provably working"
+  pass "coarse submission-ref identity requires detailed run state"
+}
+
+# The submission ref is exact code identity, not a branch-only escape hatch.
+# If it names any other commit, the unavailable run head remains unattributed.
+test_active_rebased_run_rejects_mismatched_submission_ref() {
+  reset_fakes
+  local d submitted; d=$(new_case active-rebased-mismatch)
+  make_repo_on_branch "$d/wt" fm/feat-rebased-mismatch
+  submitted=$(git -C "$d/wt" rev-parse HEAD)
+  git -C "$d/wt" commit -q --allow-empty -m 'local work after submitted code'
+  set_no_mistakes_submission_ref "$d/wt" fm/feat-rebased-mismatch "$submitted"
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-rebased-mismatch.meta" "window=fm:fm-feat-rebased-mismatch" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_RUN_HEAD=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+  FM_FAKE_AXI_STATUS="$(run_running fm/feat-rebased-mismatch)"
+  FM_FAKE_RUNS_LIST=""
+  FM_FAKE_BUSY=0
+  local out; out=$(run_crew_state "$d" feat-rebased-mismatch)
+  assert_contains "$out" "state: unknown" "mismatched submitted code -> unknown"
+  assert_contains "$out" "source: none" "mismatched submitted code has no authoritative source"
+  assert_not_contains "$out" "source: run-step" "mismatched submitted code is not attributed"
+  pass "active rebased run rejects a mismatched submission ref"
+}
+
+# A parked run with an unavailable historical head is not flattened into
+# working merely because its original submission ref still matches.
+test_parked_unresolved_run_head_not_classified_active() {
+  reset_fakes
+  local d; d=$(new_case parked-submission-ref)
+  make_repo_on_branch "$d/wt" fm/feat-old-parked
+  set_no_mistakes_submission_ref "$d/wt" fm/feat-old-parked
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-old-parked.meta" "window=fm:fm-feat-old-parked" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_RUN_HEAD=dddddddddddddddddddddddddddddddddddddddd
+  FM_FAKE_AXI_STATUS="$(run_parked fm/feat-old-parked)"
+  FM_FAKE_RUNS_LIST=""
+  FM_FAKE_BUSY=0
+  local out; out=$(run_crew_state "$d" feat-old-parked)
+  assert_not_contains "$out" "state: working" "parked unresolved run is not active"
+  assert_not_contains "$out" "source: run-step" "parked unresolved run is not revived by submission ref"
+  pass "parked run with an unresolved head is not classified active"
+}
+
+# A terminal historical run is not revived merely because its original
+# submission ref still equals the worktree HEAD.
+test_terminal_unresolved_run_head_not_revived_by_submission_ref() {
+  reset_fakes
+  local d; d=$(new_case terminal-submission-ref)
+  make_repo_on_branch "$d/wt" fm/feat-old-terminal
+  set_no_mistakes_submission_ref "$d/wt" fm/feat-old-terminal
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-old-terminal.meta" "window=fm:fm-feat-old-terminal" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_RUN_HEAD=cccccccccccccccccccccccccccccccccccccccc
+  FM_FAKE_AXI_STATUS="$(run_passed fm/feat-old-terminal)"
+  FM_FAKE_RUNS_LIST=""
+  FM_FAKE_BUSY=0
+  local out; out=$(run_crew_state "$d" feat-old-terminal)
+  assert_contains "$out" "state: unknown" "terminal unresolved run head -> unknown"
+  assert_contains "$out" "source: none" "terminal unresolved run is not a current source"
+  assert_not_contains "$out" "source: run-step" "terminal run is not revived by a stale submission ref"
+  pass "terminal run is not revived by the submission-ref fallback"
 }
 
 # A different-branch run with NO matching runs-list row must NOT be
@@ -1090,27 +1229,21 @@ test_missing_meta() {
 
 # (k) crew_is_provably_working end-to-end over the REAL fm-crew-state.sh (not a
 # canned fake verdict, unlike tests/fm-watch-triage.test.sh's classifier
-# coverage). This is the direct regression pair for the 2026-07-02 herdr
-# incident: a validating crew whose bare `axi status` answer belongs to
-# another branch must still be absorbed by the watcher via the runs-list
-# fallback (working), while a crew with genuinely no run anywhere and an idle
-# pane must still surface (the safety property the fix must never widen away).
-test_provably_working_via_runs_list_fallback() {
+# coverage). Detailed active status remains authoritative when its exact
+# submitted-code ref binds an unavailable isolated run head.
+test_provably_working_via_detailed_submission_state() {
   reset_fakes
-  local d short; d=$(new_case provably-working-crossbranch)
+  local d; d=$(new_case provably-working-detailed)
   make_repo_on_branch "$d/wt" fm/feat-provable
-  short=$(git -C "$d/wt" rev-parse --short=7 HEAD)
+  set_no_mistakes_submission_ref "$d/wt" fm/feat-provable
   make_fakebin "$d" >/dev/null
   fm_write_meta "$d/state/feat-provable.meta" "window=fm:fm-feat-provable" "worktree=$d/wt" "kind=ship"
-  FM_FAKE_AXI_STATUS="$(run_running fm/other-crew)"
-  FM_FAKE_RUNS_LIST="$(cat <<EOF
-  running    fm/other-crew aaaaaaa  2026-07-02 22:10
-  running    fm/feat-provable ${short}  2026-07-02 22:05
-EOF
-)"
+  FM_FAKE_RUN_HEAD=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  FM_FAKE_AXI_STATUS="$(run_running fm/feat-provable)"
+  FM_FAKE_BUSY=0
   PATH="$d/fakebin:$PATH" FM_STATE_OVERRIDE="$d/state" crew_is_provably_working feat-provable \
-    || fail "cross-branch attribution via the runs list was not treated as provably working"
-  pass "crew_is_provably_working absorbs a validating crew found only via the runs-list fallback"
+    || fail "detailed active submission state was not treated as provably working"
+  pass "crew_is_provably_working trusts detailed active submission state"
 }
 
 test_not_provably_working_when_stopped() {
@@ -1252,9 +1385,15 @@ test_top_level_fixing_ci_running_after_green_stays_working
 test_top_level_fixing_done_log_stays_working
 test_terminal_passed
 test_terminal_failed
-test_cross_branch_attribution_via_runs_list
-test_cross_branch_attribution_picks_most_recent_row
+test_coarse_equal_head_requires_detailed_state
+test_coarse_descendant_head_requires_detailed_state
 test_coarse_run_does_not_probe_other_branch_ci_log_for_ready_status
+test_active_rebased_run_uses_exact_submission_ref
+test_active_rebased_run_precedes_all_backend_fallbacks
+test_cross_branch_coarse_submission_ref_requires_detailed_state
+test_active_rebased_run_rejects_mismatched_submission_ref
+test_parked_unresolved_run_head_not_classified_active
+test_terminal_unresolved_run_head_not_revived_by_submission_ref
 test_other_branch_run_ignored
 test_no_run_busy_pane
 test_no_run_herdr_unknown_uses_backend_capture
@@ -1272,7 +1411,7 @@ test_no_timeout_uses_perl_bound
 test_scout_skips_run_lookup
 test_torn_down_worktree
 test_missing_meta
-test_provably_working_via_runs_list_fallback
+test_provably_working_via_detailed_submission_state
 test_not_provably_working_when_stopped
 test_usage_error
 test_historical_same_branch_rewritten_head_not_current

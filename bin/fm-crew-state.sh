@@ -21,13 +21,18 @@
 # Logic, in order:
 #   1. Resolve worktree + backend target + kind from state/<id>.meta.
 #   2. Matching no-mistakes run for this crew's branch AND current code identity,
-#      active or terminal (from `axi status`, or the coarse `no-mistakes runs`
-#      fallback)? Branch name alone is not enough: a historical run on a reused
-#      branch whose head was rewritten or diverged must not be attributed.
+#      active from detailed `axi status`, or terminal from that status or the
+#      coarse `no-mistakes runs` fallback? Branch name alone is not enough: a
+#      historical run on a reused branch whose head was rewritten or diverged
+#      must not be attributed.
 #      A run matches when its head equals the worktree HEAD, or the worktree HEAD
 #      is an ancestor of the run head (pipeline fix commits advanced the run on
-#      the same line of history). Local work that advanced past the run head, or
-#      diverged from it, invalidates attribution.
+#      the same line of history). A detailed active run whose isolated rebase/fix
+#      head is not comparable in the invoking repository also matches when the
+#      exact no-mistakes submission ref still equals the worktree HEAD. This
+#      second proof requires full gate state; coarse, terminal, and historical
+#      runs still require run-head ancestry. Local work that advanced past the
+#      submitted or run head, or diverged from it, invalidates attribution.
 #      The run-step is AUTHORITATIVE: running/fixing -> working, ci -> working,
 #      awaiting_approval/fix_review -> parked (with gate findings), terminal
 #      passed/checks-passed -> done, failed/cancelled -> failed. EXCEPT: while
@@ -369,15 +374,29 @@ nm_ci_checks_state() {
 # file's history - but this cross-branch path was independently confirmed
 # dead code and is worth having actually work.)
 #
+# Exact active-run submission binding. `no-mistakes axi run` first pushes the
+# invoking branch to the local no-mistakes remote, which updates the corresponding
+# remote-tracking ref to the submitted commit. The pipeline may then rebase and
+# fix in its isolated repository without moving that local tracking ref, so its
+# evolving run head can be absent from or divergent in the invoking repository
+# even though the synchronous run is healthy. Equality here proves both branch
+# and code identity without reading no-mistakes' private database format.
+# Deliberately exact: local work after submission invalidates the proof.
+nm_submission_head_matches_worktree() {  # <branch>
+  local branch=$1 local_full submitted_full
+  local_full=$(git -C "$WT" rev-parse HEAD 2>/dev/null) || return 1
+  submitted_full=$(git -C "$WT" rev-parse --verify "refs/remotes/no-mistakes/${branch}^{commit}" 2>/dev/null) || return 1
+  [ "$submitted_full" = "$local_full" ]
+}
+
 # The real run-listing command is the top-level `no-mistakes runs` (verified:
 # `no-mistakes --help` lists it separately from `axi`). It is plain, human-
 # oriented text - no run id, no JSON/TOON, newest-first, columns
 # "<status> <branch> <short-sha> <date> [<pr-url>]" separated by runs of
 # spaces (verified: no quoting, so splitting on the first two whitespace runs
-# is exact) - but branch + coarse status is exactly what this predicate needs:
-# is a run for THIS branch active right now. Echoes the first (most recent)
-# matching row's status word (running/completed/cancelled/failed), or empty
-# when the branch has no run within FM_CREW_STATE_RUNS_LIMIT rows.
+# is exact). Echoes the first code-matched terminal row's status word
+# (completed/cancelled/failed), or empty when the newest row is running because
+# only detailed status can distinguish active work from a parked gate.
 nm_runs_status_for_branch() {  # <branch>
   local branch=$1 out row st rest br sha
   out=$(nm_run runs --limit "$FM_CREW_STATE_RUNS_LIMIT")
@@ -393,11 +412,9 @@ nm_runs_status_for_branch() {  # <branch>
     rest=$(trim "$rest")
     sha=${rest%% *}
     if [ "$br" = "$branch" ]; then
-      # Same code-identity rule as axi status: skip a same-branch row whose
-      # short-sha does not match this worktree (rewritten or advanced tip).
-      if ! nm_coarse_head_matches_worktree "$sha"; then
-        continue
-      fi
+      [ "$st" = running ] && return 0
+      # Coarse rows have no gate detail, so current-code ancestry is required.
+      nm_coarse_head_matches_worktree "$sha" || continue
       printf '%s' "$st"
       return 0
     fi
@@ -431,6 +448,19 @@ nm_run_head_matches_worktree() {
   return 1
 }
 
+# Full status can use the exact submission ref only while the run is active.
+# Parked full statuses that still say `running` remain attributable, but the
+# run-step mapping below classifies their gate as parked rather than working.
+nm_full_run_matches_worktree() {
+  local status
+  nm_run_head_matches_worktree && return 0
+  status=$(strip_quotes "$(nm_field status)")
+  case "$status" in
+    running|fixing|ci) nm_submission_head_matches_worktree "$CREW_BRANCH" ;;
+    *) return 1 ;;
+  esac
+}
+
 # Coarse runs-list rows are "<status> <branch> <short-sha> ...". 0 if the short
 # sha for this branch row matches the worktree head under the same rules as
 # nm_run_head_matches_worktree (equal, or local is ancestor of run tip).
@@ -459,7 +489,7 @@ if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/n
   RUN_OUT=$(nm_run axi status)
   if [ -n "$RUN_OUT" ]; then
     run_branch=$(strip_quotes "$(nm_field branch)")
-    if [ -n "$run_branch" ] && [ "$run_branch" = "$CREW_BRANCH" ] && nm_run_head_matches_worktree; then
+    if [ -n "$run_branch" ] && [ "$run_branch" = "$CREW_BRANCH" ] && nm_full_run_matches_worktree; then
       HAVE_RUN=1
     else
       # The active-or-most-recent run is for another branch, or same branch with
@@ -487,15 +517,9 @@ if [ "$HAVE_RUN" = 1 ]; then
   CI_LOG_STATE=""
   RUN_STATUS=""
   if [ "$RUN_SOURCE" = coarse ]; then
-    # No step/gate detail is available from the plain runs list - only ever
-    # true/working, done, or failed. A crew genuinely parked at a gate still
-    # gets full detail once `axi status` reports its own branch again (e.g.
-    # once its own step is the most-recently-touched one), and its own
-    # needs-decision/blocked status-log append (a captain-relevant VERB) is
-    # surfaced through signal_reason_is_actionable regardless of this
-    # coarse-vs-full distinction, so a real gate is never silently missed.
+    # No step/gate detail is available from the plain runs list, so only
+    # terminal states reach this authoritative path.
     case "$COARSE_STATUS" in
-      running)   RUN_STATE=working; RUN_DETAIL="validating (background run)" ;;
       completed) RUN_STATE="done";  RUN_DETAIL="run completed" ;;
       failed)    RUN_STATE=failed;  RUN_DETAIL="run failed" ;;
       cancelled) RUN_STATE=failed;  RUN_DETAIL="run cancelled" ;;
