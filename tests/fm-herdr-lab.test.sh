@@ -239,6 +239,41 @@ test_ambient_named_fleet_session_tripwire() {
   pass "fm-herdr-lab: a live named firstmate session is selected by explicit pane identity and preserved exactly"
 }
 
+test_ambient_tripwire_revalidates_pane_identity() {
+  local name="fm-lab-pane-revalidation-$$" snapshot status=0
+  printf '%s\n' firstmate > "$FAKE_STATE/fleet-name"
+  printf '%s\n' false > "$FAKE_STATE/fleet-default"
+  printf '%s\n' true > "$FAKE_STATE/fleet-running"
+  printf '%s\n' '/home/test/.config/herdr/sessions/firstmate/herdr.sock' > "$FAKE_STATE/fleet-socket"
+  printf '%s\n' '/home/test/.config/herdr/sessions/firstmate' > "$FAKE_STATE/fleet-session-dir"
+  printf '%s\n' 'w2:p2P' > "$FAKE_STATE/fleet-pane"
+  : > "$FAKE_LOG"
+  FM_FAKE_AMBIENT_HERDR_ENV=1 FM_FAKE_AMBIENT_HERDR_SESSION=fm-lab-selection-only \
+    FM_FAKE_AMBIENT_HERDR_PANE_ID=w2:p2P \
+    FM_FAKE_AMBIENT_HERDR_SOCKET_PATH='/home/test/.config/herdr/sessions/firstmate/herdr.sock' \
+    run_with_fake fm_herdr_lab_provision "$name" || fail "pane-revalidation provision failed"
+  snapshot=$(cat "$TRIPWIRES/$name.fleet-state.json")
+
+  printf '%s\n' 'w2:p3P' > "$FAKE_STATE/fleet-pane"
+  run_with_fake fm_herdr_lab_check_tripwire "$name" >/dev/null 2>&1 || status=$?
+  expect_code 1 "$status" "a replaced fleet pane must fail the tripwire"
+
+  printf '%s\n' 'w2:p2P' > "$FAKE_STATE/fleet-pane"
+  printf '%s' "$snapshot" | jq -c 'del(.identity.pane_id)' > "$TRIPWIRES/$name.fleet-state.json"
+  status=0
+  run_with_fake fm_herdr_lab_check_tripwire "$name" >/dev/null 2>&1 || status=$?
+  expect_code 1 "$status" "a missing recorded pane identity must fail the tripwire"
+
+  printf '%s' "$snapshot" > "$TRIPWIRES/$name.fleet-state.json"
+  run_with_fake fm_herdr_lab_teardown "$name" || fail "pane-revalidation teardown failed"
+  printf '%s\n' default > "$FAKE_STATE/fleet-name"
+  printf '%s\n' true > "$FAKE_STATE/fleet-default"
+  printf '%s\n' '/home/test/.config/herdr/herdr.sock' > "$FAKE_STATE/fleet-socket"
+  printf '%s\n' '/home/test/.config/herdr' > "$FAKE_STATE/fleet-session-dir"
+  printf '%s\n' 'w0:p0' > "$FAKE_STATE/fleet-pane"
+  pass "fm-herdr-lab: ambient tripwires revalidate the exact live pane and reject incomplete identity"
+}
+
 test_incomplete_ambient_identity_refuses_default_fallback() {
   local name="fm-lab-incomplete-ambient-$$" status=0
   : > "$FAKE_LOG"
@@ -323,6 +358,7 @@ test_provision_run_and_guarded_teardown
 test_missing_tripwire_blocks_destruction
 test_running_default_compatibility_tripwire
 test_ambient_named_fleet_session_tripwire
+test_ambient_tripwire_revalidates_pane_identity
 test_incomplete_ambient_identity_refuses_default_fallback
 test_changed_fleet_session_trips_after_teardown
 test_stopped_owned_lab_can_reprovision

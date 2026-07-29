@@ -282,6 +282,13 @@ fm_send_claude_interrupt_proof_count() {  # <capture>
   printf '%s\n' "$1" | grep -Fc 'Interrupted · What should Claude do instead?' || true
 }
 
+fm_send_claude_insert_footer_present() {
+  printf '%s\n' "$1" | awk '
+    /[^[:space:]]/ { last = $0 }
+    END { exit(last ~ /^[[:space:]]*-- INSERT --[[:space:]]*$/ ? 0 : 1) }
+  '
+}
+
 fm_send_recover_claude_vim() {
   local initial before after before_count after_count state latest_state verdict
   local attempt=0 poll retries sleep_s proof=0
@@ -310,7 +317,7 @@ fm_send_recover_claude_vim() {
     return 1
   }
   before_count=$(fm_send_claude_interrupt_proof_count "$before")
-  if [ "$initial" = empty ] && ! printf '%s\n' "$before" | grep -Fq -- '-- INSERT'; then
+  if [ "$initial" = empty ] && ! fm_send_claude_insert_footer_present "$before"; then
     echo "error: empty-composer Claude Vim recovery requires a positive Insert-mode marker before any key is sent" >&2
     return 1
   fi
@@ -383,7 +390,7 @@ fm_send_recover_claude_vim() {
         return 1
       }
       state=$(fm_backend_composer_state "$TARGET_BACKEND" "$T" "$EXPECTED_LABEL" 2>/dev/null)
-      if printf '%s\n' "$after" | grep -Fq -- '-- INSERT' && [ "$state" = empty ]; then
+      if fm_send_claude_insert_footer_present "$after" && [ "$state" = empty ]; then
         printf 'interrupted\n'
         return 0
       fi

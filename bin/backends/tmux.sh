@@ -57,10 +57,10 @@ fm_backend_tmux_send_text_submit() {  # <target> <text> <retries> <enter-sleep> 
 # Submit text already present in the composer without typing one byte.
 # Used only after Claude Vim recovery has positively proved interruption and
 # re-verified that the pending composer survived every Escape unchanged in
-# semantic state. The shared tmux submit owner retries Enter only.
+# semantic state. The shared tmux submit owner sends one Enter, polls without
+# further input, and accepts only a positively empty composer.
 fm_backend_tmux_submit_pending() {  # <target> <retries> <enter-sleep>
-  [ "$(fm_tmux_composer_state "$1")" = pending ] || { printf 'unknown'; return 0; }
-  fm_tmux_submit_enter_core "$@"
+  fm_tmux_submit_pending_strict "$@"
 }
 
 # fm_backend_tmux_container_ensure: reuse the current tmux session when

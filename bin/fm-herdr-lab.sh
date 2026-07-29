@@ -64,6 +64,14 @@ fm_herdr_lab_normalize_session() {
   jq -c '{name, default, running, session_dir, socket_path}' 2>/dev/null
 }
 
+fm_herdr_lab_pane_identity_matches() { # <session> <pane>
+  local session=$1 pane=$2 pane_info actual
+  pane_info=$(fm_herdr_lab_raw "$session" pane get "$pane" 2>/dev/null) || return 1
+  actual=$(printf '%s' "$pane_info" | jq -er \
+    '.result.pane.pane_id | select(type == "string" and length > 0)' 2>/dev/null) || return 1
+  [ "$actual" = "$pane" ]
+}
+
 # Identify the fleet session without guessing.
 # When invoked inside Herdr, HERDR_ENV plus socket and pane identity must
 # resolve to one running session and that exact live pane. HERDR_SESSION is not
@@ -72,7 +80,7 @@ fm_herdr_lab_normalize_session() {
 # Outside Herdr, retain compatibility with the historical single running
 # `default` session. Partial or contradictory ambient identity never falls back.
 fm_herdr_lab_detect_fleet_state() { # <lab-session>
-  local lab=$1 sessions candidate pane socket matched pane_info session_snapshot
+  local lab=$1 sessions candidate pane socket matched session_snapshot
   sessions=$(fm_herdr_lab_session_list "$lab" 2>/dev/null) || {
     fm_herdr_lab_error "cannot read Herdr sessions for the fleet-state tripwire"
     return 1
@@ -101,12 +109,8 @@ fm_herdr_lab_detect_fleet_state() { # <lab-session>
         return 1
         ;;
     esac
-    pane_info=$(fm_herdr_lab_raw "$candidate" pane get "$pane" 2>/dev/null) || {
+    fm_herdr_lab_pane_identity_matches "$candidate" "$pane" || {
       fm_herdr_lab_error "ambient Herdr pane '$candidate:$pane' is not readable through its explicit session"
-      return 1
-    }
-    [ "$(printf '%s' "$pane_info" | jq -r '.result.pane.pane_id // empty' 2>/dev/null)" = "$pane" ] || {
-      fm_herdr_lab_error "ambient Herdr pane identity did not round-trip through session '$candidate'"
       return 1
     }
     session_snapshot=$(printf '%s' "$matched" | fm_herdr_lab_normalize_session) || return 1
@@ -129,13 +133,36 @@ fm_herdr_lab_detect_fleet_state() { # <lab-session>
 }
 
 fm_herdr_lab_fleet_state_for_tripwire() { # <lab-session> <tripwire-json>
-  local lab=$1 before=$2 sessions fleet_name matched session_snapshot source
-  fleet_name=$(printf '%s' "$before" | jq -r '.session.name // empty' 2>/dev/null)
-  source=$(printf '%s' "$before" | jq -r '.identity.source // empty' 2>/dev/null)
-  if [ -z "$fleet_name" ] \
-     || { [ "$source" != ambient-pane ] && [ "$source" != default-compat ]; }; then
+  local lab=$1 before=$2 sessions fleet_name matched pane session_snapshot source
+  printf '%s' "$before" | jq -e '
+    ((.identity | type) == "object")
+    and ((.session | type) == "object")
+    and ((.identity.source | type) == "string")
+    and ((.session.name | type) == "string" and (.session.name | length) > 0)
+    and ((.session.default | type) == "boolean")
+    and (.session.running == true)
+    and ((.session.socket_path | type) == "string" and (.session.socket_path | length) > 0)
+    and (
+      if .identity.source == "ambient-pane" then
+        ((.identity.pane_id | type) == "string" and (.identity.pane_id | length) > 0)
+      elif .identity.source == "default-compat" then
+        (.session.name == "default" and .session.default == true)
+      else
+        false
+      end
+    )
+  ' >/dev/null 2>&1 || {
     fm_herdr_lab_error "fleet-state tripwire is malformed"
     return 1
+  }
+  fleet_name=$(printf '%s' "$before" | jq -r '.session.name // empty' 2>/dev/null)
+  source=$(printf '%s' "$before" | jq -r '.identity.source // empty' 2>/dev/null)
+  if [ "$source" = ambient-pane ]; then
+    pane=$(printf '%s' "$before" | jq -r '.identity.pane_id' 2>/dev/null)
+    fm_herdr_lab_pane_identity_matches "$fleet_name" "$pane" || {
+      fm_herdr_lab_error "recorded fleet pane '$fleet_name:$pane' is missing or changed"
+      return 1
+    }
   fi
   sessions=$(fm_herdr_lab_session_list "$lab" 2>/dev/null) || {
     fm_herdr_lab_error "cannot read Herdr sessions for the fleet-state tripwire"
