@@ -302,7 +302,9 @@ Activation is deliberately minimal, so that a capacity question never becomes a 
   It remains the sole owner of provider quota semantics; the view only presents what it reports per account.
 - The pool's account directory must be readable by the firstmate home's user.
   It defaults to `~/.cli-proxy-api` and is overridable with `FM_POOL_QUOTA_DIR`.
-- Nothing else is required.
+- On Linux, `xdg-open` must be available for the skill to open the freshly regenerated panel.
+  Without it, the quota read and panel regeneration still complete, but the skill reports that it could not open the panel.
+- No proxy service or Management API access is required.
   The adapter never contacts the proxy service or its Management API, so the proxy does not need to be running and its management interface does not need to be enabled.
   A capacity read that fails is reported as a failed read, never as a reason to enable a management route or restart the service.
 
