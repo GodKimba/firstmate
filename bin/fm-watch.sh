@@ -296,7 +296,8 @@ handle_paused_stale() {  # <window> <task> <hash>
   key=$(printf '%s' "$win" | tr ':/.' '___')
   printf '%s' "$h" > "$STATE/.stale-$key"
   : > "$STATE/.paused-$key"
-  rm -f "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key"
+  rm -f "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key" \
+    "$STATE/.stale-surfaced-$key"
   statusf="$STATE/$task.status"
   mtime=$(stat_mtime "$statusf")
   case "$mtime" in ''|*[!0-9]*) mtime=$(date +%s) ;; esac
@@ -326,7 +327,8 @@ clear_pause_tracking() {  # <window>
   key=${key//\//_}
   key=${key//./_}
   clear_pause_state "$win"
-  rm -f "$STATE/.stale-$key" "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key"
+  rm -f "$STATE/.stale-$key" "$STATE/.stale-since-$key" \
+    "$STATE/.stale-surfaced-$key" "$STATE/.wedge-escalations-$key"
 }
 
 # Reconcile structured status, authoritative current state, and endpoint liveness
@@ -337,11 +339,7 @@ pause_state_class() {  # <window> <task>
   key=${key//\//_}
   key=${key//./_}
   recheck_file="$STATE/.paused-rechecked-$key"
-  if [ "$(window_kind "$win")" = secondmate ]; then
-    endpoint=alive
-  else
-    endpoint=$(fm_backend_agent_alive "$(window_backend "$win")" "$win" 2>/dev/null) || endpoint=unknown
-  fi
+  endpoint=$(fm_backend_agent_alive "$(window_backend "$win")" "$win" 2>/dev/null) || endpoint=unknown
   if [ -e "$STATE/.paused-$key" ] && [ "$(age_of "$recheck_file")" -lt "$STALE_ESCALATE_SECS" ]; then
     verdict=$(crew_supervision_precedence "$STATE/$task.status" paused "$endpoint")
     if [ "$verdict" = paused ]; then
@@ -368,20 +366,13 @@ pause_state_class() {  # <window> <task>
 }
 
 surface_nonterminal_stale() {  # <window> <hash>
-  local win=$1 h=$2 key task last
+  local win=$1 h=$2 key
   key=$(printf '%s' "$win" | tr ':/.' '___')
   fm_wake_append stale "$win" "stale: $win" || exit 1
   printf '%s' "$h" > "$STATE/.stale-$key"
+  printf '%s' "$h" > "$STATE/.stale-surfaced-$key"
   rm -f "$STATE/.stale-since-$key"
-  task=$(window_to_task "$win" "$STATE")
-  last=$(last_status_line "$STATE/$task.status")
-  if status_is_paused_or_captain_held "$last"; then
-    : > "$STATE/.paused-$key"
-    date +%s > "$STATE/.paused-rechecked-$key"
-    date +%s > "$STATE/.paused-resurfaced-$key"
-  else
-    rm -f "$STATE/.paused-$key" "$STATE/.paused-rechecked-$key" "$STATE/.paused-resurfaced-$key"
-  fi
+  clear_pause_state "$win"
   wake "stale: $win"
 }
 
@@ -502,11 +493,15 @@ run_check_capture() {
 # heartbeat backstop enqueues its wake, so the same statuses are not re-surfaced
 # by the next heartbeat.
 mark_all_captain_relevant_surfaced() {
-  local f task last
-  while IFS=$(printf '\t') read -r f task last; do
+  local f _task _last
+  while IFS=$(printf '\t') read -r f _task _last; do
     [ -n "$f" ] || continue
-    printf '%s' "$last" > "$(_hb_surfaced_path "$task")"
+    mark_surfaced "$f" || return 1
   done < <(scan_captain_relevant_statuses "$STATE")
+  for f in "$STATE"/*.status; do
+    [ -e "$f" ] || continue
+    mark_open_decision_occurrences_surfaced "$f" || return 1
+  done
 }
 
 # Cheap heartbeat fleet-scan (the always-on twin of the daemon's catch-all). 0 if
@@ -518,7 +513,12 @@ mark_all_captain_relevant_surfaced() {
 # surfaces only a captain-relevant status the per-wake path absorbed by mistake -
 # the fail-safe backstop.
 heartbeat_scan_finds_actionable() {
-  local f task last surfaced
+  local f _task _verb occurrence _key _summary task last surfaced
+  while IFS=$(printf '\t') read -r f _task _verb occurrence _key _summary; do
+    [ -n "$f" ] || continue
+    decision_occurrence_is_surfaced "$occurrence" && continue
+    return 0
+  done < <(scan_open_decisions "$STATE")
   while IFS=$(printf '\t') read -r f task last; do
     [ -n "$f" ] || continue
     if [ "$(status_line_verb "$last")" = needs-decision ] \
@@ -978,7 +978,10 @@ EOF
                          printf '%s' "$h" > "$sf"
                          wedge_timer_check "$w" "$ssf" "non-terminal stale (provably working after a declared pause)" "$ewf"
                          triage_log "absorbed non-terminal stale (provably working): $w" ;;
-                *)       handle_paused_stale "$w" "$task" "$h" ;;
+                *)       clear_pause_state "$w"
+                         if [ "$(cat "$STATE/.stale-surfaced-$key" 2>/dev/null || true)" != "$h" ]; then
+                           surface_nonterminal_stale "$w" "$h"
+                         fi ;;
               esac
             else
               wedge_timer_check "$w" "$ssf" "non-terminal stale" "$ewf"

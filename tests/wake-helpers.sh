@@ -131,6 +131,7 @@ case "${1:-}" in
     # Return cursor_y when the format asks for it (pane_input_pending).
     for _a in "$@"; do
       case "$_a" in *cursor_y*) printf '%s\n' "${FM_FAKE_TMUX_CURSOR_Y:-0}"; exit 0 ;; esac
+      case "$_a" in *pane_current_command*) printf '%s\n' "${FM_FAKE_TMUX_CURRENT_COMMAND:-}"; exit 0 ;; esac
       [ "$_a" = "-p" ] && _print=1
     done
     [ "$_print" = 1 ] && printf 'fakepane\n'
@@ -193,6 +194,7 @@ esac
 exit 1
 SH
   chmod +x "$fakebin/tmux"
+  make_fake_crew_state "$fakebin" >/dev/null
   printf '%s\n' "$dir"
 }
 

@@ -20,9 +20,9 @@
 # bin/fm-crew-state.sh, which may make bounded no-mistakes and GitHub check-run
 # calls, to decide
 # whether a crew that just stopped its turn or went stale is working, deliberately
-# paused, or neither. Callers run it ONLY on no-verb signal handling and first
-# sighting of a stale hash, never on every wake, so the per-wake triage stays
-# cheap.
+# paused, or neither. Callers run it only for no-verb signals, candidate pauses,
+# first-sighting stale hashes, and bounded pause rechecks, so routine transition
+# triage stays cheap.
 
 # Directory of this library, used to locate the sibling fm-crew-state.sh reader.
 # Resolved at source time from BASH_SOURCE so it works whether sourced by a
@@ -718,6 +718,23 @@ $(_fm_status_open_decisions_stream "$answers" --with-authority < "$f")
 EOF
 }
 
+status_open_supervision_decisions() {  # <status-file>
+  local f=$1 stream raw key verb instance summary
+  stream=$(fm_decision_stream_id "$f" 2>/dev/null || true)
+  if [ -z "$stream" ]; then
+    [ -f "$f" ] && [ ! -L "$f" ] || return 0
+    raw=$(printf 'legacy-status:%s' "$f" | fm_decision_hash_text) || return 0
+    stream=$(printf '%s' "$raw" | cut -c1-32)
+    [ "${#stream}" -eq 32 ] || return 0
+  fi
+  while IFS=$'\t' read -r key verb instance summary || [ -n "$key" ]; do
+    [ -n "$key" ] || continue
+    printf '%s\t%s\t%s.%s\t%s\n' "$key" "$verb" "$stream" "$instance" "$summary"
+  done <<EOF
+$(status_open_decisions "$f" --with-instance)
+EOF
+}
+
 status_has_open_token_needs_decision() {  # <status-file>
   local key _occurrence _summary
   while IFS=$'\t' read -r key _occurrence _summary || [ -n "$key" ]; do
@@ -728,10 +745,11 @@ EOF
   return 1
 }
 
-status_latest_needs_decision_is_open_token_occurrence() {  # <status-file>
+status_latest_decision_is_open_occurrence() {  # <status-file> [needs-decision|blocked]
   local f=$1 line marker stripped latest='' position=0 latest_position=0
-  local stream='' latest_stream='' key instance open_key open_instance _summary
-  fm_decision_stream_id "$f" >/dev/null || return 1
+  local expected=${2:-} stream='' latest_stream='' key verb instance
+  local open_key open_verb open_instance _summary
+  [ -f "$f" ] && [ ! -L "$f" ] || return 1
   while IFS= read -r line || [ -n "$line" ]; do
     position=$((position + 1))
     if marker=$(fm_decision_marker_line_id "$line"); then
@@ -744,18 +762,26 @@ status_latest_needs_decision_is_open_token_occurrence() {  # <status-file>
     latest_position=$position
     latest_stream=$stream
   done < "$f"
-  [ "$(status_line_verb "$latest")" = needs-decision ] || return 1
-  [ -n "$latest_stream" ] || return 1
+  verb=$(status_line_verb "$latest")
+  case "$verb" in needs-decision|blocked) ;; *) return 1 ;; esac
+  [ -z "$expected" ] || [ "$verb" = "$expected" ] || return 1
+  [ "$expected" != needs-decision ] || [ -n "$latest_stream" ] || return 1
   key=$(_fm_decision_key "$latest") || return 1
   instance=$(fm_decision_instance_id "$latest_position" "$latest_stream") || return 1
-  while IFS=$'\t' read -r open_key open_instance _summary || [ -n "$open_key" ]; do
+  while IFS=$'\t' read -r open_key open_verb open_instance _summary || [ -n "$open_key" ]; do
     [ "$open_key" = "$key" ] || continue
+    [ "$open_verb" = "$verb" ] || continue
     [ "$open_instance" = "$instance" ] || continue
     return 0
   done <<EOF
-$(status_open_needs_decisions "$f")
+$(status_open_decisions "$f" --with-instance)
 EOF
   return 1
+}
+
+status_latest_needs_decision_is_open_token_occurrence() {  # <status-file>
+  fm_decision_stream_id "$1" >/dev/null || return 1
+  status_latest_decision_is_open_occurrence "$1" needs-decision
 }
 
 status_has_open_needs_decision() {  # <status-file>
@@ -881,8 +907,8 @@ signal_reason_is_actionable() {  # <file> ...
 # authoritatively (not the status log) is what keeps run-step precedence: a crew
 # that appended paused: but then STARTED a run reports working, never paused.
 # NOT a pure read: fm-crew-state.sh may make bounded no-mistakes and GitHub
-# check-run calls, so callers run it only on no-verb signal and first-sighting
-# stale paths, never every wake.
+# check-run calls, so callers run it only on no-verb signals, candidate pauses,
+# first-sighting stale paths, and bounded pause rechecks.
 # FM_CREW_STATE_BIN lets tests stub the verdict.
 crew_absorb_class() {  # <id>
   local id=$1 line state src
@@ -1027,6 +1053,23 @@ scan_open_needs_decisions() {  # <state>
       printf '%s\t%s\t%s\t%s\t%s\n' "$f" "$task" "$instance" "$key" "$summary"
     done <<EOF
 $(status_open_token_needs_decisions "$f")
+EOF
+  done
+  return 0
+}
+
+# Print one row per folded open decision or blocker supervision occurrence:
+# "<file>\t<task>\t<verb>\t<instance>\t<key>\t<summary>".
+scan_open_decisions() {  # <state>
+  local state=$1 f task key verb instance summary
+  for f in "$state"/*.status; do
+    [ -e "$f" ] || continue
+    task=$(basename "$f"); task="${task%.status}"
+    while IFS=$'\t' read -r key verb instance summary || [ -n "$key" ]; do
+      [ -n "$key" ] || continue
+      printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$f" "$task" "$verb" "$instance" "$key" "$summary"
+    done <<EOF
+$(status_open_supervision_decisions "$f")
 EOF
   done
   return 0

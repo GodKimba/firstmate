@@ -739,6 +739,9 @@ test_dead_pause_surfaces_but_captain_hold_and_open_decision_keep_precedence() {
   bare=$(awk -F '\t' -v w="$window" '$3 == "stale" && $4 == w && $5 == "stale: " w { n++ } END { print n + 0 }' "$state/.wake-queue")
   [ "$wakes" -eq 1 ] || fail "dead-agent declared pause should surface once, got $wakes wakes"
   [ "$bare" -eq 1 ] || fail "dead-agent declared pause did not surface as one bare endpoint-loss wake"
+  [ "$(cat "$state/.stale-surfaced-$key" 2>/dev/null || true)" = "$pane_hash" ] \
+    || fail "dead-agent declared pause did not retain normal stale dedup"
+  [ ! -e "$state/.paused-$key" ] || fail "dead-agent declared pause retained pause cadence tracking"
 
   dir=$(make_case exited-captain-held); state="$dir/state"; fakebin="$dir/fakebin"
   out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/held.status"
@@ -823,6 +826,7 @@ test_secondmate_paused_resurfaces_in_normal_mode() {
   printf '1\n' > "$state/.count-$key"
   export FM_FAKE_CREW_STATE='state: paused · source: status-log · awaiting the upstream release'
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=claude \
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_PAUSE_RESURFACE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
@@ -901,7 +905,7 @@ test_nonterminal_stale_pause_transitions_reclassify_unchanged_hash() {
   export FM_FAKE_CREW_STATE='state: paused · source: status-log · awaiting the upstream release'
 
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
-    FM_FAKE_TMUX_CURRENT_COMMAND=zsh \
+    FM_FAKE_TMUX_CURRENT_COMMAND=claude \
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
@@ -1314,6 +1318,38 @@ test_retained_decision_surfaces_signal_and_heartbeat_once() {
   pass "retained decisions surface through signal and heartbeat once per occurrence while workers remain active"
 }
 
+test_retained_blocker_surfaces_heartbeat_once() {
+  local dir state fakebin out out2 status_file instance marker sig pid
+  dir=$(make_case retained-blocker-heartbeat); state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"
+  status_file="$state/retained-blocker.status"
+  printf '%s\n' \
+    'blocked [key=database]: maintenance failed' \
+    'paused [key=external]: waiting for maintenance completion' > "$status_file"
+  instance=$(status_open_supervision_decisions "$status_file" | awk -F '\t' '$2 == "blocked" { print $3; exit }')
+  [ -n "$instance" ] || fail "retained blocker occurrence was not folded open"
+  sig=$(seen_sig "$status_file"); printf '%s' "$sig" > "$state/.seen-retained-blocker_status"
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=1 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "heartbeat did not surface a retained blocker behind a later pause"
+  grep -Fx heartbeat "$out" >/dev/null || fail "retained blocker did not surface through heartbeat notification"
+  marker="$state/.hb-surfaced-decision-$instance"
+  [ "$(cat "$marker" 2>/dev/null || true)" = "$instance" ] \
+    || fail "heartbeat did not deduplicate the retained blocker by occurrence"
+
+  out2="$dir/watch-second.out"
+  rm -f "$state/.last-heartbeat"
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=1 "$WATCH" > "$out2" &
+  pid=$!
+  if ! wait_live "$pid" 30; then
+    reap "$pid"
+    fail "retained blocker re-surfaced after its occurrence marker was recorded: $(cat "$out2")"
+  fi
+  reap "$pid"
+  pass "retained blockers behind later pauses surface once through heartbeat"
+}
+
 test_malformed_decision_behind_open_decision_surfaces() {
   local dir state fakebin out status_file instance marker pid queue
   dir=$(make_case malformed-behind-open-decision); state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"
@@ -1465,6 +1501,7 @@ test_triage_log_size_cap_accepts_spaced_wc_counts
 test_heartbeat_no_change_absorbed
 test_heartbeat_backstop_surfaces_unsurfaced_status
 test_retained_decision_surfaces_signal_and_heartbeat_once
+test_retained_blocker_surfaces_heartbeat_once
 test_malformed_decision_behind_open_decision_surfaces
 test_beacon_stays_fresh_while_absorbing
 test_afk_present_reverts_watcher_to_one_shot

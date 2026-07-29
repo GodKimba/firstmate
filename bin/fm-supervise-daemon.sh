@@ -317,7 +317,7 @@ _collapse_newlines() {  # <text>
 # them exactly as before; the away launcher reuses the identical resolution to
 # pass the captain pane in as FM_SUPERVISOR_TARGET.
 
-# --- classification helpers (PURE: no side effects, testable) ---------------
+# --- classification helpers -------------------------------------------------
 # last_status_line, status_is_captain_relevant, window_to_task, and
 # scan_captain_relevant_statuses come from bin/fm-classify-lib.sh (sourced above),
 # the single classifier shared with bin/fm-watch.sh. The decision-string wrappers
@@ -328,32 +328,75 @@ _collapse_newlines() {  # <text>
 # field for "self" is informational (logged); for "escalate" it is the pre-read
 # summary firstmate would otherwise have to re-read.
 
+daemon_pause_recheck_path() {  # <state> <task>
+  printf '%s/.subsuper-pause-rechecked-%s' "$1" "$(_stale_key "$2")"
+}
+
+daemon_pause_state_class() {  # <window> <state> <task>
+  local win=$1 state=$2 task=$3 backend endpoint current verdict recheck last seen
+  backend=$(task_window_backend "$win" "$state")
+  endpoint=$(fm_backend_agent_alive "$backend" "$win" 2>/dev/null) || endpoint=unknown
+  recheck=$(daemon_pause_recheck_path "$state" "$task")
+  if [ -e "$state/.subsuper-paused-$(_stale_key "$task")" ] \
+    && [ "$(_file_age "$recheck")" -lt "${FM_STALE_ESCALATE_SECS:-$STALE_ESCALATE_SECS_DEFAULT}" ]; then
+    verdict=$(crew_supervision_precedence "$state/$task.status" paused "$endpoint")
+    if [ "$verdict" = paused ]; then
+      printf 'paused'
+      return
+    fi
+  fi
+  current=$(crew_absorb_class "$task")
+  verdict=$(crew_supervision_precedence "$state/$task.status" "$current" "$endpoint")
+  if [ "$verdict" = paused ]; then
+    _now > "$recheck"
+    [ -z "$win" ] || pause_marker_record "$win" "$state"
+    last=$(last_status_line "$state/$task.status")
+    seen="$state/.subsuper-seen-status-$(_stale_key "$task")"
+    [ "$(cat "$seen" 2>/dev/null || true)" != "$last" ] || rm -f "$seen"
+  else
+    rm -f "$recheck"
+  fi
+  printf '%s' "$verdict"
+}
+
 classify_signal() {  # <reason-after-colon> <state>
   local reason=$1 state=$2 f last distilled="" rel="" all_seen=1 task seen
-  local key instance summary
+  local key verb instance summary file_open precedence
   for f in $reason; do
     [ -e "$f" ] || continue
     last=$(last_status_line "$f")
     [ -n "$last" ] || continue
     distilled="${distilled}$(basename "$f"): ${last} | "
     task=$(basename "$f"); task="${task%.status}"
+    file_open=
+    while IFS=$'\t' read -r key verb instance summary || [ -n "$key" ]; do
+      [ -n "$key" ] || continue
+      file_open=1
+      rel=1
+      distilled="${distilled}$(basename "$f"): open $verb [key=$key] [occurrence=$instance]: $summary | "
+      seen="$state/.subsuper-seen-decision-$instance"
+      [ "$(cat "$seen" 2>/dev/null || true)" = "$instance" ] || all_seen=0
+    done <<EOF
+$(status_open_supervision_decisions "$f")
+EOF
     if status_is_captain_relevant "$last"; then
-      if [ "$(status_line_verb "$last")" != needs-decision ] \
-        || ! status_latest_needs_decision_is_open_token_occurrence "$f"; then
+      if ! status_latest_decision_is_open_occurrence "$f"; then
         rel=1
         seen="$state/.subsuper-seen-status-$(_stale_key "$task")"
         [ "$(cat "$seen" 2>/dev/null || true)" = "$last" ] || all_seen=0
       fi
+    elif status_is_paused "$last" && [ -z "$file_open" ]; then
+      precedence=$(daemon_pause_state_class "$(window_for_task "$(_stale_key "$task")" "$state" 2>/dev/null || true)" "$state" "$task")
+      if [ "$precedence" = none ]; then
+        rel=1
+        seen="$state/.subsuper-seen-status-$(_stale_key "$task")"
+        [ "$(cat "$seen" 2>/dev/null || true)" = "$last" ] || all_seen=0
+        distilled="${distilled}$(basename "$f"): declared pause is not current on a live endpoint | "
+      elif [ "$precedence" = actionable ]; then
+        rel=1
+        all_seen=0
+      fi
     fi
-    while IFS=$'\t' read -r key instance summary || [ -n "$key" ]; do
-      [ -n "$key" ] || continue
-      rel=1
-      distilled="${distilled}$(basename "$f"): open needs-decision [key=$key] [occurrence=$instance]: $summary | "
-      seen="$state/.subsuper-seen-decision-$instance"
-      [ "$(cat "$seen" 2>/dev/null || true)" = "$instance" ] || all_seen=0
-    done <<EOF
-$(status_open_token_needs_decisions "$f")
-EOF
   done
   # strip a trailing " | " separator so the distilled line is clean
   distilled="${distilled% | }"
@@ -372,16 +415,16 @@ EOF
 # first sight of a non-terminal stale it returns "self" and the caller records a
 # timestamp marker; persistence is escalated by housekeeping's recheck, not here.
 classify_stale() {  # <window> <state>
-  local win=$1 state=$2 task last seen key instance summary rel="" all_seen=1 distilled="" precedence current endpoint
+  local win=$1 state=$2 task last seen key verb instance summary rel="" all_seen=1 distilled="" precedence
   task=$(window_to_task "$win" "$state")
-  while IFS=$'\t' read -r key instance summary || [ -n "$key" ]; do
+  while IFS=$'\t' read -r key verb instance summary || [ -n "$key" ]; do
     [ -n "$key" ] || continue
     rel=1
-    distilled="${distilled}${distilled:+ | }open needs-decision [key=$key] [occurrence=$instance]: $summary"
+    distilled="${distilled}${distilled:+ | }open $verb [key=$key] [occurrence=$instance]: $summary"
     seen="$state/.subsuper-seen-decision-$instance"
     [ "$(cat "$seen" 2>/dev/null || true)" = "$instance" ] || all_seen=0
   done <<EOF
-$(status_open_token_needs_decisions "$state/$task.status")
+$(status_open_supervision_decisions "$state/$task.status")
 EOF
   if [ -n "$rel" ]; then
     if [ "$all_seen" = 1 ]; then
@@ -392,16 +435,11 @@ EOF
     return
   fi
   last=$(last_status_line "$state/$task.status")
-  current=none
-  endpoint=unknown
   if status_is_paused "$last"; then
-    # Away-mode persistence separately rechecks pane liveness before retaining a
-    # pause marker. Supply the status-confirmed pause here so the shared owner can
-    # still enforce open-decision/blocker precedence without a second policy.
-    current=paused
-    endpoint=alive
+    precedence=$(daemon_pause_state_class "$win" "$state" "$task")
+  else
+    precedence=$(crew_supervision_precedence "$state/$task.status" none unknown)
   fi
-  precedence=$(crew_supervision_precedence "$state/$task.status" "$current" "$endpoint")
   if [ "$precedence" = actionable ] && { [ -z "$last" ] || ! status_is_captain_relevant "$last"; }; then
     printf 'escalate|stale + open structured decision or blocker'
     return
@@ -409,10 +447,17 @@ EOF
   if [ "$precedence" = paused ]; then
     # A DECLARED external-wait pause (fm-classify-lib.sh): an idle pane is EXPECTED,
     # so this is not a wedge. The caller records a pause marker (long re-surface
-    # cadence in housekeeping) rather than a wedge stale marker. Cheap: reuses the
-    # status line already read, no fm-crew-state.sh call, mirroring the daemon's
-    # existing status-log classification.
+    # cadence in housekeeping) rather than a wedge stale marker.
     printf 'pause|paused (awaiting external), rechecked on a long cadence: %s' "$last"
+    return
+  fi
+  if status_is_paused "$last" && [ "$precedence" = none ]; then
+    seen="$state/.subsuper-seen-status-$(_stale_key "$task")"
+    if [ "$(cat "$seen" 2>/dev/null || true)" = "$last" ]; then
+      printf 'self|stale + invalid pause already escalated: %s' "$last"
+    else
+      printf 'escalate|stale + declared pause is not current on a live endpoint: %s' "$last"
+    fi
     return
   fi
   if [ "$precedence" = actionable ]; then
@@ -493,9 +538,10 @@ pause_marker_record() {  # <window> <state> - create if absent
 }
 
 pause_marker_remove() {  # <window> <state>
-  local win=$1 state=$2 key
-  key=$(_stale_key "$(window_to_task "$win" "$state")")
-  rm -f "$state/.subsuper-paused-$key"
+  local win=$1 state=$2 key task
+  task=$(window_to_task "$win" "$state")
+  key=$(_stale_key "$task")
+  rm -f "$state/.subsuper-paused-$key" "$(daemon_pause_recheck_path "$state" "$task")"
 }
 
 clear_pause_tracking() {  # <window> <state>
@@ -503,27 +549,48 @@ clear_pause_tracking() {  # <window> <state>
   task=$(window_to_task "$win" "$state")
   key=$(_stale_key "$task")
   watcher_key=$(_stale_key "$win")
-  rm -f "$state/.subsuper-paused-$key" "$state/.subsuper-stale-$key" \
-    "$state/.paused-$watcher_key" "$state/.paused-rechecked-$watcher_key" "$state/.paused-resurfaced-$watcher_key" \
+  rm -f "$state/.subsuper-paused-$key" \
+    "$(daemon_pause_recheck_path "$state" "$task")" \
+    "$state/.paused-$watcher_key" "$state/.paused-rechecked-$watcher_key" "$state/.paused-resurfaced-$watcher_key"
+  rm -f "$state/.subsuper-stale-$key" \
     "$state/.stale-$watcher_key" "$state/.stale-since-$watcher_key" "$state/.wedge-escalations-$watcher_key"
 }
 
+clear_pause_markers() {  # <window> <state>
+  local win=$1 state=$2 task key watcher_key
+  task=$(window_to_task "$win" "$state")
+  key=$(_stale_key "$task")
+  watcher_key=$(_stale_key "$win")
+  rm -f "$state/.subsuper-paused-$key" \
+    "$(daemon_pause_recheck_path "$state" "$task")" \
+    "$state/.paused-$watcher_key" "$state/.paused-rechecked-$watcher_key" "$state/.paused-resurfaced-$watcher_key"
+}
+
 reconcile_pause_tracking() {  # <window> <state> <last-status-line>
-  local win=$1 state=$2 last=$3 task key marker watcher_key
+  local win=$1 state=$2 last=$3 task key marker watcher_key verdict=none
   task=$(window_to_task "$win" "$state")
   key=$(_stale_key "$task")
   marker="$state/.subsuper-paused-$key"
   watcher_key=$(_stale_key "$win")
   if status_is_paused "$last"; then
-    stale_marker_remove "$win" "$state"
-    pause_marker_record "$win" "$state"
+    verdict=$(daemon_pause_state_class "$win" "$state" "$task")
+    if [ "$verdict" = paused ]; then
+      stale_marker_remove "$win" "$state"
+      pause_marker_record "$win" "$state"
+      _now > "$(daemon_pause_recheck_path "$state" "$task")"
+    elif [ "$verdict" = working ]; then
+      clear_pause_markers "$win" "$state"
+    else
+      clear_pause_tracking "$win" "$state"
+    fi
   elif [ -e "$marker" ] || [ -e "$state/.paused-$watcher_key" ]; then
     clear_pause_tracking "$win" "$state"
   fi
+  printf '%s' "$verdict"
 }
 
 migrate_watcher_pause_markers() {  # <state>
-  local state=$1 meta win task key last watcher_key
+  local state=$1 meta win task key last watcher_key verdict seen
   for meta in "$state"/*.meta; do
     [ -e "$meta" ] || continue
     win=$(fm_backend_target_of_meta "$meta")
@@ -532,8 +599,22 @@ migrate_watcher_pause_markers() {  # <state>
     key=$(_stale_key "$task")
     watcher_key=$(_stale_key "$win")
     last=$(last_status_line "$state/$task.status")
-    if status_is_paused "$last" || [ -e "$state/.subsuper-paused-$key" ] || [ -e "$state/.paused-$watcher_key" ]; then
-      reconcile_pause_tracking "$win" "$state" "$last"
+    if status_is_paused "$last" \
+      && { [ -e "$state/.paused-$watcher_key" ] \
+        || { [ ! -e "$state/.subsuper-paused-$key" ] \
+          && [ ! -e "$state/.subsuper-stale-$key" ]; }; }; then
+      verdict=$(reconcile_pause_tracking "$win" "$state" "$last")
+      if [ "$verdict" = none ]; then
+        seen="$state/.subsuper-seen-status-$key"
+        if [ "$(cat "$seen" 2>/dev/null || true)" != "$last" ]; then
+          escalate_add "$state" "$(basename "$state/$task.status"): declared pause is not current on a live endpoint"
+          mark_status_seen "$state" "$task" "$last"
+        fi
+        stale_marker_record "$win" "$state"
+      fi
+    elif ! status_is_paused "$last" \
+      && { [ -e "$state/.subsuper-paused-$key" ] || [ -e "$state/.paused-$watcher_key" ]; }; then
+      clear_pause_tracking "$win" "$state"
     fi
   done
 }
@@ -549,7 +630,7 @@ sync_pause_markers_from_signal() {  # <state> <signal files>
     task=$(basename "$f"); task=${task%.status}
     win=$(window_for_task "$task" "$state" 2>/dev/null || true)
     [ -n "$win" ] || continue
-    reconcile_pause_tracking "$win" "$state" "$last"
+    reconcile_pause_tracking "$win" "$state" "$last" >/dev/null
   done
 }
 
@@ -563,12 +644,12 @@ mark_status_seen() {  # <state> <task> <last-line>
 }
 
 mark_open_decisions_seen() {  # <state> <status-file>
-  local state=$1 f=$2 key instance _summary
-  while IFS=$'\t' read -r key instance _summary || [ -n "$key" ]; do
+  local state=$1 f=$2 key _verb instance _summary
+  while IFS=$'\t' read -r key _verb instance _summary || [ -n "$key" ]; do
     [ -n "$key" ] || continue
     printf '%s' "$instance" > "$state/.subsuper-seen-decision-$instance"
   done <<EOF
-$(status_open_token_needs_decisions "$f")
+$(status_open_supervision_decisions "$f")
 EOF
 }
 
@@ -584,11 +665,10 @@ mark_escalated_seen() {  # <kind> <arg> <state>
         mark_open_decisions_seen "$state" "$f"
         last=$(last_status_line "$f")
         [ -n "$last" ] || continue
-        status_is_captain_relevant "$last" || continue
-        if [ "$(status_line_verb "$last")" = needs-decision ] \
-          && status_latest_needs_decision_is_open_token_occurrence "$f"; then
+        if status_latest_decision_is_open_occurrence "$f"; then
           continue
         fi
+        status_is_captain_relevant "$last" || status_is_paused "$last" || continue
         task=$(basename "$f"); task="${task%.status}"
         mark_status_seen "$state" "$task" "$last"
       done ;;
@@ -596,9 +676,9 @@ mark_escalated_seen() {  # <kind> <arg> <state>
       task=$(window_to_task "$arg" "$state")
       mark_open_decisions_seen "$state" "$state/$task.status"
       last=$(last_status_line "$state/$task.status")
-      [ -n "$last" ] && status_is_captain_relevant "$last" \
-        && { [ "$(status_line_verb "$last")" != needs-decision ] \
-          || ! status_latest_needs_decision_is_open_token_occurrence "$state/$task.status"; } \
+      [ -n "$last" ] \
+        && { status_is_captain_relevant "$last" || status_is_paused "$last"; } \
+        && ! status_latest_decision_is_open_occurrence "$state/$task.status" \
         && mark_status_seen "$state" "$task" "$last" ;;
   esac
 }
@@ -996,7 +1076,7 @@ _oldest_line_age() {  # <buf> -> seconds since the oldest buffered item first ar
 #  3) heartbeat scan: every HEARTBEAT_SCAN_SECS, grep state/*.status for a
 #     captain-relevant line the per-wake classifier missed and escalate it.
 housekeeping() {  # <state>
-  local state=$1 now due f key task win marker age last max_defer oldest pause_secs
+  local state=$1 now due f key task win marker age last max_defer oldest pause_secs verdict seen
   now=$(_now)
   migrate_watcher_pause_markers "$state"
 
@@ -1044,8 +1124,20 @@ housekeeping() {  # <state>
     task=$(window_to_task "$win" "$state")
     last=$(last_status_line "$state/$task.status")
     if [ -n "$last" ] && status_is_paused "$last"; then
-      reconcile_pause_tracking "$win" "$state" "$last"
-      continue
+      verdict=$(reconcile_pause_tracking "$win" "$state" "$last")
+      case "$verdict" in
+        paused|actionable) continue ;;
+        working) ;;
+        none)
+          seen="$state/.subsuper-seen-status-$(_stale_key "$task")"
+          if [ "$(cat "$seen" 2>/dev/null || true)" != "$last" ]; then
+            escalate_add "$state" "$task.status: declared pause is not current on a live endpoint"
+            mark_status_seen "$state" "$task" "$last"
+          fi
+          stale_marker_record "$win" "$state"
+          continue
+          ;;
+      esac
     fi
     age=$(( now - $(cat "$marker" 2>/dev/null || echo "$now") ))
     [ "$age" -ge "${FM_STALE_ESCALATE_SECS:-$STALE_ESCALATE_SECS_DEFAULT}" ] || continue
@@ -1075,15 +1167,34 @@ housekeeping() {  # <state>
     task=$(window_to_task "$win" "$state")
     last=$(last_status_line "$state/$task.status")
     if [ -z "$last" ] || ! status_is_paused "$last"; then
-      reconcile_pause_tracking "$win" "$state" "$last"
+      reconcile_pause_tracking "$win" "$state" "$last" >/dev/null
       continue
     fi
+    verdict=$(daemon_pause_state_class "$win" "$state" "$task")
+    case "$verdict" in
+      paused) ;;
+      actionable|working)
+        clear_pause_tracking "$win" "$state"
+        [ "$verdict" != working ] || stale_marker_record "$win" "$state"
+        continue
+        ;;
+      none)
+        seen="$state/.subsuper-seen-status-$(_stale_key "$task")"
+        if [ "$(cat "$seen" 2>/dev/null || true)" != "$last" ]; then
+          escalate_add "$state" "$task.status: declared pause is not current on a live endpoint"
+          mark_status_seen "$state" "$task" "$last"
+        fi
+        clear_pause_tracking "$win" "$state"
+        stale_marker_record "$win" "$state"
+        continue
+        ;;
+    esac
     age=$(( now - $(cat "$marker" 2>/dev/null || echo "$now") ))
     [ "$age" -ge "$pause_secs" ] || continue
     stale_window_is_busy "$win" "$state"
     case "$?" in
-      0) rm -f "$marker" ;;
-      2) rm -f "$marker" ;;
+      0) clear_pause_tracking "$win" "$state" ;;
+      2) clear_pause_tracking "$win" "$state" ;;
       *)
         last=$(last_status_line "$state/$task.status")
         if [ -n "$last" ] && status_is_paused "$last"; then
@@ -1102,18 +1213,17 @@ housekeeping() {  # <state>
   #     scan_captain_relevant_statuses; the daemon layers its digest dedup on top.
   if [ "$(_file_age "$state/.subsuper-last-scan")" -ge "${FM_HEARTBEAT_SCAN_SECS:-$HEARTBEAT_SCAN_SECS_DEFAULT}" ]; then
     _now > "$state/.subsuper-last-scan"
-    local seen instance key summary
-    while IFS="$(printf '\t')" read -r f task instance key summary; do
+    local instance verb summary
+    while IFS="$(printf '\t')" read -r f task verb instance key summary; do
       [ -n "$f" ] || continue
       seen="$state/.subsuper-seen-decision-$instance"
       [ "$(cat "$seen" 2>/dev/null || true)" = "$instance" ] && continue
-      escalate_add "$state" "$(basename "$f"): open needs-decision [key=$key] [occurrence=$instance]: $summary (catch-all scan)"
+      escalate_add "$state" "$(basename "$f"): open $verb [key=$key] [occurrence=$instance]: $summary (catch-all scan)"
       printf '%s' "$instance" > "$seen"
-    done < <(scan_open_needs_decisions "$state")
+    done < <(scan_open_decisions "$state")
     while IFS="$(printf '\t')" read -r f task last; do
       [ -n "$f" ] || continue
-      if [ "$(status_line_verb "$last")" = needs-decision ] \
-        && status_latest_needs_decision_is_open_token_occurrence "$f"; then
+      if status_latest_decision_is_open_occurrence "$f"; then
         continue
       fi
       seen="$state/.subsuper-seen-status-$(_stale_key "$task")"
@@ -1273,9 +1383,20 @@ handle_wake() {  # <reason> <state>
     escalate)
       log "escalate: $reason -> $distilled"
       escalate_add "$state" "$distilled"
-      # A terminal-stale escalate must not leave a persistence marker behind, or
-      # housekeeping re-escalates the same pane as a false wedge later.
-      [ "$kind" = "stale" ] && stale_marker_remove "$arg" "$state"
+      # Terminal and structured-decision stale escalations drop persistence
+      # tracking; an invalid pause resumes normal stale aging.
+      if [ "$kind" = stale ]; then
+        task=$(window_to_task "$arg" "$state")
+        last=$(last_status_line "$state/$task.status")
+        if status_is_paused "$last"; then
+          clear_pause_tracking "$arg" "$state"
+          if [ "$(crew_supervision_precedence "$state/$task.status" none unknown)" != actionable ]; then
+            stale_marker_record "$arg" "$state"
+          fi
+        else
+          stale_marker_remove "$arg" "$state"
+        fi
+      fi
       mark_escalated_seen "$kind" "$arg" "$state"
       [ "${FM_ESCALATE_BATCH_SECS:-$ESCALATE_BATCH_SECS_DEFAULT}" -le 0 ] && { escalate_flush "$state" || true; }
       ;;
@@ -1287,6 +1408,7 @@ handle_wake() {  # <reason> <state>
       if [ "$kind" = "stale" ]; then
         stale_marker_remove "$arg" "$state"
         pause_marker_record "$arg" "$state"
+        _now > "$(daemon_pause_recheck_path "$state" "$(window_to_task "$arg" "$state")")"
       fi
       log "self-handle (paused): $reason -> $distilled"
       ;;
