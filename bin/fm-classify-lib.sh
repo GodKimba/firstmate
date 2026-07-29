@@ -688,9 +688,10 @@ EOF
 }
 
 status_open_decisions() {  # <status-file> [--with-instance]
-  local f=$1 view=${2:-}
+  local f=$1 view=${2:-} answers
   [ -f "$f" ] || return 0
-  _fm_status_open_decisions_stream "$(fm_decision_answers_file "$f")" "$view" < "$f"
+  answers=$(fm_decision_answers_file "$f")
+  _fm_status_open_decisions_stream "$answers" "$view" < "$f"
 }
 
 status_open_needs_decisions() {  # <status-file>
@@ -704,15 +705,16 @@ EOF
 }
 
 status_open_token_needs_decisions() {  # <status-file>
-  local f=$1 stream key verb instance authority summary
+  local f=$1 stream answers key verb instance authority summary
   stream=$(fm_decision_stream_id "$f") || return 0
+  answers=$(fm_decision_answers_file "$f")
   while IFS=$'\t' read -r key verb instance authority summary || [ -n "$key" ]; do
     [ -n "$key" ] || continue
     [ "$verb" = needs-decision ] || continue
     [ "$authority" = correlated ] || continue
     printf '%s\t%s.%s\t%s\n' "$key" "$stream" "$instance" "$summary"
   done <<EOF
-$(_fm_status_open_decisions_stream "$(fm_decision_answers_file "$f")" --with-authority < "$f")
+$(_fm_status_open_decisions_stream "$answers" --with-authority < "$f")
 EOF
 }
 
