@@ -347,6 +347,8 @@ test_housekeeping_authoritative_working_pause_keeps_wedge_aging() {
   printf 'idle prompt $\n' > "$pane"
   key=$(printf '%s' "held-working" | tr '.:/' '___')
   echo $(( $(date +%s) - 500 )) > "$state/.subsuper-stale-$key"
+  date +%s > "$state/.subsuper-paused-$key"
+  date +%s > "$state/.subsuper-pause-rechecked-$key"
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
     FM_TEST_CREW_CLASS=working FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=240 \
     housekeeping_with_supervision_state "$state"
@@ -354,6 +356,29 @@ test_housekeeping_authoritative_working_pause_keeps_wedge_aging() {
     || fail "authoritative working state behind an old pause stopped wedge aging"
   [ ! -e "$state/.subsuper-paused-$key" ] || fail "authoritative working state retained pause tracking"
   pass "away housekeeping keeps wedge aging when current work outranks an old pause"
+}
+
+test_housekeeping_invalid_pause_preserves_wedge_aging() {
+  local dir state fakebin win pane key
+  dir=$(make_supercase invalid-pause-wedge)
+  state="$dir/state"; fakebin="$dir/fakebin"
+  win="sess:fm-held-invalid"; pane="$dir/pane.txt"
+  printf 'paused: awaiting the upstream release\n' > "$state/held-invalid.status"
+  printf 'idle prompt $\n' > "$pane"
+  key=$(printf '%s' "held-invalid" | tr '.:/' '___')
+  echo $(( $(date +%s) - 500 )) > "$state/.subsuper-stale-$key"
+  date +%s > "$state/.subsuper-paused-$key"
+  date +%s > "$state/.subsuper-pause-rechecked-$key"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
+    FM_TEST_CREW_CLASS=none FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=240 \
+    housekeeping_with_supervision_state "$state"
+  grep -F "declared pause is not current" "$state/.subsuper-escalations" >/dev/null \
+    || fail "invalid pause did not surface"
+  grep -F "possible wedge" "$state/.subsuper-escalations" >/dev/null \
+    || fail "invalid pause reset or bypassed existing wedge aging"
+  [ ! -e "$state/.subsuper-paused-$key" ] || fail "invalid pause retained pause tracking"
+  [ ! -e "$state/.subsuper-stale-$key" ] || fail "escalated invalid-pause wedge retained stale tracking"
+  pass "away housekeeping preserves wedge aging after a pause becomes invalid"
 }
 
 # housekeeping re-surfaces a stale declared pause only past PAUSE_RESURFACE_SECS,
@@ -1933,6 +1958,7 @@ test_housekeeping_migrates_watcher_unpaused_marker_to_clear
 test_housekeeping_seeds_pause_marker_from_status
 test_housekeeping_pause_endpoint_loss_escalates_immediately
 test_housekeeping_authoritative_working_pause_keeps_wedge_aging
+test_housekeeping_invalid_pause_preserves_wedge_aging
 test_housekeeping_persistent_stale_escalates
 test_housekeeping_resumed_stale_cleared
 test_housekeeping_paused_resurfaces_and_resets

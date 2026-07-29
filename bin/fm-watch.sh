@@ -340,13 +340,6 @@ pause_state_class() {  # <window> <task>
   key=${key//./_}
   recheck_file="$STATE/.paused-rechecked-$key"
   endpoint=$(fm_backend_agent_alive "$(window_backend "$win")" "$win" 2>/dev/null) || endpoint=unknown
-  if [ -e "$STATE/.paused-$key" ] && [ "$(age_of "$recheck_file")" -lt "$STALE_ESCALATE_SECS" ]; then
-    verdict=$(crew_supervision_precedence "$STATE/$task.status" paused "$endpoint")
-    if [ "$verdict" = paused ]; then
-      printf 'paused'
-      return
-    fi
-  fi
   current=$(crew_absorb_class "$task")
   verdict=$(crew_supervision_precedence "$STATE/$task.status" "$current" "$endpoint")
   case "$verdict" in
@@ -981,6 +974,8 @@ EOF
                 *)       clear_pause_state "$w"
                          if [ "$(cat "$STATE/.stale-surfaced-$key" 2>/dev/null || true)" != "$h" ]; then
                            surface_nonterminal_stale "$w" "$h"
+                         else
+                           wedge_timer_check "$w" "$ssf" "non-terminal stale after invalid pause" "$ewf"
                          fi ;;
               esac
             else

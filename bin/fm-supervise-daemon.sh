@@ -337,14 +337,6 @@ daemon_pause_state_class() {  # <window> <state> <task>
   backend=$(task_window_backend "$win" "$state")
   endpoint=$(fm_backend_agent_alive "$backend" "$win" 2>/dev/null) || endpoint=unknown
   recheck=$(daemon_pause_recheck_path "$state" "$task")
-  if [ -e "$state/.subsuper-paused-$(_stale_key "$task")" ] \
-    && [ "$(_file_age "$recheck")" -lt "${FM_STALE_ESCALATE_SECS:-$STALE_ESCALATE_SECS_DEFAULT}" ]; then
-    verdict=$(crew_supervision_precedence "$state/$task.status" paused "$endpoint")
-    if [ "$verdict" = paused ]; then
-      printf 'paused'
-      return
-    fi
-  fi
   current=$(crew_absorb_class "$task")
   verdict=$(crew_supervision_precedence "$state/$task.status" "$current" "$endpoint")
   if [ "$verdict" = paused ]; then
@@ -581,7 +573,7 @@ reconcile_pause_tracking() {  # <window> <state> <last-status-line>
     elif [ "$verdict" = working ]; then
       clear_pause_markers "$win" "$state"
     else
-      clear_pause_tracking "$win" "$state"
+      clear_pause_markers "$win" "$state"
     fi
   elif [ -e "$marker" ] || [ -e "$state/.paused-$watcher_key" ]; then
     clear_pause_tracking "$win" "$state"
@@ -1135,7 +1127,6 @@ housekeeping() {  # <state>
             mark_status_seen "$state" "$task" "$last"
           fi
           stale_marker_record "$win" "$state"
-          continue
           ;;
       esac
     fi
@@ -1184,7 +1175,7 @@ housekeeping() {  # <state>
           escalate_add "$state" "$task.status: declared pause is not current on a live endpoint"
           mark_status_seen "$state" "$task" "$last"
         fi
-        clear_pause_tracking "$win" "$state"
+        clear_pause_markers "$win" "$state"
         stale_marker_record "$win" "$state"
         continue
         ;;
@@ -1389,9 +1380,11 @@ handle_wake() {  # <reason> <state>
         task=$(window_to_task "$arg" "$state")
         last=$(last_status_line "$state/$task.status")
         if status_is_paused "$last"; then
-          clear_pause_tracking "$arg" "$state"
           if [ "$(crew_supervision_precedence "$state/$task.status" none unknown)" != actionable ]; then
+            clear_pause_markers "$arg" "$state"
             stale_marker_record "$arg" "$state"
+          else
+            clear_pause_tracking "$arg" "$state"
           fi
         else
           stale_marker_remove "$arg" "$state"
