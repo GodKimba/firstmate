@@ -79,6 +79,7 @@ So routing a Codex run through the pool is supported and needs no new mechanism.
 
 What that buys is pool access, not account choice: once the request reaches the proxy, account selection is the proxy's, per the section above.
 `~/.codex/config.toml` sets `model` and `model_reasoning_effort` with no `model_provider`, so the default Codex path is direct authentication - which is the ambient-account behavior the brief set out to remove.
+The cutover recorded below removes it for no-mistakes validations by selecting the profile per invocation, leaving this base config untouched for everything else.
 
 ## no-mistakes cannot bind a per-run Codex profile
 
@@ -121,10 +122,46 @@ The gap is that no supported interface turns a measurement into a binding routin
 
 - Do not build a firstmate-side account selector; the proxy owns selection, and firstmate cannot make a choice take effect.
 - Do not enable the Management API to obtain one.
-- Do not write global `agent_args_override` to pool-route a single no-mistakes run; it is machine-global and would corrupt concurrent lanes.
+- Do not write global `agent_args_override` to pool-route a *single* run and revert it afterwards; it is machine-global, so a temporary write would corrupt any concurrently running lane.
+  A *permanent* cutover is a different action with different risk, and the captain approved one - see "The approved permanent cutover" below.
 - Quota-aware *admission* - refusing to start a long validation when the account that will serve it is already tight - is implementable today, because it needs only measurement, which is supported.
 
 `bin/fm-pool-preflight.sh` implements that admission check; its header owns the exact contract.
+
+## The approved permanent cutover
+
+The captain approved routing every no-mistakes Codex validation on this machine through the pool profile, accepting the proxy's own round-robin selection, failover, cooldown, and session affinity, with reasoning depth pinned so only account routing changes.
+The scope is the only one the interfaces permit: all repositories on the machine, never the firstmate primary chat and never a per-project, per-branch, or per-run subset.
+
+The applied shape in `~/.no-mistakes/config.yaml` is the documented global surface and nothing else:
+
+```
+agent_args_override:
+  codex:
+    - --profile
+    - cliproxy
+    - -c
+    - model_reasoning_effort="xhigh"
+```
+
+What the probes established, each read-only and printing no credential:
+
+- `--profile cliproxy` resolves `provider: cliproxyapi` with `model: gpt-5.6-sol` preserved.
+  Codex prints its resolved session header before it issues any request, so with the credential deliberately unset the resolution can be read without spending quota.
+- The profile lowers reasoning depth to `high`, and `-c model_reasoning_effort="xhigh"` overrides it back to `xhigh`.
+  A `-c` override therefore wins over a layered profile, which is what makes the pinned depth reliable.
+- With `CLIPROXY_API_KEY` absent, codex fails closed with `Missing environment variable: CLIPROXY_API_KEY`.
+  It does not fall back to the ambient direct login, so a broken pool route is loud rather than a silent return to the account this work set out to stop depending on.
+- `--profile` applies only to codex runtime commands, so `codex doctor` rejects it and cannot be used to verify profile resolution.
+- `no-mistakes doctor` does not validate `agent_args_override`; an isolated `NM_HOME` probe accepted an argument the binary's own error text calls managed.
+  Validation happens when a run starts, so whether `--profile` survives it is proven only by a real run.
+
+Two operational cautions this record exists to preserve:
+
+- No per-run snapshot of agent arguments exists anywhere in no-mistakes state, and runs resume durable Codex sessions across steps.
+  Change this configuration only when no run is active, or a run will split across two providers and try to resume sessions against a backend that never created them.
+- `ps eww` does not reveal a process environment on this macOS, not even the caller's own.
+  It cannot be used to check whether a daemon inherited a variable; verify the method against a process where `env` confirms the variable before trusting any absence it reports.
 
 ## Reproducing these checks
 
@@ -138,5 +175,15 @@ codex --help | grep -E 'profile|--config'
 no-mistakes axi run --help
 quota-axi --provider codex --json
 ```
+
+The cutover probes, which print codex's resolved header before any request is issued:
+
+```
+codex --profile cliproxy exec --skip-git-repo-check --sandbox read-only 'x' < /dev/null | grep -E '^(model|provider|reasoning effort):'
+codex --profile cliproxy -c model_reasoning_effort="xhigh" exec --skip-git-repo-check --sandbox read-only 'x' < /dev/null | grep -E '^(model|provider|reasoning effort):'
+```
+
+Run them from a trusted directory.
+As written they continue into a real request; prefixing `env -u CLIPROXY_API_KEY` stops them at the header, which both avoids spending quota and shows the fail-closed behavior.
 
 Do not read the proxy configuration's `api-keys` block without redacting values; it holds a live client credential.

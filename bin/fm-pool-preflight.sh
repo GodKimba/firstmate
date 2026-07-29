@@ -25,11 +25,17 @@
 # so in `binds_account`, which is always false.
 #
 # MODES, because the two paths have genuinely different capacity:
-#   --direct  measure the ambient direct login (today's no-mistakes Codex agent)
+#   --direct  measure the ambient direct login
 #   --pool    measure the pooled accounts through bin/fm-pool-quota.sh
 # `--pool` reports the pool's BEST account, because the proxy routes to a healthy
 # account and fails over, so the best account is the honest upper bound on what a
 # run can expect. It is a bound, not a binding.
+#
+# WHICH MODE MATCHES A no-mistakes VALIDATION: `--pool`, because the machine-wide
+# Codex agent now runs through the CLIProxyAPI pool profile rather than one
+# ambient direct account. `--direct` still measures that ambient login, which
+# serves whatever has not been pool-routed.
+# docs/verification/pool-account-routing.md records that cutover and its proof.
 #
 # DECISION
 #
