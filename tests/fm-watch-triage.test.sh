@@ -868,18 +868,18 @@ test_paused_capture_failure_surfaces_endpoint_loss_once() {
   : > "$state/.paused-$key"
 
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" FM_FAKE_TMUX_CAPTURE_FAIL=1 \
-    FM_FAKE_TMUX_CURRENT_COMMAND=zsh FM_FAKE_CREW_STATE='state: working · source: run-step · validation active' \
+    FM_FAKE_TMUX_CURRENT_COMMAND=claude FM_FAKE_CREW_STATE='state: working · source: run-step · validation active' \
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
   wait_for_exit "$pid" 40 || fail "capture failure behind a pause did not surface endpoint loss"
   grep -Fx "stale: $window" "$out" >/dev/null || fail "capture failure did not emit the normal stale wake"
-  [ "$(cat "$state/.stale-surfaced-$key" 2>/dev/null || true)" = "$prior_hash" ] \
-    || fail "capture failure did not retain the prior stale identity for dedup"
+  [ "$(cat "$state/.stale-surfaced-$key" 2>/dev/null || true)" = "$(capture_unreadable_stale_identity)" ] \
+    || fail "capture failure did not retain its unreadable-endpoint identity for dedup"
 
   : > "$out"
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" FM_FAKE_TMUX_CAPTURE_FAIL=1 \
-    FM_FAKE_TMUX_CURRENT_COMMAND=zsh FM_FAKE_CREW_STATE='state: working · source: run-step · validation active' \
+    FM_FAKE_TMUX_CURRENT_COMMAND=claude FM_FAKE_CREW_STATE='state: working · source: run-step · validation active' \
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
@@ -888,9 +888,28 @@ test_paused_capture_failure_surfaces_endpoint_loss_once() {
     fail "unchanged capture failure re-surfaced after endpoint-loss dedup: $(cat "$out")"
   fi
   reap "$pid"
+
+  printf 'readable pane after recovery\n' > "$capture_file"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=claude FM_FAKE_CREW_STATE='state: working · source: run-step · validation active' \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_live "$pid" 20 || { reap "$pid"; fail "watcher exited while clearing recovered capture state"; }
+  [ "$(cat "$state/.stale-surfaced-$key" 2>/dev/null || true)" != "$(capture_unreadable_stale_identity)" ] \
+    || { reap "$pid"; fail "successful capture retained unreadable-endpoint dedup"; }
+  reap "$pid"
+
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" FM_FAKE_TMUX_CAPTURE_FAIL=1 \
+    FM_FAKE_TMUX_CURRENT_COMMAND=claude FM_FAKE_CREW_STATE='state: working · source: run-step · validation active' \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "a new capture-failure episode remained deduplicated after recovery"
   wakes=$(awk -F '\t' -v w="$window" '$3 == "stale" && $4 == w { n++ } END { print n + 0 }' "$state/.wake-queue")
-  [ "$wakes" -eq 1 ] || fail "capture failure should surface once, got $wakes wakes"
-  pass "capture failures revalidate paused endpoints and surface loss once"
+  [ "$wakes" -eq 2 ] || fail "capture failure should surface once per unreadable episode, got $wakes wakes"
+  pass "capture failures surface once per unreadable episode despite live active-run state"
 }
 
 test_paused_secondmate_endpoint_loss_surfaces_once() {
@@ -1594,6 +1613,8 @@ test_afk_paused_capture_failure_hands_off_plain_stale() {
     || fail "AFK paused capture failure did not preserve its plain window identity: $(cat "$out")"
   grep -F "awaiting external" "$out" >/dev/null \
     && fail "AFK watcher decorated a capture-failure stale identity instead of handing it to the daemon"
+  [ "$(cat "$state/.stale-surfaced-$key" 2>/dev/null || true)" = "$(capture_unreadable_stale_identity)" ] \
+    || fail "AFK watcher did not preserve unreadable capture evidence for daemon triage"
   [ ! -e "$state/.paused-resurfaced-$key" ] \
     || fail "AFK watcher ran normal-mode pause resurfacing during capture failure"
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null \

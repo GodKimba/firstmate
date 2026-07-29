@@ -407,7 +407,7 @@ EOF
 # first sight of a non-terminal stale it returns "self" and the caller records a
 # timestamp marker; persistence is escalated by housekeeping's recheck, not here.
 classify_stale() {  # <window> <state>
-  local win=$1 state=$2 task last seen key verb instance summary rel="" all_seen=1 distilled="" precedence
+  local win=$1 state=$2 task last seen key verb instance summary rel="" all_seen=1 distilled="" precedence watcher_key
   task=$(window_to_task "$win" "$state")
   while IFS=$'\t' read -r key verb instance summary || [ -n "$key" ]; do
     [ -n "$key" ] || continue
@@ -424,6 +424,11 @@ EOF
     else
       printf 'escalate|stale + %s' "$distilled"
     fi
+    return
+  fi
+  watcher_key=$(_stale_key "$win")
+  if [ "$(cat "$state/.stale-surfaced-$watcher_key" 2>/dev/null || true)" = "$(capture_unreadable_stale_identity)" ]; then
+    printf 'escalate|stale + endpoint unreadable: %s' "$win"
     return
   fi
   last=$(last_status_line "$state/$task.status")

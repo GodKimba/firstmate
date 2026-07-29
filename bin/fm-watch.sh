@@ -872,24 +872,22 @@ EOF
       continue
     fi
     if ! tail40=$(fm_backend_capture "$(window_backend "$w")" "$w" 40 "$(window_label "$w")" 2>/dev/null); then
-      if [ -e "$STATE/.paused-$key" ] || status_is_paused_or_captain_held "$last"; then
-        h=$(cat "$STATE/.stale-$key" 2>/dev/null || true)
-        [ -n "$h" ] || h=endpoint-unreadable
-        if afk_present; then
-          if [ "$(cat "$STATE/.stale-surfaced-$key" 2>/dev/null || true)" != "$h" ]; then
-            fm_wake_append stale "$w" "stale: $w" || exit 1
-            printf '%s' "$h" > "$STATE/.stale-surfaced-$key"
-            wake "stale: $w"
-          fi
-        else
-          case "$(pause_state_class "$w" "$task")" in
-            paused)  handle_paused_stale "$w" "$task" "$h" ;;
-            working) clear_pause_state "$w" ;;
-            *)       surface_nonterminal_stale_once "$w" "$h" ;;
-          esac
+      h=$(capture_unreadable_stale_identity)
+      if afk_present; then
+        if [ "$(cat "$STATE/.stale-surfaced-$key" 2>/dev/null || true)" != "$h" ]; then
+          fm_wake_append stale "$w" "stale: $w" || exit 1
+          printf '%s' "$h" > "$STATE/.stale-surfaced-$key"
+          wake "stale: $w"
         fi
+      else
+        surface_nonterminal_stale_once "$w" "$h"
       fi
       continue
+    fi
+    h=$(capture_unreadable_stale_identity)
+    if [ "$(cat "$STATE/.stale-surfaced-$key" 2>/dev/null || true)" = "$h" ]; then
+      rm -f "$STATE/.stale-surfaced-$key"
+      [ "$(cat "$STATE/.stale-$key" 2>/dev/null || true)" != "$h" ] || rm -f "$STATE/.stale-$key"
     fi
     h=$(printf '%s' "$tail40" | hash_pane)
     key=$(printf '%s' "$w" | tr ':/.' '___')

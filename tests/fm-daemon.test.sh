@@ -212,6 +212,24 @@ test_stale_pause_requires_current_state_and_live_endpoint() {
   pass "away stale classification requires an authoritative pause on a live endpoint"
 }
 
+test_stale_unreadable_capture_escalates_despite_working_state() {
+  local dir state out win watcher_key
+  dir=$(make_supercase stale-unreadable-working)
+  state="$dir/state"
+  win="sess:fm-held-unreadable"
+  printf 'window=%s\nkind=ship\n' "$win" > "$state/held-unreadable.meta"
+  printf 'paused: waiting for the maintenance window\n' > "$state/held-unreadable.status"
+  watcher_key=$(printf '%s' "$win" | tr ':/.' '___')
+  printf '%s' "$(capture_unreadable_stale_identity)" > "$state/.stale-surfaced-$watcher_key"
+  out=$(FM_TEST_CREW_CLASS=working FM_TEST_ENDPOINT=alive FM_STATE_OVERRIDE="$state" \
+    classify_stale_with_supervision_state "$win" "$state")
+  case "$out" in
+    escalate\|*endpoint\ unreadable*) ;;
+    *) fail "unreadable capture was masked by live active-run state: $out" ;;
+  esac
+  pass "away stale classification escalates unreadable capture evidence despite active work"
+}
+
 # handle_wake on a paused stale records a pause marker, drops any pre-existing wedge
 # marker (so a working->paused pane is not still wedge-aged), and does NOT escalate
 # on the wake itself - the recheck is housekeeping's job on the long cadence.
@@ -1950,6 +1968,7 @@ test_stale_transient_self_records_marker
 test_stale_terminal_escalates
 test_stale_paused_classifies_pause
 test_stale_pause_requires_current_state_and_live_endpoint
+test_stale_unreadable_capture_escalates_despite_working_state
 test_handle_wake_paused_records_pause_marker
 test_handle_wake_paused_signal_records_pause_marker
 test_handle_wake_terminal_signal_clears_pause_tracking
