@@ -6,9 +6,9 @@
 # reads before deciding what to accept, adapt, or reject. The skill owns the
 # review conversation and the preparation procedure; this script owns detection.
 #
-# READ-ONLY apart from `git fetch upstream`, which updates remote-tracking refs
-# only. It never checks out, merges, resets, commits, stashes, cleans, creates or
-# deletes a branch, or writes any tracked file. The conflict preview uses
+# READ-ONLY apart from constrained `git fetch` calls, which update remote-tracking
+# refs only. It never checks out, merges, resets, commits, stashes, cleans,
+# creates or deletes a branch, or writes any tracked file. The conflict preview uses
 # `git merge-tree --write-tree`, which computes a merge in the object database
 # and leaves HEAD, the index, and the working tree untouched. That form needs
 # Git >= 2.38; an older Git is refused rather than downgraded to a trial merge,
@@ -23,8 +23,9 @@
 # becomes an ancestor of the fork's default branch. Squashing produces the same
 # files but a single-parent commit, so every later run of this script still
 # reports the same already-integrated commits as outstanding, forever. This
-# script only reports that state; bin/fm-pr-merge.sh's `-- --merge` form is what
-# preserves it at landing, and the skill carries that as a non-optional step.
+# script only reports that state; bin/fm-pr-merge.sh's ancestry guard plus
+# `-- --merge` form preserves it at landing, and the skill carries that as a
+# non-optional step.
 #
 # Per-commit review lines are evidence, not a verdict. The recommendation column
 # is derived from mechanical signals only - whether a commit's files collide with
@@ -130,9 +131,13 @@ ORIGIN_REF="origin/$origin_branch"
 # --- fetch (remote-tracking refs only) --------------------------------------
 
 if [ "$DO_FETCH" = yes ]; then
-  git -C "$FM_ROOT" fetch --quiet "$UPSTREAM_REMOTE" --prune \
+  git -C "$FM_ROOT" fetch --quiet --prune --no-tags --no-prune-tags \
+    --no-write-fetch-head --no-recurse-submodules --refmap= "$UPSTREAM_REMOTE" \
+    "+refs/heads/*:refs/remotes/$UPSTREAM_REMOTE/*" \
     || die "fetch from '$UPSTREAM_REMOTE' failed"
-  git -C "$FM_ROOT" fetch --quiet origin --prune \
+  git -C "$FM_ROOT" fetch --quiet --prune --no-tags --no-prune-tags \
+    --no-write-fetch-head --no-recurse-submodules --refmap= origin \
+    "+refs/heads/*:refs/remotes/origin/*" \
     || die "fetch from 'origin' failed"
 fi
 
@@ -164,7 +169,12 @@ echo
 counts=$(git -C "$FM_ROOT" rev-list --left-right --count "$UPSTREAM_REF...$ORIGIN_REF")
 upstream_only=$(printf '%s\n' "$counts" | awk '{print $1}')
 fork_only=$(printf '%s\n' "$counts" | awk '{print $2}')
-merge_base=$(git -C "$FM_ROOT" merge-base "$ORIGIN_REF" "$UPSTREAM_REF")
+if ! merge_base=$(git -C "$FM_ROOT" merge-base "$ORIGIN_REF" "$UPSTREAM_REF"); then
+  echo "fm-upstream-check: '$ORIGIN_REF' and '$UPSTREAM_REF' have no common ancestor" >&2
+  echo "  Refusing because the configured remotes do not describe related histories." >&2
+  echo "  Verify the upstream remote and branch, then re-run." >&2
+  exit 2
+fi
 
 echo "== divergence =="
 printf 'upstream-only-commits  %s\n' "$upstream_only"
@@ -193,7 +203,8 @@ if git -C "$FM_ROOT" merge-base --is-ancestor "$UPSTREAM_REF" "$ORIGIN_REF"; the
 fi
 echo "status  outstanding: $upstream_only upstream commit(s) are not in $ORIGIN_REF"
 echo "action  a true merge commit is required at landing so this count reaches 0"
-echo "landing bin/fm-pr-merge.sh <task-id> <pr-url> -- --merge"
+printf 'landing bin/fm-pr-merge.sh <task-id> <pr-url> --require-ancestor %s -- --merge\n' \
+  "$upstream_tip"
 echo "warning squashing this PR keeps the files but drops upstream ancestry,"
 echo "warning so every later check would re-propose these same commits"
 echo
@@ -268,6 +279,8 @@ git -C "$FM_ROOT" rev-list --reverse "$UPSTREAM_REF" "^$ORIGIN_REF" | while IFS=
     printf '    review     adapt: resolve by hand, then keep or reverse deliberately\n'
   elif [ "$overlap_n" -gt 0 ]; then
     printf '    risk       touches %s file(s) the fork also changed, merges clean\n' "$overlap_n"
+    printf '               overlapping paths: %s\n' \
+      "$(printf '%s\n' "$overlap" | tr '\n' ' ' | sed 's/ *$//')"
     printf '    review     accept, but re-read the merged result: a clean merge can still\n'
     printf '               leave two independent solutions to the same problem side by side\n'
   else
@@ -286,7 +299,8 @@ if [ -n "$conflicted_files" ]; then
 else
   printf 'conflicts        none predicted\n'
 fi
-printf 'recorded-tip     %s\n' "$upstream_tip"
+printf 'recorded-upstream-tip %s\n' "$upstream_tip"
+printf 'recorded-origin-tip   %s\n' "$origin_tip"
 echo 'next             review the commits above, decide accept/adapt/reject, then /syncfirstmate prepare'
 
 [ -z "$conflicted_files" ] || exit 1

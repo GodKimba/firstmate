@@ -38,8 +38,8 @@ Then ask the captain to choose, per change or in bulk: **accept**, **adapt**, or
 Accept-all is a normal answer and usually the right one.
 Keep this a conversation; do not build or consult a rules file, a policy engine, or a stored selection format.
 
-Note the `recorded-tip` value from the summary.
-`prepare` must run against that same tip, and upstream moves on its own schedule.
+Note both `recorded-upstream-tip` and `recorded-origin-tip` from the summary.
+`prepare` must use that exact reviewed pair because both remotes move on their own schedules.
 
 ## prepare
 
@@ -47,21 +47,26 @@ Dispatch an ordinary ship task for the integration.
 Firstmate does not perform the merge itself - this is project work in an isolated copy, delivered through the project's configured path, exactly like any other change.
 
 Re-run `check` first.
-If `recorded-tip` no longer matches what the captain reviewed, stop and re-present the summary; never prepare against an unreviewed tip.
+If either recorded tip no longer matches what the captain reviewed, stop and re-present the complete summary; never prepare against an unreviewed pair.
 
 The task's instructions must require, in order:
 
-1. Merge the **complete** upstream tip with a true merge commit:
+1. Before changing anything, verify the isolated copy's `HEAD` is exactly the reviewed `recorded-origin-tip`.
+   Stop for a fresh check and dispatch if it differs.
+2. Merge the **complete recorded upstream tip** by SHA with a true merge commit:
    ```sh
-   git merge --no-ff upstream/main
+   git merge --no-ff <recorded-upstream-tip>
    ```
    Merge the whole tip even when the captain rejected part of it.
-   This is what makes `upstream/main` an ancestor, which is what stops future checks from re-proposing work that is already integrated.
-2. Resolve every conflict by hand, and re-read the clean parts too.
+   Merging the recorded SHA prevents a later fetch from silently substituting work the captain did not review.
+   This is what makes the reviewed upstream tip an ancestor, which is what stops future checks from re-proposing work that is already integrated.
+3. Resolve every conflict by hand, and re-read the clean parts too.
    A conflict-free merge can still leave two independent solutions to the same problem side by side, and no marker warns about that.
-3. Represent every rejection or adaptation as its **own commit on top of the merge**, with the rationale in the commit message and the dependency checked - some upstream commits add files that later upstream commits edit, so reversing one can break another.
-4. Run the full test suite, not only the suites touching conflicted files.
-5. Deliver through the configured path to a PR and stop.
+4. Represent every rejection or adaptation as its **own commit on top of the merge**, with the rationale in the commit message and the dependency checked - some upstream commits add files that later upstream commits edit, so reversing one can break another.
+5. Run the full test suite, not only the suites touching conflicted files.
+6. Deliver through the configured path to a PR and stop.
+   Every no-mistakes validation invocation for this synchronization branch must pass `--skip=rebase`.
+   Never use `no-mistakes rerun` for it because that path performs a rebase; after a terminal run, start the replacement with the original intent and `--skip=rebase`.
 
 Never implement a rejection by squashing, cherry-picking only the wanted commits, rebasing, rewriting history, or quietly leaving a commit out.
 All four produce the right files and a history that claims the integration never happened, so every later `check` proposes the same commits again, forever.
@@ -72,10 +77,14 @@ All four produce the right files and a history that claims the integration never
 This is not optional and not the default:
 
 ```sh
-bin/fm-pr-merge.sh <task-id> <pr-url> -- --merge
+bin/fm-pr-merge.sh <task-id> <pr-url> --require-ancestor <recorded-upstream-tip> -- --merge
 ```
 
-Without `-- --merge` the PR is squashed into a single-parent commit.
+The ancestry guard verifies that the exact reviewed upstream SHA is an ancestor of the current PR head and pins the merge to that head.
+This also catches any later CI repair that rebased the synchronization branch.
+If it refuses, do not land the PR; run a fresh check and prepare a new synchronization PR from the newly reviewed pair.
+
+Without the guard and `-- --merge` the PR can land after the upstream ancestry was rewritten away or be squashed into a single-parent commit.
 The files are identical, but upstream ancestry is gone, so `check` keeps reporting every already-integrated commit as outstanding and the fork can never converge.
 
 This applies only to synchronization PRs.

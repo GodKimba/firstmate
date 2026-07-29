@@ -223,6 +223,10 @@ assert_contains "$out" "upstream-only-commits  1" "divergence counts upstream wo
 assert_contains "$out" "fork-only-commits      1" "divergence counts fork work"
 assert_contains "$out" "no overlap with fork-only work" "non-colliding commit is marked"
 assert_contains "$out" "review     accept" "non-colliding commit recommends accept"
+upstream_tip=$(git -C "$fork" rev-parse refs/remotes/upstream/main)
+origin_tip=$(git -C "$fork" rev-parse refs/remotes/origin/main)
+assert_contains "$out" "recorded-upstream-tip $upstream_tip" "summary binds the reviewed upstream tip"
+assert_contains "$out" "recorded-origin-tip   $origin_tip" "summary binds the reviewed origin tip"
 after=$(snapshot_repo "$fork")
 [ "$before" = "$after" ] || fail "clean run must not disturb the repo"$'\n'"--- before ---"$'\n'"$before"$'\n'"--- after ---"$'\n'"$after"
 pass "a clean divergence predicts no conflicts and leaves the repo untouched"
@@ -284,6 +288,81 @@ assert_contains "$out" "adds       a.txt" "added files are surfaced for dependen
 blocks=$(printf '%s\n' "$out" | grep -c '^--- ' || true)
 [ "$blocks" -eq 3 ] || fail "expected 3 review blocks, got $blocks"
 pass "every upstream-only commit gets its own review block with added files"
+
+# --- case: clean overlap names every colliding path -------------------------
+
+new_case
+fork="$FORK"
+up="$UPSTREAM_WORK"
+printf '%s\n' one two three four five six seven eight nine ten > "$up/shared.txt"
+git -C "$up" add shared.txt
+git -C "$up" commit -qm "shared: add overlap fixture"
+push_upstream "$up"
+git -C "$fork" fetch --quiet upstream
+git -C "$fork" merge --quiet --ff-only upstream/main
+push_fork "$fork"
+for name in a b c d e f; do
+  printf '%s\n' "$name" > "$up/$name.txt"
+done
+printf '%s\n' upstream two three four five six seven eight nine ten > "$up/shared.txt"
+git -C "$up" add .
+git -C "$up" commit -qm "upstream: broad clean change"
+push_upstream "$up"
+printf '%s\n' one two three four five six seven eight nine fork > "$fork/shared.txt"
+git -C "$fork" add shared.txt
+git -C "$fork" commit -qm "fork: independent shared edit"
+push_fork "$fork"
+
+out=$(run_check "$fork")
+expect_code 0 "$(check_rc)" "clean overlap outside truncated surfaces must exit 0"
+assert_contains "$out" "touches 1 file(s) the fork also changed, merges clean" "clean overlap is reported"
+assert_contains "$out" "overlapping paths: shared.txt" "clean overlap names the actual colliding path"
+pass "clean overlap names colliding paths even beyond the surface preview"
+
+# --- case: fetch cannot follow configured local refs or tags ----------------
+
+new_case
+fork="$FORK"
+up="$UPSTREAM_WORK"
+commit_file "$up" upstream-fetch.txt one "upstream: fetched change"
+git -C "$up" tag upstream-release
+push_upstream "$up"
+git -C "$up" push --quiet origin refs/tags/upstream-release
+git -C "$fork" config --add remote.upstream.fetch \
+  '+refs/heads/main:refs/heads/upstream-hijacked'
+git -C "$fork" config --add remote.origin.fetch \
+  '+refs/heads/main:refs/heads/origin-hijacked'
+git -C "$fork" config remote.upstream.pruneTags true
+git -C "$fork" config fetch.pruneTags true
+git -C "$fork" tag local-only
+
+out=$(run_check "$fork")
+expect_code 0 "$(check_rc)" "constrained fetch must still produce the report"
+git -C "$fork" show-ref --verify --quiet refs/heads/upstream-hijacked \
+  && fail "configured upstream fetch refspec created a local branch"
+git -C "$fork" show-ref --verify --quiet refs/heads/origin-hijacked \
+  && fail "configured origin fetch refspec created a local branch"
+git -C "$fork" show-ref --verify --quiet refs/tags/upstream-release \
+  && fail "fetch auto-followed an upstream tag"
+git -C "$fork" show-ref --verify --quiet refs/tags/local-only \
+  || fail "fetch pruned a local-only tag"
+pass "fetch updates only remote-tracking branches despite hostile refspec and tag config"
+
+# --- case: unrelated remotes refuse instead of reporting conflicts ----------
+
+new_case
+fork="$FORK"
+up="$UPSTREAM_WORK"
+empty_tree=$(git -C "$up" mktree </dev/null)
+unrelated=$(printf '%s\n' "unrelated root" | git -C "$up" commit-tree "$empty_tree")
+git -C "$up" push --quiet --force origin "$unrelated:refs/heads/main"
+
+out=$(run_check "$fork")
+expect_code 2 "$(check_rc)" "unrelated remote histories must refuse"
+assert_contains "$out" "have no common ancestor" "refusal identifies unrelated histories"
+assert_contains "$out" "Verify the upstream remote and branch" "refusal gives a concrete correction"
+assert_not_contains "$out" "== conflict preview ==" "unrelated histories never reach conflict classification"
+pass "unrelated histories refuse with code 2 and a concrete diagnostic"
 
 # --- case: --no-fetch does not reach the remotes ----------------------------
 #

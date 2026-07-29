@@ -19,6 +19,7 @@
 #   (k) unreadable or contradictory post-command GitHub state refuses safely
 #   (l) ambient GH_HOST cannot redirect mutation or verification
 #   (m) stale-session gh-axi incompatibility refuses before mutation
+#   (n) ancestry-sensitive merges bind the reviewed ancestor and exact PR head
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -59,6 +60,7 @@ add_gh_mocks() {
     "merged: $merged" \
     "merged_at: $merged_at" \
     "state: $state" > "$case_dir/pr-state.out"
+  printf '%s\n' 'status: ahead' > "$case_dir/ancestor-status.out"
   cat > "$case_dir/fakebin/gh-axi.behavior" <<'SH'
 #!/usr/bin/env bash
 case "${1:-} ${2:-}" in
@@ -66,6 +68,7 @@ case "${1:-} ${2:-}" in
     printf '%s\n' 'merged:' '  number: 9' '  status: ok' '  method: squash'
     exit 0
     ;;
+  "api /repos/"*"/compare/"*) cat "$FM_TEST_ANCESTOR_STATUS_FILE" ; exit 0 ;;
   "api /repos/"*) cat "$FM_TEST_PR_STATE_FILE" ; exit 0 ;;
 esac
 exit 0
@@ -174,6 +177,7 @@ run_pr_merge() {
   FM_TEST_GH_AXI_LOG="$case_dir/gh-axi.log" \
   FM_TEST_GH_HOST_LOG="$case_dir/gh-host.log" \
   FM_TEST_PR_STATE_FILE="$case_dir/pr-state.out" \
+  FM_TEST_ANCESTOR_STATUS_FILE="$case_dir/ancestor-status.out" \
   FM_TEST_GH_AXI_VERSION="${FM_TEST_GH_AXI_VERSION:-gh-axi 0.1.28}" \
   FM_TEST_GH_AXI_API_JQ="${FM_TEST_GH_AXI_API_JQ:-1}" \
   PATH="$case_dir/fakebin:$PATH" \
@@ -642,6 +646,76 @@ ROWS
   pass "fm-pr-merge rechecks gh-axi compatibility before every PR mutation"
 }
 
+test_required_ancestor_binds_exact_pr_head() {
+  local case_dir ancestor head
+  ancestor=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  head=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+  case_dir=$(make_case required-ancestor)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" "$head"
+  : > "$case_dir/gh-axi.log"
+
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/41 \
+    --require-ancestor "$ancestor" -- --merge \
+    > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "required-ancestor: verified ancestry merge failed"
+
+  grep -qxF "api /repos/example/repo/compare/$ancestor...$head --jq {status: .status}" \
+    "$case_dir/gh-axi.log" \
+    || fail "required-ancestor: exact ancestor and PR head were not compared"
+  grep -qxF "pr merge 41 --repo example/repo --match-head-commit $head --merge" \
+    "$case_dir/gh-axi.log" \
+    || fail "required-ancestor: merge was not pinned to the verified PR head"
+  pass "ancestry-sensitive merge verifies the reviewed ancestor and pins the PR head"
+}
+
+test_required_ancestor_refuses_rewritten_head() {
+  local case_dir ancestor head rc
+  ancestor=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  head=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+  case_dir=$(make_case rewritten-ancestor)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" "$head"
+  printf '%s\n' 'status: diverged' > "$case_dir/ancestor-status.out"
+  : > "$case_dir/gh-axi.log"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/42 \
+    --require-ancestor "$ancestor" -- --merge \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "rewritten-ancestor: non-ancestral PR head must refuse"
+  assert_grep 'is not an ancestor of PR head' "$case_dir/stderr" \
+    "rewritten-ancestor: refusal did not identify the lost ancestry"
+  assert_no_grep '^pr merge ' "$case_dir/gh-axi.log" \
+    "rewritten-ancestor: merge mutation ran after ancestry verification failed"
+  pass "ancestry-sensitive merge refuses a rewritten PR head before mutation"
+}
+
+test_required_ancestor_requires_true_merge() {
+  local case_dir rc
+  case_dir=$(make_case ancestor-needs-merge)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+  : > "$case_dir/gh-axi.log"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/43 \
+    --require-ancestor aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa -- --squash \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "ancestor-needs-merge: squash must refuse"
+  assert_grep 'requires an explicit true merge method' "$case_dir/stderr" \
+    "ancestor-needs-merge: refusal did not require the preserving merge method"
+  [ ! -s "$case_dir/gh-axi.log" ] \
+    || fail "ancestor-needs-merge: refusal reached gh-axi"
+  pass "ancestry guard cannot be combined with a history-dropping merge method"
+}
+
 test_records_pr_and_head_before_merging
 test_merge_failure_propagates_after_recording
 test_post_merge_command_failure_uses_confirmed_state
@@ -662,3 +736,6 @@ test_auto_merge_that_completes_immediately_is_merged
 test_unreadable_state_refuses_after_merge_command
 test_contradictory_state_refuses_after_merge_command
 test_incompatible_stale_session_refuses_before_mutation
+test_required_ancestor_binds_exact_pr_head
+test_required_ancestor_refuses_rewritten_head
+test_required_ancestor_requires_true_merge
