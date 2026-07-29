@@ -11,7 +11,7 @@ It never reads report bodies, review artifacts, terminal output, or chat.
 
 The `hold` subcommand maps an originating work id and stable decision key to `<origin-id>-decision-<decision-key>`.
 It creates a kind `captain` backlog item when absent and invokes `tasks-axi hold <id> --reason <reason> --kind captain` on every retry.
-It rejects an identity collision, a changed title, and attempts to reopen an already resolved identity.
+For an existing identity, it uses the shared tasks-axi TOON scalar decoder before enforcing the retry contract owned by the command's `--help` output.
 
 The `complete` subcommand unions the reviewed keys into `decision_keys=` and appends `decisions_reviewed=1` while originating task metadata is live.
 A post-teardown visual review can complete against the surviving report and durable holds without recreating volatile task metadata.
@@ -58,11 +58,13 @@ Verification date: 2026-07-14.
 Additional quoted `blocked_by` regression verification date: 2026-07-17.
 Plural blocker-readiness and mixed-home projection verification date: 2026-07-22.
 Retention-durability verification date: 2026-07-28.
+Quoted-title idempotency verification date: 2026-07-29.
 
 The focused end-to-end regression uses only synthetic `sample` identities and decision text in temporary homes; no private backlog or archive data is read or written.
 It begins with a completed investigation and visual review whose genuine unresolved choice exists only in the report.
 The initial Bearings snapshot correctly has no open decision, and the teardown gate refuses to erase the source.
 A later regression covers tasks-axi's quoted multi-entry `blocked_by` output so `resolve` matches the first, middle, and last ids and rejects a genuinely absent id.
+The quoted-title regression covers colon and comma titles, literal surrounding quote characters, true title mismatches, malformed scalar syntax, and duplicate title fields.
 
 The retention-durability regression resolves a captain decision, prunes the completed record out of the active backlog with `tasks-axi prune`, and verifies the same identity before and after that move.
 It asserts the archived task is not rehydrated into the active backlog and the decision is not duplicated across both stores, that reopening an already resolved archived identity is still rejected, and that cleanup succeeds only because the gate passes rather than because it was weakened.
@@ -78,6 +80,7 @@ ok - a resolved decision verifies before and after normal retention under one id
 ok - an identical retention transition verifies while a divergent duplicate refuses
 ok - duplicate, non-done, malformed, symlinked, and absent archived records refuse safely
 ok - captain holds are idempotent, distinct, teardown-safe, Bearings-visible, and durably routed before close
+ok - existing hold retries decode quoted titles and refuse mismatched or ambiguous scalars
 ok - completion and verification validate origins before constructing paths
 ok - ended visual review follows the same decision-hold completion owner
 ok - resolved findings and decision-like prose do not create false holds
@@ -115,7 +118,7 @@ $ bin/fm-lint.sh
 fm-lint.sh: ShellCheck 0.11.0 (pinned 0.11.0)
 
 $ bin/fm-doc-audience-check.sh
-fm-doc-audience-check: ok surfaces=56 local_links=155
+fm-doc-audience-check: ok surfaces=56 local_links=160
 
 $ git diff --check
 (no output)

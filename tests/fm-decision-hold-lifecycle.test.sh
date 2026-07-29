@@ -276,6 +276,84 @@ EOF
   pass "captain holds are idempotent, distinct, teardown-safe, Bearings-visible, and durably routed before close"
 }
 
+test_existing_hold_title_decodes_toon_scalar() {
+  local home origin colon_hold comma_hold literal_title mode
+  home=$(make_home quoted-title-idempotency)
+  origin=sample-title-review
+  mkdir -p "$home/data/$origin"
+  tasks_in "$home" add "$origin" "Review quoted title retries" --kind scout --repo sample --start >/dev/null \
+    || fail "could not create quoted-title origin"
+  write_origin_meta "$home" "$origin"
+  printf 'done: report complete\n' > "$home/state/$origin.status"
+  printf '# Quoted title review\n\nTwo captain choices remain.\n' > "$home/data/$origin/report.md"
+
+  colon_hold=$(run_decisions "$home" hold "$origin" route \
+    --title "Choose route: north" --reason "captain route choice pending" --repo sample) \
+    || fail "could not register a colon-title hold"
+  assert_contains "$(tasks_in "$home" show "$colon_hold" --full)" 'title: "Choose route: north"' \
+    "colon-title fixture must be rendered as a quoted scalar"
+  run_decisions "$home" hold "$origin" route \
+    --title "Choose route: north" --reason "captain route choice pending" --repo sample >/dev/null \
+    || fail "exact colon-title retry was not idempotent"
+  literal_title='"Choose route: north"'
+  if run_decisions "$home" hold "$origin" route \
+    --title "$literal_title" --reason "captain route choice pending" --repo sample \
+    > "$home/literal-quotes.out" 2> "$home/literal-quotes.err"; then
+    fail "literal surrounding quote characters matched presentation quotes"
+  fi
+  assert_grep "different title" "$home/literal-quotes.err" \
+    "literal quote characters must remain title content"
+
+  comma_hold=$(run_decisions "$home" hold "$origin" audience \
+    --title "Choose route, captain" --reason "captain audience choice pending" --repo sample) \
+    || fail "could not register an ordinary quoted-title hold"
+  assert_contains "$(tasks_in "$home" show "$comma_hold" --full)" 'title: "Choose route, captain"' \
+    "comma-title fixture must be rendered as a quoted scalar"
+  run_decisions "$home" hold "$origin" audience \
+    --title "Choose route, captain" --reason "captain audience choice pending" --repo sample >/dev/null \
+    || fail "exact ordinary quoted-title retry was not idempotent"
+  if run_decisions "$home" hold "$origin" audience \
+    --title "Choose another route, captain" --reason "captain audience choice pending" --repo sample \
+    > "$home/mismatch.out" 2> "$home/mismatch.err"; then
+    fail "a genuinely different quoted title was accepted"
+  fi
+  assert_grep "different title" "$home/mismatch.err" "true title mismatch must still refuse"
+
+  cat > "$home/fakebin/tasks-axi" <<'EOF'
+#!/usr/bin/env bash
+if [ "${1:-}" = show ] && [ "${2:-}" = sample-title-review-decision-route ]; then
+  output=$("$REAL_TASKS_AXI" "$@") || exit $?
+  case "$(cat "$FM_HOME/title-output-mode")" in
+    malformed)
+      printf '%s\n' "$output" | sed 's/^  title: .*/  title: "unterminated/'
+      ;;
+    duplicate)
+      printf '%s\n' "$output" | awk '{ print; if ($0 ~ /^  title:/) print "  title: Rival title" }'
+      ;;
+  esac
+  exit 0
+fi
+exec "$REAL_TASKS_AXI" "$@"
+EOF
+  chmod +x "$home/fakebin/tasks-axi"
+  for mode in malformed duplicate; do
+    printf '%s\n' "$mode" > "$home/title-output-mode"
+    if run_decisions "$home" hold "$origin" route \
+      --title "Choose route: north" --reason "captain route choice pending" --repo sample \
+      > "$home/$mode.out" 2> "$home/$mode.err"; then
+      fail "$mode title output was accepted as an exact retry"
+    fi
+    assert_grep "unreadable or ambiguous title" "$home/$mode.err" \
+      "$mode title output must refuse instead of guessing"
+  done
+
+  [ "$(grep -cE "^- \[ \] $colon_hold -" "$home/data/backlog.md")" = 1 ] \
+    || fail "title retry regressions changed the existing colon-title record"
+  [ "$(grep -cE "^- \[ \] $comma_hold -" "$home/data/backlog.md")" = 1 ] \
+    || fail "title retry regressions changed the existing comma-title record"
+  pass "existing hold retries decode quoted titles and refuse mismatched or ambiguous scalars"
+}
+
 test_scout_teardown_always_requires_inventory_verification() {
   local home id
   home=$(make_home unconditional-teardown)
@@ -863,6 +941,7 @@ test_resolved_decision_survives_backlog_retention
 test_retention_transition_and_conflicting_records_are_distinguished
 test_unusable_archived_records_refuse_and_preserve_cleanup_refusal
 test_structured_holds_survive_teardown_and_route_resolution
+test_existing_hold_title_decodes_toon_scalar
 test_origin_slug_validation_precedes_path_construction
 test_visual_review_uses_shared_completion_owner
 test_none_inventory_and_resolved_prose_do_not_create_holds
