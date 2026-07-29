@@ -6,7 +6,7 @@ This document records the deterministic mechanism, structured surfaces, and priv
 ## Mechanism
 
 `bin/fm-decision-hold.sh` is the only lifecycle command for an investigation or visual review's unresolved captain decisions.
-The command runs tasks-axi in the active `FM_HOME`, so the existing backlog remains the only durable work database and a secondmate-owned decision stays in the secondmate home.
+The command resolves the tasks-axi backlog and configured archive from the active `FM_HOME`, so those remain the only durable work stores and a secondmate-owned decision stays in the secondmate home.
 It never reads report bodies, review artifacts, terminal output, or chat.
 
 The `hold` subcommand maps an originating work id and stable decision key to `<origin-id>-decision-<decision-key>`.
@@ -66,7 +66,7 @@ A later regression covers tasks-axi's quoted multi-entry `blocked_by` output so 
 
 The retention-durability regression resolves a captain decision, prunes the completed record out of the active backlog with `tasks-axi prune`, and verifies the same identity before and after that move.
 It asserts the archived task is not rehydrated into the active backlog and the decision is not duplicated across both stores, that reopening an already resolved archived identity is still rejected, and that cleanup succeeds only because the gate passes rather than because it was weakened.
-Its sibling cases cover the identical retention transition window, a divergent duplicate, duplicate archived rows, a non-completed archived row, a non-canonical row, a symlinked archive with cleanup still refusing, and an empty archive.
+Its sibling cases cover the identical retention transition window, a divergent duplicate, duplicate archived rows, a non-completed archived row, non-canonical rows, unsupported escaped archive configuration, an unusable active store, private staging permissions, a symlinked archive with cleanup still refusing, and an empty archive.
 
 The final verification commands and their exact summarized outputs follow.
 

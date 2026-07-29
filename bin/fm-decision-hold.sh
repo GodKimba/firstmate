@@ -24,10 +24,11 @@
 # ever read; its rows are projected into a private temporary Done section so
 # tasks-axi stays the single record parser. A record present in both stores is
 # accepted only while the two copies are identical, which is the bounded window
-# a prune can expose. Any other duplicate, a second archived row for the same
-# identity, an archived row that is not a completed record, an unparsable
-# archived row, or a symlinked or non-regular archive refuses instead of
-# choosing silently. Mutating subcommands still require the active backlog.
+# a prune can expose. An unreadable store, unsupported TOML escape syntax in
+# the archive path, any other duplicate, a second archived row for the same
+# identity, a non-completed or non-canonical archived row, or a symlinked or
+# non-regular archive refuses instead of choosing silently. Mutating
+# subcommands still require the active backlog.
 #
 # Usage:
 #   fm-decision-hold.sh id <origin-id> <decision-key>
