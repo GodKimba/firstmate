@@ -308,6 +308,10 @@
       "audience": "operator-current"
     },
     {
+      "path": "docs/verification/pool-account-routing.md",
+      "audience": "maintainer-verification"
+    },
+    {
       "path": "docs/verification/runtime-backends.md",
       "audience": "maintainer-verification"
     },
