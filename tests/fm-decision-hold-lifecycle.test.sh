@@ -589,6 +589,13 @@ test_resolved_decision_survives_backlog_retention() {
   run_decisions "$home" verify "$id" >/dev/null \
     || fail "resolved decision did not verify before retention"
 
+  sed -i.bak \
+    -e "s/backend = \"markdown\"/backend = 'markdown'/" \
+    -e "s|path = \"data/backlog.md\"|path = 'data/backlog.md'|" \
+    -e "s|archive = \"data/done-archive.md\"|archive = 'data/done-archive.md'|" \
+    "$home/.tasks.toml"
+  rm -f "$home/.tasks.toml.bak"
+
   # Normal retention runs over the whole Done section while the originating
   # investigation is still live, which is exactly how the incident arose.
   tasks_in "$home" prune --keep 0 --state "done" >/dev/null \
@@ -777,6 +784,15 @@ EOF
   fi
   assert_grep "not in canonical form" "$home/$case_name.err" \
     "an unterminated checkbox must refuse the archived record"
+
+  case_name=malformed-checkbox-delimiter
+  sed "s/^- \[x\] sample-archive-review-decision-route /- [ - ] sample-archive-review-decision-route /" \
+    "$pristine" > "$archive"
+  if run_decisions "$home" verify "$id" > "$home/$case_name.out" 2> "$home/$case_name.err"; then
+    fail "a malformed archived checkbox delimiter hid the decision identity"
+  fi
+  assert_grep "not in canonical form" "$home/$case_name.err" \
+    "a malformed checkbox delimiter must refuse the archived record"
 
   # A symlinked archive is never followed.
   case_name=symlink

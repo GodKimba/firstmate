@@ -142,11 +142,12 @@ toml_value() {  # <section> <key>
       sub(/^[[:space:]]*/, "", line)
       if (line !~ "^" key "[[:space:]]*=") next
       sub("^" key "[[:space:]]*=[[:space:]]*", "", line)
-      if (substr(line, 1, 1) == "\"") {
+      quote = substr(line, 1, 1)
+      if (quote == "\"" || quote == sprintf("%c", 39)) {
         line = substr(line, 2)
-        quote = index(line, "\"")
-        if (quote == 0) next
-        line = substr(line, 1, quote - 1)
+        closing_quote = index(line, quote)
+        if (closing_quote == 0) next
+        line = substr(line, 1, closing_quote - 1)
       } else {
         sub(/[[:space:]].*$/, "", line)
       }
@@ -197,25 +198,34 @@ record_rows() {  # <store-file> <id> <active|archive>
     function is_top_row(line) {
       return line ~ /^-[[:space:]]/ || line ~ /^-\[/ || line ~ /^-\*\*/
     }
-    function has_identity(line,   separator, prefix, rest, offset, pos, absolute, before, after) {
-      separator = index(line, " - ")
-      prefix = separator > 0 ? substr(line, 1, separator - 1) : line
-      rest = prefix
+    function has_identity(text,   rest, offset, pos, absolute, before, after) {
+      rest = text
       offset = 0
       while ((pos = index(rest, id)) > 0) {
         absolute = offset + pos
-        before = absolute > 1 ? substr(prefix, absolute - 1, 1) : ""
-        after = substr(prefix, absolute + length(id), 1)
+        before = absolute > 1 ? substr(text, absolute - 1, 1) : ""
+        after = substr(text, absolute + length(id), 1)
         if (before !~ /[A-Za-z0-9._-]/ && after !~ /[A-Za-z0-9._-]/) {
           return 1
         }
         offset = absolute + length(id) - 1
-        rest = substr(prefix, offset + 1)
+        rest = substr(text, offset + 1)
       }
       return 0
     }
-    function is_candidate(line) {
-      return is_top_row(line) && has_identity(line)
+    function is_candidate(line,   rest, closing_bracket, separator) {
+      if (!is_top_row(line)) return 0
+      rest = line
+      sub(/^-[[:space:]]*/, "", rest)
+      if (substr(rest, 1, 1) == "[") {
+        closing_bracket = index(rest, "]")
+        if (closing_bracket == 0) return has_identity(rest)
+        rest = substr(rest, closing_bracket + 1)
+        sub(/^[[:space:]]*/, "", rest)
+        separator = index(rest, " - ")
+        if (separator > 0) rest = substr(rest, 1, separator - 1)
+      }
+      return has_identity(rest)
     }
     function refuse(message) {
       printf "refuse: %s\n", message
