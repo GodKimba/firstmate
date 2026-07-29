@@ -516,16 +516,22 @@ test_the_reader_never_writes_to_the_pool() {
   pass "reading the pool leaves every account file untouched"
 }
 
-test_skill_opens_the_dashboard_without_a_feedback_poll() {
+test_skill_owns_the_platform_aware_nonblocking_panel_open() {
   local skill="$ROOT/.agents/skills/poolquota/SKILL.md"
 
-  assert_grep "ordinary nonblocking browser opener, \`open <path>\`" "$skill" \
-    "the poolquota skill does not require the nonblocking browser opener"
-  assert_no_grep "Opens the returned \`panel\` path with \`lavish-axi" "$skill" \
-    "the poolquota skill still opens the dashboard through lavish-axi"
+  assert_grep 'On macOS (`uname -s` reports `Darwin`), run `open "$panel"`' "$skill" \
+    "the poolquota skill does not define the macOS nonblocking opener"
+  assert_grep 'On Linux, require `xdg-open`, then launch `nohup xdg-open "$panel" </dev/null >/dev/null 2>&1 &`' "$skill" \
+    "the poolquota skill does not detach the Linux opener"
   assert_grep "Do not use \`lavish-axi\` for this display-only dashboard" "$skill" \
     "the poolquota skill does not distinguish dashboards from review surfaces"
-  pass "the poolquota dashboard opens without entering a foreground feedback poll"
+  assert_no_grep 'lavish-axi' "$CMD" \
+    "the quota adapter still assigns the dashboard opener to lavish-axi"
+  assert_no_grep 'xdg-open' "$CMD" \
+    "the quota adapter competes with the skill for Linux opener ownership"
+  assert_no_grep '`open ' "$CMD" \
+    "the quota adapter competes with the skill for macOS opener ownership"
+  pass "the poolquota skill alone owns nonblocking panel opening on macOS and Linux"
 }
 
 test_multi_account_aggregation_is_per_provider
@@ -541,4 +547,4 @@ test_panel_is_self_contained_local_and_private
 test_concise_view_hides_account_rows_but_discloses_the_omission
 test_missing_pool_and_bad_arguments_stop_safely
 test_the_reader_never_writes_to_the_pool
-test_skill_opens_the_dashboard_without_a_feedback_poll
+test_skill_owns_the_platform_aware_nonblocking_panel_open
