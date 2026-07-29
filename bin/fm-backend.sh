@@ -564,6 +564,29 @@ fm_backend_send_text_submit() {  # <backend> <target> <text> <retries> <enter-sl
   esac
 }
 
+# Claude Vim recovery needs stronger primitives than ordinary key delivery:
+# positive composer-state reads before and after each targeted Escape, plus an
+# Enter-only submit for text already present in the composer. Only tmux and
+# Herdr expose both guarantees today. Unsupported backends are rejected before
+# any key is sent, so adding this recovery path cannot weaken their behavior.
+fm_backend_supports_claude_vim_recovery() {  # <backend>
+  case "$1" in
+    tmux|herdr) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+fm_backend_submit_pending() {  # <backend> <target> <retries> <enter-sleep> [expected-label]
+  local backend=$1
+  shift
+  fm_backend_source "$backend" || return 1
+  case "$backend" in
+    tmux) fm_backend_tmux_submit_pending "$@" ;;
+    herdr) fm_backend_herdr_submit_pending "$@" ;;
+    *) printf 'unknown' ;;
+  esac
+}
+
 # fm_backend_kill: remove the task's session endpoint (best-effort; a
 # nonexistent/already-gone target is not an error - callers already swallow
 # failures here exactly as the inline `tmux kill-window ... || true` did).

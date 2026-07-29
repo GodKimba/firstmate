@@ -2225,6 +2225,39 @@ fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep>
   done
 }
 
+# Submit an already-present instruction after Claude Vim interruption recovery.
+# This path never calls send-text. It requires a legibly pending composer and an
+# idle native agent baseline, sends Enter only, and accepts delivery only when a
+# later native sample proves a new working/blocked turn. If the composer clears
+# without that semantic transition, the result is ambiguous and remains
+# `unknown`; retrying Enter into an empty box would be guessing.
+fm_backend_herdr_submit_pending() {  # <target> <retries> <enter-sleep>
+  local target=$1 retries=$2 sleep_s=$3 i=0 verdict baseline confirm_sleep
+  fm_backend_herdr_parse_target "$target" || { printf 'unknown'; return 0; }
+  [ "$(fm_backend_herdr_submit_composer_state "$target")" = pending ] \
+    || { printf 'unknown'; return 0; }
+  baseline=$(fm_backend_herdr_classify_submit_agent_status \
+    "$(fm_backend_herdr_agent_status_raw "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE")")
+  [ "$baseline" = idle ] || { printf 'unknown'; return 0; }
+  confirm_sleep=$(fm_backend_herdr_submit_confirm_budget "$sleep_s")
+  while :; do
+    fm_backend_herdr_send_key "$target" Enter || { printf 'send-failed'; return 0; }
+    verdict=$(fm_backend_herdr_wait_for_working "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE" \
+      "$confirm_sleep" "$FM_BACKEND_HERDR_SUBMIT_POLLS")
+    case "$verdict" in
+      busy) printf 'empty'; return 0 ;;
+      unknown) printf 'unknown'; return 0 ;;
+    esac
+    verdict=$(fm_backend_herdr_submit_composer_state "$target")
+    case "$verdict" in
+      pending) ;;
+      *) printf 'unknown'; return 0 ;;
+    esac
+    i=$((i + 1))
+    [ "$i" -lt "$retries" ] || { printf 'pending'; return 0; }
+  done
+}
+
 # fm_backend_herdr_kill: remove the task's pane, best-effort (mirrors
 # tmux-kill-window's `|| true` contract). Verified: closing a tab's only pane
 # closes the tab too, so a separate tab close is unnecessary.

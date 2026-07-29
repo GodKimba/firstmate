@@ -40,8 +40,9 @@ Escalate in order:
 
 1. Peek the pane.
 2. If the crewmate is waiting on a question its brief already answers, answer in one line via `FM_HOME=<this-firstmate-home> bin/fm-send.sh` from an active firstmate session unless `FM_HOME` is already set to the active firstmate home.
-3. If the crewmate is confused or looping, interrupt with the adapter's interrupt key, then redirect with one corrective line.
-   For example, for a single-Escape adapter: `FM_HOME=<this-firstmate-home> bin/fm-send.sh <window> --key Escape`.
+3. If the crewmate is confused or looping, interrupt with the adapter's verified procedure, then redirect with one corrective line.
+   For Claude, use the `harness-adapters` skill's Claude Vim interruption recovery command; a raw Escape delivery is not interruption proof, and pending recovery may require Enter-only continuation instead of retyping.
+   For a non-Claude single-Escape adapter, use `FM_HOME=<this-firstmate-home> bin/fm-send.sh <window> --key Escape`.
 4. If the crewmate is genuinely wedged after redirection, exit the agent with the adapter's exit command and relaunch with the same brief plus a `progress so far` note appended to it.
    Genuine wedging means looping, unresponsive, repeating the same obstacle, or truly dead.
    A low context reading is not wedging; modern harnesses auto-compact and keep going.
