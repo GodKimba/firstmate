@@ -220,6 +220,38 @@ FM_SEND_MARKER_HERDR_E2E=1 \
   tests/fm-send-secondmate-marker-herdr-e2e.test.sh
 ```
 
+### Busy submit confirmation
+
+The busy-send path was measured on 2026-07-28 against Herdr 0.7.5, protocol 16, on macOS aarch64.
+Claude Code 2.1.220 was launched as `claude --dangerously-skip-permissions`, and Pi 0.82.1 was launched as `pi`.
+`bin/fm-herdr-lab.sh name fmhsbd-final` produced the non-default `fm-lab-` session used for the run.
+The EXIT-trap teardown was installed before provision; provision used the lab helper, and every non-lifecycle Herdr command went through the guarded `bin/fm-herdr-lab.sh run <session> ...` path.
+Both harnesses were driven into a real `sleep 70` foreground tool wait with a long timeout before the send.
+One logical `fm_backend_herdr_send_text_submit` was issued with `retries=3`, `enter-sleep=0.4`, and `settle=0.3`.
+The queued-instruction count came from a 500-line capture grepped for a unique sentinel.
+
+Rejected signal: `agent get` counters are not an acceptance signal.
+Claude advanced `revision` from 1 to 2 during quiet work with no input at all, and did not advance it when it accepted a queued instruction; Pi moved neither `revision` nor `state_change_seq` in either situation.
+
+Active signal: the composer transition.
+On both harnesses the composer read pending while the message sat typed-but-unsubmitted, and drained within 100ms of an accepted Enter, while native state stayed `working` throughout and could not distinguish the two.
+The adapter binds that measured transition to its own send by requiring empty before typing, pending after typing, and empty after Enter.
+A non-empty or unreadable pre-send composer and an unreadable or non-pending post-send composer return unknown without any Enter.
+
+Observed guarantees for one logical send into an already-busy harness:
+
+```text
+ok - claude: a busy accepted send confirms as delivered (empty)
+ok - claude: exactly one queued instruction after one logical send (1)
+ok - pi: a busy accepted send confirms as delivered (empty)
+ok - pi: exactly one queued instruction after one logical send (1)
+ok - dead shell: never reported as delivered (unknown)
+```
+
+Limitation: this live run measured commit `5f5d138` before the later pipeline fix rounds, so the current post-fix code was not measured live.
+The post-fix guarantees rest on the deterministic fixtures in `tests/fm-backend-herdr.test.sh` and `tests/fm-send-strict.test.sh` rather than on a reconstructed live rerun.
+This record owns only the live evidence that the counters were rejected and the composer transition holds on real harnesses.
+
 ### Native blocked event
 
 The protocol-16 event path was measured on 2026-07-11 with Herdr 0.7.3 and Python 3.13:
@@ -424,6 +456,7 @@ bin/fm-wake-lib.sh
 
 Observed guarantee: a runtime carries the answer message as opaque text and a backend carries it as opaque keystrokes, so neither can weaken, forge, or bypass the correlation.
 `fm-send.sh --decision` mints and records the token before any backend dispatch, and `fm_backend_send_text_submit` receives an already-composed message, so the refusal to answer a request that is not open is identical on every backend.
+Every non-delivery exit revokes that exact answer record, so an unconfirmed attempt followed by a resend leaves only the delivered attempt's token live; a revocation failure is reported rather than hidden.
 The status stream a worker appends is a plain file folded only through that shared library, so a new harness or backend adds no correlation surface and needs no per-adapter change.
 
 Token-era initialization, legacy compatibility, lifecycle retention, and retained-decision notification are pinned by:
@@ -432,6 +465,7 @@ Token-era initialization, legacy compatibility, lifecycle retention, and retaine
 tests/fm-decision-answer-authority.test.sh
 tests/fm-brief.test.sh
 tests/fm-fleet-snapshot-view.test.sh
+tests/fm-send-strict.test.sh
 tests/fm-watch-triage.test.sh
 ```
 

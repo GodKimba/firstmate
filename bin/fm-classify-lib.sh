@@ -357,6 +357,35 @@ fm_decision_record_answer() {  # <answers-file> <token> <key> <instance>
   printf '%s' "$token"
 }
 
+# Revoke a minted token whose answer was NOT confirmed delivered, so a failed or
+# unconfirmed decision send leaves no standing authority behind. Without this, a
+# resend after an unconfirmed send mints a SECOND valid token for the same
+# request instance, and both remain able to close it - a retry would mint
+# duplicate authority (task fm-herdr-send-busy-duplicate, required work 4).
+#
+# Revoking is the safe direction even when the send may in fact have landed: an
+# answer that arrives carrying a revoked token simply fails to correlate, so the
+# request stays open and gets surfaced, which is this contract's established
+# preference over silently advancing past it.
+#
+# Rewrites the record file without the matching line. A missing file is success
+# (nothing to revoke). Returns non-zero only when a present file could not be
+# rewritten, which the caller must surface rather than ignore.
+fm_decision_revoke_answer() {  # <answers-file> <token> <key> <instance>
+  local f=$1 token=$2 key=$3 instance=$4 tmp rt rk ri
+  [ -f "$f" ] || return 0
+  tmp="$f.revoke.$$"
+  : > "$tmp" || return 1
+  while IFS=$'\t' read -r rt rk ri || [ -n "$rt" ]; do
+    [ -n "$rt" ] || continue
+    if [ "$rt" = "$token" ] && [ "$rk" = "$key" ] && [ "$ri" = "$instance" ]; then
+      continue
+    fi
+    printf '%s\t%s\t%s\n' "$rt" "$rk" "$ri" >> "$tmp" || { rm -f "$tmp"; return 1; }
+  done < "$f"
+  mv -f "$tmp" "$f" || { rm -f "$tmp"; return 1; }
+}
+
 # Print the message shape that carries an authorized answer to a worker. The
 # worker copies the same key and token onto its closing resolved line.
 fm_decision_answer_message() {  # <key> <token> <text>

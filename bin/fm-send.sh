@@ -16,6 +16,10 @@
 # contract). Because the token cannot exist before the request opened, no queued
 # generic command, unkeyed message, or earlier input can close it. Plain sends
 # are unchanged and still reach a busy worker's queue.
+# The token remains live only after confirmed delivery.
+# Every pre-submit failure or unconfirmed send revokes it, and a revocation
+# failure is reported loudly because retrying could otherwise duplicate answer
+# authority for one request.
 # Key support is backend-specific: tmux/herdr support Escape, Enter, and C-c;
 # Orca currently supports Enter and C-c only, and rejects Escape.
 #
@@ -213,6 +217,39 @@ MARK_FROM_FIRSTMATE=0
 PENDING_REPLY_CORR=
 PENDING_REPLY_CREATED=0
 TARGET_TASK_ID=
+# Set once a --decision answer token has been minted. Any later path that does
+# not confirm delivery must revoke its record, so an unconfirmed answer never
+# leaves standing authority a later resend could duplicate.
+DECISION_MINTED=0
+DECISION_KEY=
+DECISION_TOKEN=
+DECISION_INSTANCE=
+DECISION_ANSWERS=
+
+# Revoke an unconfirmed decision answer. Called on every non-delivery exit.
+fm_send_revoke_unconfirmed_decision() {
+  [ "$DECISION_MINTED" = 1 ] || return 0
+  DECISION_MINTED=0
+  if ! fm_decision_revoke_answer "$DECISION_ANSWERS" "$DECISION_TOKEN" "$DECISION_KEY" "$DECISION_INSTANCE"; then
+    echo "error: could not revoke the unconfirmed decision answer token in $DECISION_ANSWERS; that token can still close decision '$DECISION_KEY'. Inspect it before answering again." >&2
+    return 1
+  fi
+}
+fm_send_cleanup_unconfirmed_decision() {
+  local exit_status=$1
+  trap - EXIT
+  fm_send_revoke_unconfirmed_decision || exit_status=1
+  exit "$exit_status"
+}
+fm_send_arm_decision_cleanup() {
+  DECISION_MINTED=1
+  trap 'fm_send_cleanup_unconfirmed_decision "$?"' EXIT
+}
+fm_send_disarm_decision_cleanup() {
+  [ "$DECISION_MINTED" = 1 ] || return 0
+  DECISION_MINTED=0
+  trap - EXIT
+}
 if [ -n "$TARGET_SELECTOR" ] && [ -n "$TARGET_META" ] && [ "$(fm_meta_get "$TARGET_META" kind)" = secondmate ]; then
   MARK_FROM_FIRSTMATE=1
   TARGET_TASK_ID=$(fm_send_id_from_meta "$TARGET_META")
@@ -273,6 +310,7 @@ EOF
     DECISION_ANSWERS=$(fm_decision_answers_file "$DECISION_STATUS")
     DECISION_TOKEN=$(fm_decision_mint_answer_token "$DECISION_INSTANCE") \
       || { echo "error: could not mint a decision answer token" >&2; exit 1; }
+    fm_send_arm_decision_cleanup
     fm_decision_record_answer "$DECISION_ANSWERS" "$DECISION_TOKEN" "$DECISION_KEY" "$DECISION_INSTANCE" >/dev/null \
       || { echo "error: could not record the decision answer token in $DECISION_ANSWERS" >&2; exit 1; }
     MESSAGE=$(fm_decision_answer_message "$DECISION_KEY" "$DECISION_TOKEN" "$DECISION_TEXT")
@@ -330,6 +368,7 @@ EOF
   fi
   case "$verdict" in
     empty)
+      fm_send_disarm_decision_cleanup
       ;;
     send-failed)
       if [ "$PENDING_REPLY_CREATED" = 1 ] && [ -n "$PENDING_REPLY_CORR" ]; then

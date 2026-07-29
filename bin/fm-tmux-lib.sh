@@ -12,8 +12,9 @@
 # as "pending input" and the away-mode daemon deferred 100% of escalations for
 # 9.5 hours with no escape. The detector below strips the box borders before
 # deciding, so a bordered-but-empty composer is correctly seen as empty. The same
-# corrected detector backs the submit acknowledgement (a submit "landed" iff the
-# composer is empty afterward), fixing the parallel false "Enter swallowed".
+# corrected detector backs the normal submit acknowledgement (a submit "landed"
+# when the composer is empty afterward), fixing the parallel false "Enter
+# swallowed"; the OpenCode busy-queue exception is documented below.
 #
 # Ghost text (incident composer-robust): claude renders a predicted-next-prompt
 # "suggestion" as dim/faint text inside an otherwise-empty composer. A plain
@@ -40,10 +41,14 @@
 # captain instruction. The submit core now falls back to `fm_pane_is_busy` once
 # the Enter-retry budget is spent: a busy pane means the harness accepted and
 # queued the Enter (report `empty` so the caller does not re-send), while an
-# idle pane keeps the `pending` verdict (a genuine swallow). The herdr backend
-# observes the same opencode behavior but needs a separate fix; it is recorded
-# as a known gap in `docs/herdr-backend.md` rather than patched here, so the
-# tmux adapter does not paper over a herdr-specific shape.
+# idle pane keeps the `pending` verdict (a genuine swallow). That inference is
+# sound HERE because this fallback runs from an idle-or-unknown starting point,
+# so a busy pane is new information. The herdr adapter deliberately does not
+# copy it: its busy path starts from an already-busy pane, where the same
+# inference would confirm every swallowed Enter as delivered. Herdr confirms a
+# busy send through the composer transition instead, and the opencode
+# keep-text-visible shape stays an open limit there; `docs/herdr-backend.md`
+# owns that boundary, so the tmux adapter does not paper over it.
 #
 # Overrides: FM_COMPOSER_IDLE_RE matches an empty composer after ghost and
 # structural border stripping. FM_BUSY_REGEX globally overrides harness-scoped

@@ -52,7 +52,13 @@ case "${1:-}" in
     printf '%%1\n'
     exit 0 ;;
   capture-pane)
-    printf '╭────╮\n│    │\n╰────╯\n'
+    # FM_FAKE_TMUX_UNSENT keeps the typed text in the composer, so submit
+    # confirmation reports the message as genuinely unsent.
+    if [ -n "${FM_FAKE_TMUX_UNSENT:-}" ]; then
+      printf '╭──────────────────────╮\n│ > still in the box   │\n╰──────────────────────╯\n'
+    else
+      printf '╭────╮\n│    │\n╰────╯\n'
+    fi
     exit 0 ;;
   list-windows)
     printf 'foreign:%s\n' "${FM_FAKE_TMUX_WINDOW:-fm-lost}"
@@ -229,10 +235,101 @@ EOF
   pass "fm-send strict: --decision mints one token bound to the open request"
 }
 
+# An unconfirmed decision send is the duplicate-authority hazard: the token was
+# already recorded before the text was submitted, so if delivery cannot be
+# confirmed and the answer is later re-sent, TWO live tokens exist for the same
+# request and either can close it. Revoking on every non-delivery exit keeps
+# exactly one live token per answer attempt; the safe direction is losing a
+# token (the request stays open and surfaced) rather than keeping a spare.
+
+test_unconfirmed_decision_answer_revokes_its_token() {
+  local dir fb home err rc log
+  dir="$TMP_ROOT/decision-unconfirmed"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); home=$(setup_home decision-unconfirmed); err="$dir/send.err"; log="$dir/tmux.log"; : > "$log"
+  fm_write_meta "$home/state/lane-d3.meta" "window=sess:fm-lane-d3" "kind=ship"
+  fm_decision_cutover_ensure_status "$home/state/lane-d3.status" \
+    || fail "could not establish a post-cutover send fixture"
+  printf 'needs-decision [key=red-test]: accept the red test, or keep fixing?\n' \
+    >> "$home/state/lane-d3.status"
+
+  # The composer never drains: delivery is genuinely unconfirmed.
+  PATH="$fb:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_TMUX_LOG="$log" FM_SEND_SETTLE=0 \
+    FM_SEND_RETRIES=1 FM_FAKE_TMUX_UNSENT=1 \
+    "$SEND" lane-d3 --decision red-test "keep fixing" >/dev/null 2>"$err"; rc=$?
+  [ "$rc" -ne 0 ] || fail "an unconfirmed decision send must not report success"
+  [ ! -s "$home/state/lane-d3.decision-answers" ] \
+    || fail "an unconfirmed decision answer left a live token behind:"$'\n'"$(cat "$home/state/lane-d3.decision-answers")"
+  pass "fm-send strict: an unconfirmed decision send revokes its answer token, so a resend cannot leave two tokens able to close one request"
+}
+
+test_secondmate_pre_submit_failure_revokes_its_decision_token() {
+  local dir fb home err rc log
+  dir="$TMP_ROOT/decision-secondmate-prepare"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); home=$(setup_home decision-secondmate-prepare); err="$dir/send.err"; log="$dir/tmux.log"; : > "$log"
+  fm_write_meta "$home/state/lane-d5.meta" "window=sess:fm-lane-d5" "kind=secondmate"
+  fm_decision_cutover_ensure_status "$home/state/lane-d5.status" \
+    || fail "could not establish a post-cutover secondmate send fixture"
+  printf 'needs-decision [key=red-test]: accept the red test, or keep fixing?\n' \
+    >> "$home/state/lane-d5.status"
+  cat > "$fb/mv" <<'SH'
+#!/usr/bin/env bash
+set -u
+last=
+for last do :; done
+case "$last" in
+  */.delivery-confirmed-*) exit 1 ;;
+esac
+exec /bin/mv "$@"
+SH
+  chmod +x "$fb/mv"
+
+  PATH="$fb:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_TMUX_LOG="$log" FM_SEND_SETTLE=0 \
+    "$SEND" lane-d5 --decision red-test "keep fixing" >/dev/null 2>"$err"; rc=$?
+  [ "$rc" -ne 0 ] || fail "a failed pending-reply delivery preparation must stop the decision send"
+  assert_contains "$(cat "$err")" "failed to durably prepare pending-reply delivery" \
+    "the pre-submit failure should identify pending-reply preparation"
+  [ ! -s "$home/state/lane-d5.decision-answers" ] \
+    || fail "a pre-submit secondmate failure left a live decision token behind:"$'\n'"$(cat "$home/state/lane-d5.decision-answers")"
+  [ ! -s "$log" ] || fail "a failed secondmate preparation still typed the decision answer"$'\n'"$(cat "$log")"
+  pass "fm-send strict: a pre-submit secondmate preparation failure revokes its decision token"
+}
+
+test_decision_answer_resend_leaves_exactly_one_live_token() {
+  local dir fb home rc token count
+  dir="$TMP_ROOT/decision-resend"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); home=$(setup_home decision-resend)
+  fm_write_meta "$home/state/lane-d4.meta" "window=sess:fm-lane-d4" "kind=ship"
+  fm_decision_cutover_ensure_status "$home/state/lane-d4.status" \
+    || fail "could not establish a post-cutover send fixture"
+  printf 'needs-decision [key=red-test]: accept the red test, or keep fixing?\n' \
+    >> "$home/state/lane-d4.status"
+
+  PATH="$fb:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_TMUX_LOG="$dir/t1.log" FM_SEND_SETTLE=0 \
+    FM_SEND_RETRIES=1 FM_FAKE_TMUX_UNSENT=1 \
+    "$SEND" lane-d4 --decision red-test "keep fixing" >/dev/null 2>&1; rc=$?
+  [ "$rc" -ne 0 ] || fail "pre-check: the first attempt should have failed unconfirmed"
+
+  # The captain re-sends the same answer; this one lands.
+  PATH="$fb:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_TMUX_LOG="$dir/t2.log" FM_SEND_SETTLE=0 \
+    "$SEND" lane-d4 --decision red-test "keep fixing" >/dev/null 2>&1; rc=$?
+  expect_code 0 "$rc" "the resend should succeed"
+  count=$(grep -c . "$home/state/lane-d4.decision-answers")
+  [ "$count" -eq 1 ] \
+    || fail "a resend after an unconfirmed decision send left $count live tokens for one request; only the delivered one may remain"
+  IFS=$'\t' read -r token _ _ < "$home/state/lane-d4.decision-answers"
+  printf 'resolved [key=red-test] [ans=%s]: kept fixing\n' "$token" >> "$home/state/lane-d4.status"
+  [ -z "$(bash -c '. "$1/bin/fm-classify-lib.sh"; status_open_decisions "$2"' _ "$ROOT" "$home/state/lane-d4.status")" ] \
+    || fail "the surviving token could not close its own decision"
+  pass "fm-send strict: resending an unconfirmed decision answer mints authority once, not twice"
+}
+
 test_exact_lane_id_send_still_works
 test_unset_fm_home_fails
 test_decision_answer_requires_an_open_request
 test_decision_answer_mints_a_correlated_token
+test_unconfirmed_decision_answer_revokes_its_token
+test_secondmate_pre_submit_failure_revokes_its_decision_token
+test_decision_answer_resend_leaves_exactly_one_live_token
 test_unresolvable_target_does_not_tmux_fallback
 test_prefixless_herdr_pane_id_fails
 test_unmatched_single_colon_target_must_exist
