@@ -369,6 +369,15 @@ surface_nonterminal_stale() {  # <window> <hash>
   wake "stale: $win"
 }
 
+surface_nonterminal_stale_once() {  # <window> <hash>
+  local win=$1 h=$2 key
+  key=$(printf '%s' "$win" | tr ':/.' '___')
+  if [ "$(cat "$STATE/.stale-surfaced-$key" 2>/dev/null || true)" != "$h" ]; then
+    surface_nonterminal_stale "$win" "$h"
+  fi
+  clear_pause_state "$win"
+}
+
 # Check and heartbeat cadence must survive actionable exits and restarts: the
 # watcher may be relaunched before in-memory counters reach their threshold on a
 # busy fleet. Persist the schedule as file mtimes instead.
@@ -862,7 +871,18 @@ EOF
     if [ "$kind" = secondmate ] && ! status_is_paused "$last"; then
       continue
     fi
-    tail40=$(fm_backend_capture "$(window_backend "$w")" "$w" 40 "$(window_label "$w")" 2>/dev/null) || continue
+    if ! tail40=$(fm_backend_capture "$(window_backend "$w")" "$w" 40 "$(window_label "$w")" 2>/dev/null); then
+      if [ -e "$STATE/.paused-$key" ] || status_is_paused_or_captain_held "$last"; then
+        h=$(cat "$STATE/.stale-$key" 2>/dev/null || true)
+        [ -n "$h" ] || h=endpoint-unreadable
+        case "$(pause_state_class "$w" "$task")" in
+          paused)  handle_paused_stale "$w" "$task" "$h" ;;
+          working) clear_pause_state "$w" ;;
+          *)       surface_nonterminal_stale_once "$w" "$h" ;;
+        esac
+      fi
+      continue
+    fi
     h=$(printf '%s' "$tail40" | hash_pane)
     key=$(printf '%s' "$w" | tr ':/.' '___')
     hf="$STATE/.hash-$key"
@@ -885,7 +905,8 @@ EOF
         if [ "$kind" = secondmate ]; then
           case "$(pause_state_class "$w" "$task")" in
             paused) handle_paused_stale "$w" "$task" "$h" ;;
-            *)      clear_pause_tracking "$w" ;;
+            working) clear_pause_tracking "$w" ;;
+            *)      surface_nonterminal_stale_once "$w" "$h" ;;
           esac
         elif afk_present; then
           # Daemon owns triage: one-shot per distinct stale hash, as before.
