@@ -20,7 +20,7 @@ When the captain asks about pull requests, checks, or review load, that is `gh-a
 ## What it does
 
 1. Runs `bin/fm-pool-quota.sh` for a fresh read; its `--help` owns the supported flags, bounds, environment overrides, and output contract.
-2. Opens the returned `panel` path with the platform's ordinary nonblocking browser opener on every invocation.
+2. Attempts to open the returned `panel` path with the platform's ordinary nonblocking browser opener on every invocation.
    On macOS (`uname -s` reports `Darwin`), run `open "$panel"`; it returns after handing the local file to the browser.
    On Linux, require `xdg-open`, then launch `nohup xdg-open "$panel" </dev/null >/dev/null 2>&1 &` so the opener cannot keep the invoking shell in the foreground.
    If the platform or its opener is unsupported, report that the fresh panel was regenerated but could not be opened, and do not substitute another review tool.

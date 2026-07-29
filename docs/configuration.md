@@ -320,7 +320,7 @@ Account identity uses a stable masked label across runs, and a full address is n
 
 `bin/fm-pool-quota.sh --help` owns the exact flags, bounds, environment overrides, and output contract.
 
-Every `/poolquota` invocation regenerates the private local panel from its fresh read and opens it with the operating system's ordinary nonblocking browser opener.
+Every `/poolquota` invocation regenerates the private local panel from its fresh read and attempts to open it with the operating system's ordinary nonblocking browser opener.
 The poolquota skill owns platform selection and the immediate-return behavior on supported macOS and Linux hosts.
 The display-only dashboard does not enter `lavish-axi`'s interactive feedback flow, which remains available for genuine review surfaces.
 The panel artifact is private local operational detail about paid subscriptions.
