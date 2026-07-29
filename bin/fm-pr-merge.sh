@@ -4,12 +4,13 @@
 # The full canonical GitHub PR URL is parsed by bin/fm-pr-lib.sh and the derived
 # host, owner/repository, and PR number are passed to gh-axi.
 #
-# Merge method defaults to --squash when the caller passes none of --squash,
-# --merge, --rebase, or --method after the optional -- separator. The optional
-# --require-ancestor <sha> form verifies that SHA is an ancestor of the exact PR
-# head and requires a true merge method. Extra args must not include --repo, -R,
-# --hostname, or a competing --match-head-commit because those bindings come
-# only from the URL and the ancestry check.
+# For ordinary requests, the merge method defaults to --squash when the caller
+# passes none of --squash, --merge, --rebase, or --method after the optional --
+# separator. The optional --require-ancestor <sha> form has no default: it
+# verifies that SHA is an ancestor of the exact PR head and requires an explicit
+# true merge method. Extra args must not include --repo, -R, --hostname, or a
+# competing --match-head-commit because those bindings come only from the URL
+# and the ancestry check.
 # After gh-axi returns, the helper reads the current GitHub REST state. Exit 0
 # means GitHub verifies the PR is merged and any required ancestor reaches the
 # final merge commit; exit 3 means auto-merge is enabled on an open PR and the

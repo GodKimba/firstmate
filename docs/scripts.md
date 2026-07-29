@@ -81,10 +81,11 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-check-register.sh`   | Bind an intentional custom watcher check to its current bytes                       |
 | `fm-check-lib.sh`        | Validate custom-check registrations and prepare private execution snapshots          |
 | `fm-pr-lib.sh`           | Own canonical task and PR validation plus private atomic PR-poll publication and identity-bound retirement |
-| `fm-pr-poll.sh`          | Provide the byte-static watcher program for validated PR/MR-poll sidecars           |
+| `fm-pr-poll.sh`          | Provide the byte-static watcher program for validated PR/MR-poll sidecars, including optional GitHub ancestry verification |
 | `fm-pr-check-migrate.sh` | Quarantine older task polls without execution and rebuild only canonical polls       |
-| `fm-pr-check.sh`         | Record validated `pr=` and `pr_head=` values, then atomically arm a static merge poll |
-| `fm-pr-merge.sh`         | Record PR metadata, request a GitHub merge, then verify current PR state             |
+| `fm-pr-check.sh`         | Record validated PR identity and optional required ancestry, then atomically arm a static merge poll |
+| `fm-pr-merge.sh`         | Request and verify a GitHub merge, optionally enforcing required ancestry             |
+| `fm-upstream-check.sh`   | Report upstream divergence, predicted conflicts, and per-commit collision evidence without mutating checkout state |
 | `fm-promote.sh`          | Promote a scout task in place to a protected ship task                               |
 | `fm-teardown.sh`         | Fail-closed teardown: return landed ship worktrees, require completed scout deliverables, retire secondmate homes |
 | `fm-treehouse-generic-return.sh` | Remove one authorized generic-pool task worktree without forced Git removal |

@@ -888,7 +888,14 @@ test_concurrent_watcher_sees_only_complete_publication() {
 '$REAL_CP' "\$@" || exit 1
 sleep 0.3
 SH
-    chmod +x "$dir/fakebin/cp"
+    cat > "$dir/fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  capture-pane) printf '%s\n' fixture-busy ;;
+  *) exit 1 ;;
+esac
+SH
+    chmod +x "$dir/fakebin/cp" "$dir/fakebin/tmux"
 
     FM_TEST_GH_HEAD=0123456789abcdef0123456789abcdef01234567 \
       run_check_entry "$dir" task-a https://github.com/o/r/pull/1 > "$dir/direct.out" 2> "$dir/direct.err" &
@@ -901,7 +908,8 @@ SH
     [ "$i" -lt 100 ] || fail "atomic publication did not reach staged check"
 
     set +e
-    FM_TEST_GH_STATE=MERGED run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch.out" 2> "$dir/watch.err"
+    FM_BUSY_REGEX=fixture-busy FM_TEST_GH_STATE=MERGED \
+      run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch.out" 2> "$dir/watch.err"
     rc=$?
     set -e
     wait "$direct_pid" || fail "concurrent direct arming failed"

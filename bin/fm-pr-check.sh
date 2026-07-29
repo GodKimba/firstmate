@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Record a PR-ready task: store one validated canonical pr=<url> and the forge's
 # exact pr_head=<sha> when available, then atomically arm a static merge poll.
-# An optional required ancestor becomes authenticated poll state for
+# An optional GitHub-only required ancestor becomes authenticated poll state for
 # ancestry-sensitive merge completion.
 # The watcher check source is byte-for-byte bin/fm-pr-poll.sh; task and PR data
 # live only in a private sidecar and are never interpolated into shell source.

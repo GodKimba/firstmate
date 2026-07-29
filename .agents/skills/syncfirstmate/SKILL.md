@@ -8,7 +8,7 @@ metadata:
 
 # syncfirstmate
 
-Bring upstream Firstmate changes into this fork, with the captain choosing what lands.
+Bring upstream Firstmate changes into this fork, with the captain choosing which resulting behaviors remain.
 
 This fork carries its own work, so upstream is not a source to follow blindly.
 The workflow is therefore two steps with a human decision between them: `check` reports what upstream changed and what it would collide with, and `prepare` builds the integration the captain approved.
@@ -28,7 +28,7 @@ Read-only apart from fetching remote-tracking refs.
 It prints the divergence, the merge base, whether upstream is already an ancestor, a non-mutating conflict preview, and one review block per upstream-only commit with that commit's effect, surfaces, added files, and collision risk.
 
 Exit code 1 means conflicts are predicted, which is an ordinary outcome, not a failure.
-Exit code 2 is a refusal with the concrete missing requirement and the command that fixes it.
+Exit code 2 is a refusal with a concrete reason and a correction when one is available.
 
 Relay the summary to the captain in plain outcomes under `AGENTS.md` section 9.
 Group the commits by what they mean for this fork rather than reading the blocks aloud: what is new capability, what is a fix, what collides with work this fork already did.
@@ -69,7 +69,7 @@ The task's instructions must require, in order:
    Never use `no-mistakes rerun` for it because that path performs a rebase; after a terminal run, start the replacement with the original intent and `--skip=rebase`.
 
 Never implement a rejection by squashing, cherry-picking only the wanted commits, rebasing, rewriting history, or quietly leaving a commit out.
-All four produce the right files and a history that claims the integration never happened, so every later `check` proposes the same commits again, forever.
+Each can produce the right files and a history that claims the integration never happened, so every later `check` proposes the same commits again, forever.
 
 ## Landing
 
@@ -94,15 +94,15 @@ After it lands, tell the captain to run `/updatefirstmate` to roll the result ou
 
 ## Safety
 
-- **`check` never writes.**
-  It fetches remote-tracking refs and computes the conflict preview in the object database; HEAD, the index, and the working tree are untouched.
+- **`check` never changes HEAD, the index, the working tree, or local branches.**
+  It fetches remote-tracking refs and computes the conflict preview in the object database.
   Use `--no-fetch` when even the fetch is unwanted.
 - **Never push to upstream.**
   This workflow only ever reads from it.
 - **Never merge automatically.**
   `prepare` stops at a reviewed PR; landing is the captain's, under `AGENTS.md` section 7.
 - **Never force, stash, rebase shared history, or discard local work.**
-  A dirty or diverged state is reported and left alone, never cleaned up.
+  Local work is left untouched, and preparation happens only in an isolated copy.
 - **Never update a running home.**
   That is `/updatefirstmate`, after the merge commit lands.
 - **The integration happens in an isolated copy**, never the primary checkout.

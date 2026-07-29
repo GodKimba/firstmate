@@ -27,11 +27,11 @@
 # `-- --merge` form preserves it at landing, and the skill carries that as a
 # non-optional step.
 #
-# Per-commit review lines are evidence, not a verdict. The recommendation column
-# is derived from mechanical signals only - whether a commit's files collide with
-# fork-only work, whether it is a dependency of another upstream commit, and
-# whether the fork already changed the same surface. A human reads the summary
-# and decides; nothing here selects, filters, or omits a commit.
+# Per-commit review lines are evidence, not a verdict. Each review line is
+# derived only from mechanical file-collision signals. Added files and touched
+# surfaces are separate inputs that let a human check cross-commit dependencies.
+# A human reads the summary and decides; nothing here selects, filters, or omits
+# a commit.
 #
 # Usage: fm-upstream-check.sh [--upstream <remote>] [--branch <branch>] [--no-fetch] [--help]
 #
@@ -260,8 +260,8 @@ git -C "$FM_ROOT" rev-list --reverse "$upstream_tip" "^$origin_tip" | while IFS=
   fi
   conflict_n=$(printf '%s\n' "$in_conflict" | grep -c . || true)
 
-  # A commit that adds a file another upstream commit later edits cannot be
-  # dropped on its own. Reported as a dependency signal, not enforced here.
+  # Added files are surfaced so a human can check whether later upstream commits
+  # depend on them; the script does not infer or enforce that relationship.
   added=$(git -C "$FM_ROOT" show --pretty=format: --name-status --diff-filter=A "$sha" \
     | awk 'NF {print $2}' | sort -u || true)
 

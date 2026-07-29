@@ -160,7 +160,7 @@ It routes each request to a crewmate in its own session endpoint and git worktre
 Optional secondmates extend this to persistent second mates, dispatch profiles let you steer which harness handles which task, and an opt-in X mode lets the same fleet answer public mentions.
 `codex-app` is not a runtime backend yet; [docs/codex-app-backend.md](docs/codex-app-backend.md) owns the Codex App boundary.
 
-Full architecture - the supervision engine, worktree isolation, secondmates, dispatch profiles, project modes, optional X mode, fleet sync, and self-update - is in [docs/architecture.md](docs/architecture.md).
+Full architecture - the supervision engine, worktree isolation, secondmates, dispatch profiles, project modes, optional X mode, fleet sync, upstream synchronization, and self-update - is in [docs/architecture.md](docs/architecture.md).
 
 ## Built-in skills
 
@@ -173,6 +173,7 @@ Claude and grok use the slash form shown here; codex uses the same names with `$
 | `/ahoy`            | Recap visible session events since the prior real captain message plus visibly unanswered captain decisions, falling back to Bearings when invoked as the session's first real captain message |
 | `/bearings`        | Generate a standalone current-status report from bounded local fleet and registered-secondmate state, with live PR enrichment only when requested, written to a dated file in `data/` and surfaced concisely in chat; read-mostly, mutates no task state |
 | `/poolquota`       | Show the local subscription pool's quota and health: a concise per-provider summary of accounts answering, capacity left, and next reset, plus a freshly regenerated private local panel. Read-only, and changes no dispatch or routing |
+| `/syncfirstmate`   | Review every upstream-only change for accept, adapt, or reject decisions, then prepare an ancestry-preserving synchronization PR without landing it or updating running homes |
 | `/updatefirstmate` | Self-update the running firstmate and its secondmates to the latest from origin with fast-forward-only pulls, then re-read instructions and nudge secondmates |
 | `/stow`            | Sweep the session for uncaptured durable knowledge, route each finding to its disk home per AGENTS.md, file undone next steps to the backlog, and report what is now safe to reset |
 
