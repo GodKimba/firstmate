@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# fm-pool-preflight.sh - decide whether a long validation run may START on the
-# capacity that will actually serve it.
+# fm-pool-preflight.sh - report an approximate quota-floor signal before a long
+# validation run starts.
 #
-# WHY THIS IS AN ADMISSION CHECK AND NOT A SELECTOR
+# WHY THIS IS AN APPROXIMATION AND NOT A SELECTOR
 #
 # The local CLIProxyAPI already owns account selection: its `routing.strategy`
 # (round-robin or fill-first), `routing.session-affinity`, and its post-failure
@@ -14,22 +14,23 @@
 #
 # So firstmate cannot make an account choice take effect, and a second selector
 # here would race the proxy's own rather than extend it. What firstmate CAN do
-# is refuse to begin a long, expensive validation when the capacity that will
-# serve it is already too tight to finish, which needs only measurement.
+# is report a snapshot of the quota measurements that are available before a
+# long validation starts.
 # docs/verification/pool-account-routing.md owns that evidence in full.
 #
-# CONSEQUENCE FOR CALLERS: a `go` result is not a reservation.
-# This is an admission check and it binds no account.
-# It cannot promise the account that answers is the one that was measured; it is
-# a start-line judgement about available headroom, nothing more. The output says
-# so in `binds_account`, which is always false.
+# CONSEQUENCE FOR CALLERS: a `go` result is an optimistic threshold signal, not
+# permission, a reservation, or a capacity guarantee. Pool mode cannot know
+# which routable account the proxy will select, cannot read a target-model bound,
+# and does not reject stale readings. The selected account may therefore be
+# tighter than the reported best measurement and can still exhaust mid-run.
+# Every result discloses this through `approximation:true` and
+# `binds_account:false`; it binds no account.
 #
 # MODES, because the two paths have genuinely different capacity:
 #   --direct  measure the ambient direct login
 #   --pool    measure the pooled accounts through bin/fm-pool-quota.sh
-# `--pool` reports the pool's BEST account, because the proxy routes to a healthy
-# account and fails over, so the best account is the honest upper bound on what a
-# run can expect. It is a bound, not a binding.
+# `--pool` reports the pool's best known all-models reading. That is an optimistic
+# snapshot of observed capacity, not a bound on the account the proxy will route.
 #
 # WHICH MODE MATCHES A no-mistakes VALIDATION: `--pool`, because the machine-wide
 # Codex agent now runs through the CLIProxyAPI pool profile rather than one
@@ -39,13 +40,12 @@
 #
 # DECISION
 #
-#   go       headroom at or above the floor; a long run may start
-#   hold     headroom below the floor; starting risks exhausting mid-run
+#   go       the best relevant measurement is at or above the floor
+#   hold     every relevant measurement is below the floor
 #   unknown  quota could not be established - reported, never guessed
 #
-# `unknown` is deliberately NOT `go`. A run that starts blind on an exhausted
-# account is the exact failure this script exists to prevent, so an unreadable
-# quota is surfaced for a decision instead of being optimistically waved through.
+# `unknown` is deliberately NOT `go`. An unreadable quota is surfaced for a
+# decision instead of being optimistically waved through.
 # It is also not `hold`: the caller may still choose to proceed knowingly.
 #
 # ALL-TIGHT BEHAVIOUR: when every candidate is below the floor this reports
@@ -72,13 +72,22 @@
 #                       all-models bound
 # The fallback is a disclosed coarser bound, never an invented number.
 #
+# FRESHNESS is disclosed rather than enforced. A known stale reading still
+# participates in the snapshot and sets `stale:true`; callers that require fresh
+# evidence must treat that result as insufficient.
+# COVERAGE is disclosed through `measured` and `candidates`. A pool `go` can be
+# based on only part of the routable pool, and an unmeasured account may still be
+# selected by the proxy.
+#
 # SECRETS: no credential is read, printed, or passed. --direct shells out to
 # quota-axi, which reads the ambient login itself; --pool delegates to
 # fm-pool-quota.sh, which owns the private-workspace and masking contract. Only
 # masked account labels ever appear in output.
 #
-# NOT A ROUTING CHANGE: this script writes nothing, locks nothing, and mutates no
-# configuration. It cannot alter live pool routing.
+# NOT A ROUTING CHANGE: this script mutates no configuration. In pool mode it
+# invokes the adapter with `--no-panel`, so that path cannot create or replace the
+# private quota panel. The quota readers retain ownership of their own temporary
+# and cache behavior; this command cannot alter live routing.
 #
 # Usage:
 #   fm-pool-preflight.sh --direct [--model <id>] [--floor <pct>] [--json]
@@ -93,7 +102,7 @@
 #   FM_POOL_PREFLIGHT_BIN     quota-axi command name (default quota-axi)
 #   FM_POOL_QUOTA_SH          path to fm-pool-quota.sh (default alongside this)
 #
-# Output contract: `fm-pool-preflight.v1`. Read-only; no locks, no mutation.
+# Output contract: `fm-pool-preflight.v1`. Advisory; no routing mutation or locks.
 set -u
 export LC_ALL=C
 
@@ -211,7 +220,7 @@ else
   # --accounts reveals the masked per-account rows; identities stay masked. That
   # view carries the all-models bound only, so pool mode cannot honour a model
   # window and says so through scope_kind rather than implying it did.
-  pool=$("$POOL_SH" --json --accounts 2>/dev/null) || pool=
+  pool=$("$POOL_SH" --no-panel --json --accounts 2>/dev/null) || pool=
   [ -n "$pool" ] || die "the pool quota view did not return a reading"
 
   # A pooled account counts as measured only when it answered and carries a known
@@ -264,14 +273,14 @@ DECISION=$(printf '%s\n' "$CANDIDATES" | jq -sc \
          stale:($known | any(.stale)),
          scope_kind:($best.scope_kind // $scope_kind),
          reason:(if $best.remaining >= $floor
-                 then "headroom is at or above the floor"
+                 then "the best measured headroom is at or above the floor; routed capacity is not guaranteed"
                  else "every measured candidate is below the floor" end)}
     end') || die "cannot reach a preflight decision"
 
 DECISION=$(printf '%s' "$DECISION" | jq -c \
   --arg mode "$MODE" --arg model "$MODEL" --argjson floor "$FLOOR" \
   '{schema:"fm-pool-preflight.v1", mode:$mode, model:$model, floor:$floor}
-   + . + {binds_account:false}') || die "cannot assemble the preflight result"
+   + . + {approximation:true, binds_account:false}') || die "cannot assemble the preflight result"
 
 verdict=$(printf '%s' "$DECISION" | jq -r '.decision')
 
@@ -295,7 +304,7 @@ else
     "bound:    \(.scope_kind | scope_note)" +
       (if .bounded_by == "" then "" else ", limited by \(.bounded_by)" end),
     "reason:   \(.reason)",
-    "note:     this is an admission check, not a reservation; it binds no account"'
+    "note:     approximate snapshot only; it binds no account and does not guarantee routed capacity"'
 fi
 
 case "$verdict" in

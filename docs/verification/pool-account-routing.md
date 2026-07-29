@@ -6,6 +6,10 @@ It is the disconfirming-evidence owner for the pool-routing design; `docs/config
 
 Verified 2026-07-29 on macOS (Darwin 25.5.0) with cliproxyapi from Homebrew, `codex-cli 0.145.0`, `no-mistakes v1.41.2`, and `quota-axi 0.1.13`.
 
+The machine-global routing cutover recorded here changes no repository behavior because its configuration lives in `~/.no-mistakes/config.yaml` outside this repository.
+This branch as a whole is not documentation-only: it also introduces `bin/fm-pool-preflight.sh` and its behavior tests.
+That command is separate advisory behavior and does not enact or configure the routing cutover.
+
 ## Why this record exists
 
 A natural design for "quota-aware pool routing" is for firstmate to read each pooled account's quota, pick the healthiest one, and hand that account to the worker.
@@ -124,9 +128,11 @@ The gap is that no supported interface turns a measurement into a binding routin
 - Do not enable the Management API to obtain one.
 - Do not write global `agent_args_override` to pool-route a *single* run and revert it afterwards; it is machine-global, so a temporary write would corrupt any concurrently running lane.
   A *permanent* cutover is a different action with different risk, and the captain approved one - see "The approved permanent cutover" below.
-- Quota-aware *admission* - refusing to start a long validation when the account that will serve it is already tight - is implementable today, because it needs only measurement, which is supported.
+- A quota-floor preflight snapshot is implementable today because measurement is supported.
+  In pool mode it uses the best known all-models reading, can use only a subset of the account measurements, does not know which account the proxy will route, does not have a target-model bound, and does not enforce freshness.
+  It therefore cannot determine whether the routed account has enough capacity or prevent mid-run exhaustion.
 
-`bin/fm-pool-preflight.sh` implements that admission check; its header owns the exact contract.
+`bin/fm-pool-preflight.sh` implements that explicitly approximate signal; its header owns the exact contract.
 
 ## The approved permanent cutover
 

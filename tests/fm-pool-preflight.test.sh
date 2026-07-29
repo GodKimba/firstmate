@@ -1,17 +1,15 @@
 #!/usr/bin/env bash
-# tests/fm-pool-preflight.test.sh - behavior tests for the quota-aware admission
-# check.
+# tests/fm-pool-preflight.test.sh - behavior tests for the quota-floor snapshot.
 #
 # Every case runs against isolated fakes: a stub quota-axi and a stub
 # fm-pool-quota.sh, both fed from fixture JSON. No test contacts the real
 # quota-axi, the real pool directory, or the local proxy, so running this suite
 # cannot read a credential or disturb live routing.
 #
-# The cases encode the properties the admission check has to hold: a tight
-# account is refused rather than admitted, an unreadable quota is reported rather
-# than guessed, false is not confused with missing, ties do not award an account
-# that cannot be bound, hostile account metadata cannot fake headroom, and the
-# absent-configuration path still behaves.
+# The cases encode the snapshot's contract: readings are compared without local
+# quota arithmetic, uncertainty and staleness remain visible, pool results stay
+# explicitly approximate, no account is bound, hostile metadata cannot fake
+# headroom, and the absent-configuration path still behaves.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -97,15 +95,16 @@ run_preflight() {
   RUN_ERR=$(cat "$TMP/stderr")
 }
 
-# --- healthy account is admitted --------------------------------------------
+# --- healthy account is above the floor -------------------------------------
 
 export FM_FAKE_QUOTA_DOC="$TMP/fresh.json"
 direct_doc "$FM_FAKE_QUOTA_DOC" known 91 false
 run_preflight --direct --json
 expect_code 0 "$RUN_CODE" "healthy direct account exits go"
-assert_contains "$RUN_OUT" '"decision":"go"' "healthy account is admitted"
+assert_contains "$RUN_OUT" '"decision":"go"' "healthy account is above the floor"
+assert_contains "$RUN_OUT" '"approximation":true' "result discloses that it is approximate"
 assert_contains "$RUN_OUT" '"binds_account":false' "result discloses it binds no account"
-pass "a healthy account is admitted and the result denies binding an account"
+pass "a healthy account is above the floor and the result discloses its limits"
 
 # --- a fresh reading is not reported stale -----------------------------------
 #
@@ -114,21 +113,30 @@ pass "a healthy account is admitted and the result denies binding an account"
 assert_contains "$RUN_OUT" '"stale":false' "a fresh reading stays fresh"
 pass "a fresh reading is not misreported as stale"
 
-# --- a tight account is refused before a long run starts ---------------------
+# --- a stale reading remains visibly approximate -----------------------------
+
+direct_doc "$FM_FAKE_QUOTA_DOC" known 91 true
+run_preflight --direct --json
+expect_code 0 "$RUN_CODE" "a stale above-floor reading still produces the documented signal"
+assert_contains "$RUN_OUT" '"stale":true' "staleness remains visible"
+assert_contains "$RUN_OUT" '"approximation":true' "a stale signal remains explicitly approximate"
+pass "stale measurements participate only as a disclosed approximation"
+
+# --- a tight account is below the floor --------------------------------------
 
 direct_doc "$FM_FAKE_QUOTA_DOC" known 4 false
 run_preflight --direct --json
 expect_code 3 "$RUN_CODE" "tight direct account exits hold"
 assert_contains "$RUN_OUT" '"decision":"hold"' "a tight account is held"
 assert_contains "$RUN_OUT" '"best":4' "the tight headroom is reported, not hidden"
-pass "a tight account is refused and its actual headroom is reported"
+pass "a tight account is below the floor and its measured headroom is reported"
 
 # --- the floor boundary is inclusive ----------------------------------------
 
 direct_doc "$FM_FAKE_QUOTA_DOC" known 20 false
 run_preflight --direct --floor 20 --json
-expect_code 0 "$RUN_CODE" "headroom exactly at the floor is admitted"
-pass "the floor is inclusive: exactly-at-floor headroom is admitted"
+expect_code 0 "$RUN_CODE" "headroom exactly at the floor returns go"
+pass "the floor comparison is inclusive"
 
 # --- unknown quota is reported, never guessed --------------------------------
 
@@ -136,7 +144,7 @@ direct_doc "$FM_FAKE_QUOTA_DOC" unknown null false
 run_preflight --direct --json
 expect_code 4 "$RUN_CODE" "unknown quota exits unknown"
 assert_contains "$RUN_OUT" '"decision":"unknown"' "unknown quota is reported as unknown"
-assert_not_contains "$RUN_OUT" '"decision":"go"' "unknown quota is never silently admitted"
+assert_not_contains "$RUN_OUT" '"decision":"go"' "unknown quota never produces the above-floor signal"
 pass "unknown quota is reported rather than guessed, and is not treated as go"
 
 # --- a quota read that fails outright is unknown, not go ---------------------
@@ -147,7 +155,7 @@ rm -f "$FM_FAKE_QUOTA_DOC"
 run_preflight --direct --json
 expect_code 4 "$RUN_CODE" "a failed quota read exits unknown"
 assert_contains "$RUN_OUT" '"measured":0' "a failed read measures nothing"
-pass "a quota read that fails is unknown rather than admitted"
+pass "a quota read that fails is unknown rather than above-floor"
 
 # --- malformed quota output cannot fake headroom -----------------------------
 
@@ -171,7 +179,7 @@ jq -n '{providers: [{provider: "codex", state: {status: "fresh", stale: false},
   > "$FM_FAKE_QUOTA_DOC"
 run_preflight --direct --json
 expect_code 4 "$RUN_CODE" "a non-numeric percentage exits unknown"
-assert_not_contains "$RUN_OUT" '"decision":"go"' "a string percentage cannot be admitted"
+assert_not_contains "$RUN_OUT" '"decision":"go"' "a string percentage cannot produce an above-floor signal"
 pass "hostile non-numeric quota metadata cannot fake headroom"
 
 # --- a model window tighter than all_models is honoured ----------------------
@@ -195,17 +203,21 @@ assert_contains "$RUN_OUT" '"scope_kind":"all_models_fallback"' \
   "an unscoped model name discloses that a coarser bound was used"
 pass "an unscoped model name discloses the coarser bound instead of implying a match"
 
-# --- pool mode: the best account bounds the decision -------------------------
+# --- pool mode: the best observation drives an approximate signal ------------
 
 export FM_FAKE_POOL_DOC="$TMP/pool.json"
 pool_doc "$FM_FAKE_POOL_DOC" "[$(pool_account 'ra..@ex..le.com#a1' known 12 false),
                                $(pool_account 'jo..@ex..le.com#b2' known 77 false),
                                $(pool_account 'sa..@ex..le.com#c3' known 41 false)]"
 run_preflight --pool --json
-expect_code 0 "$RUN_CODE" "pool mode admits when the best account has headroom"
-assert_contains "$RUN_OUT" '"best":77' "the best account bounds the decision"
+expect_code 0 "$RUN_CODE" "pool mode returns go when the best observation has headroom"
+assert_contains "$RUN_OUT" '"best":77' "the best observation drives the signal"
 assert_contains "$RUN_OUT" '"measured":3' "every candidate is accounted for"
-pass "pool mode bounds the decision by the best account and counts every candidate"
+assert_contains "$RUN_OUT" '"scope_kind":"all_models_only"' "pool mode discloses its coarse scope"
+assert_contains "$RUN_OUT" '"approximation":true' "pool mode discloses that the routed account may differ"
+assert_grep '--no-panel --json --accounts' "$FM_FAKE_POOL_ARGV" \
+  "pool mode did not suppress the adapter panel"
+pass "pool mode reports its best observation as an explicit approximation"
 
 # --- pool mode: all tight holds, and reports the best it saw -----------------
 
@@ -223,10 +235,11 @@ pool_doc "$FM_FAKE_POOL_DOC" "[$(pool_account 'ra..@ex..le.com#a1' known 55 fals
                                $(pool_account 'jo..@ex..le.com#b2' unknown null false),
                                $(pool_account 'sa..@ex..le.com#c3' unknown null true)]"
 run_preflight --pool --json
-expect_code 0 "$RUN_CODE" "a measurable account still decides"
+expect_code 0 "$RUN_CODE" "one measurable account still produces the documented signal"
 assert_contains "$RUN_OUT" '"candidates":3' "unmeasured accounts are still counted"
 assert_contains "$RUN_OUT" '"measured":1' "only measured accounts count as measured"
-pass "unmeasured pool accounts are disclosed rather than assumed healthy"
+assert_contains "$RUN_OUT" '"approximation":true' "partial measurement remains explicitly approximate"
+pass "unmeasured pool accounts are disclosed alongside the approximate signal"
 
 # --- pool mode: every account silent is unknown, not go ----------------------
 
@@ -235,7 +248,7 @@ pool_doc "$FM_FAKE_POOL_DOC" "[$(pool_account 'ra..@ex..le.com#a1' unknown null 
 run_preflight --pool --json
 expect_code 4 "$RUN_CODE" "an entirely unmeasurable pool exits unknown"
 assert_contains "$RUN_OUT" '"decision":"unknown"' "a silent pool is unknown"
-pass "a pool where no account can be measured is unknown, never admitted"
+pass "a pool where no account can be measured is unknown, never above-floor"
 
 # --- pool mode: an empty pool is unknown ------------------------------------
 
@@ -243,7 +256,7 @@ pool_doc "$FM_FAKE_POOL_DOC" '[]'
 run_preflight --pool --json
 expect_code 4 "$RUN_CODE" "an empty pool exits unknown"
 assert_contains "$RUN_OUT" '"candidates":0' "an empty pool reports no candidates"
-pass "an empty pool is unknown rather than admitted"
+pass "an empty pool is unknown rather than above-floor"
 
 # --- pool mode: a tie is resolved by value and awards no binding -------------
 #
@@ -297,14 +310,14 @@ assert_not_contains "$RUN_OUT" "access_token" "no token appears on stdout"
 assert_not_contains "$RUN_ERR" "access_token" "no token appears on stderr"
 pass "no credential material reaches argv, stdout, or stderr"
 
-# --- the check mutates nothing ----------------------------------------------
+# --- the preflight creates no fixture artifact -------------------------------
 #
-# An admission check that wrote state could not be run freely before a decision.
+# The preflight itself must not create a durable artifact.
 before=$(find "$TMP" -type f | sort)
 run_preflight --pool --json
 after=$(find "$TMP" -type f | sort)
 [ "$before" = "$after" ] || fail "the preflight created or removed files"
-pass "the check mutates nothing: no file is created, moved, or removed"
+pass "the preflight creates or removes no file in the fixture"
 
 # --- usage errors are refused, not defaulted ---------------------------------
 
@@ -330,7 +343,7 @@ run_preflight --pool
 expect_code 2 "$RUN_CODE" "an absent pool adapter is refused"
 assert_not_contains "$RUN_OUT" 'decision: go' "an absent adapter never yields go"
 export FM_POOL_QUOTA_SH="$BIN/fm-pool-quota.sh"
-pass "an absent pool adapter is refused rather than admitted"
+pass "an absent pool adapter is refused rather than producing a quota signal"
 
 # --- backward compatibility: no configuration is required --------------------
 #
@@ -346,8 +359,8 @@ pass "the check works with no configuration set, using documented defaults"
 # --- help works without any environment -------------------------------------
 
 "$PREFLIGHT" --help > "$TMP/help.txt" 2>&1 || fail "--help must exit 0"
-assert_grep "admission check" "$TMP/help.txt" "help explains it is an admission check"
+assert_grep "approximation" "$TMP/help.txt" "help explains the signal is approximate"
 assert_grep "binds no account" "$TMP/help.txt" "help states it binds no account"
-pass "help is available and states the admission-not-reservation contract"
+pass "help is available and states the approximation contract"
 
 printf '\nall fm-pool-preflight tests passed\n'

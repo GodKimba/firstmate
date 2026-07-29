@@ -387,6 +387,32 @@ test_output_is_deterministic_and_panel_is_regenerated() {
   pass "identical reads are byte-identical and the panel is rebuilt every run"
 }
 
+test_no_panel_mode_skips_the_durable_artifact() {
+  local root pool fakebin out panel
+  root=$(fm_test_tmproot fm-pool-quota-no-panel)
+  pool="$root/pool"
+  fakebin="$root/fakebin"
+  make_pool "$pool"
+  make_quota_axi "$fakebin" healthy
+
+  out=$(run_pool "$pool" "$fakebin" --no-panel --accounts --json) \
+    || fail "no-panel run failed"
+  printf '%s' "$out" | jq -e 'has("panel") | not' >/dev/null \
+    || fail "no-panel output still advertised a panel"
+  assert_absent "$root/home/.lavish" "no-panel mode created the panel directory"
+
+  mkdir -p "$root/home/.lavish"
+  panel="$root/home/.lavish/pool-quota.html"
+  printf 'existing panel\n' > "$panel"
+  run_pool "$pool" "$fakebin" --no-panel --json >/dev/null \
+    || fail "no-panel replacement check failed"
+  [ "$(cat "$panel")" = "existing panel" ] || fail "no-panel mode replaced the existing panel"
+
+  "$CMD" --help > "$root/help.txt" 2>&1 || fail "--help must exit 0"
+  assert_grep '--no-panel' "$root/help.txt" "help omits the no-panel mode"
+  pass "--no-panel neither creates nor replaces the durable panel"
+}
+
 test_panel_is_self_contained_local_and_private() {
   local root pool fakebin panel body out code
   root=$(fm_test_tmproot fm-pool-quota-panel)
@@ -548,6 +574,7 @@ test_auth_failure_scrubs_the_private_workspace_path
 test_credentials_never_reach_argv_stdout_panel_or_cache
 test_private_workspace_is_cleaned_up
 test_output_is_deterministic_and_panel_is_regenerated
+test_no_panel_mode_skips_the_durable_artifact
 test_panel_is_self_contained_local_and_private
 test_concise_view_hides_account_rows_but_discloses_the_omission
 test_missing_pool_and_bad_arguments_stop_safely
