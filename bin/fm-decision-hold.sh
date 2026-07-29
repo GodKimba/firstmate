@@ -194,19 +194,28 @@ backlog_file() {  # prints the active markdown backlog path
 
 record_rows() {  # <store-file> <id> <active|archive>
   awk -v id="$2" -v store="$3" '
-    function is_checkbox_row(line) {
-      return line ~ /^-[[:space:]]*\[[^]]*\]/
-    }
     function is_top_row(line) {
       return line ~ /^-[[:space:]]/ || line ~ /^-\[/ || line ~ /^-\*\*/
     }
-    function is_candidate(line,   rest, tail) {
-      if (!is_checkbox_row(line)) return 0
-      rest = line
-      sub(/^-[[:space:]]*\[[^]]*\][[:space:]]*/, "", rest)
-      if (substr(rest, 1, length(id)) != id) return 0
-      tail = substr(rest, length(id) + 1)
-      return tail ~ /^[[:space:]]*-[[:space:]]/
+    function has_identity(line,   separator, prefix, rest, offset, pos, absolute, before, after) {
+      separator = index(line, " - ")
+      prefix = separator > 0 ? substr(line, 1, separator - 1) : line
+      rest = prefix
+      offset = 0
+      while ((pos = index(rest, id)) > 0) {
+        absolute = offset + pos
+        before = absolute > 1 ? substr(prefix, absolute - 1, 1) : ""
+        after = substr(prefix, absolute + length(id), 1)
+        if (before !~ /[A-Za-z0-9._-]/ && after !~ /[A-Za-z0-9._-]/) {
+          return 1
+        }
+        offset = absolute + length(id) - 1
+        rest = substr(prefix, offset + 1)
+      }
+      return 0
+    }
+    function is_candidate(line) {
+      return is_top_row(line) && has_identity(line)
     }
     function refuse(message) {
       printf "refuse: %s\n", message
@@ -246,7 +255,7 @@ record_rows() {  # <store-file> <id> <active|archive>
 
 record_source() {  # <store-file> <id> <active|archive> <raw-output>
   local file=$1 id=$2 store=$3 raw=$4 first
-  record_rows "$file" "$id" "$store" > "$raw" 2>/dev/null || {
+  (umask 077; record_rows "$file" "$id" "$store" > "$raw") 2>/dev/null || {
     printf '%s decision store could not be read: %s\n' "$store" "$file"
     return 3
   }
@@ -290,7 +299,10 @@ archive_record() {  # <id> <raw-output>
 
 archive_show() {  # <id> <raw-record> <projected-file>
   local id=$1 raw=$2 projected=$3 show rc=0
-  { printf '## In flight\n\n## Queued\n\n## Done\n'; awk '{ print }' "$raw"; } > "$projected"
+  (umask 077; { printf '## In flight\n\n## Queued\n\n## Done\n'; awk '{ print }' "$raw"; } > "$projected") || {
+    printf 'could not stage the archived record for %s\n' "$id"
+    return 3
+  }
   show=$(tasks_axi show "$id" --file "$projected" --full 2>&1) || rc=$?
   if [ "$rc" -ne 0 ]; then
     printf 'archived record %s could not be parsed by tasks-axi\n' "$id"

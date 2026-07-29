@@ -703,6 +703,39 @@ EOF
     "an unusable active store must refuse the durable lookup"
   rm -f "$home/fakebin/tasks-axi"
 
+  cat > "$home/fakebin/tasks-axi" <<'EOF'
+#!/usr/bin/env bash
+if [ "${1:-}" = show ] && [ "${2:-}" = sample-archive-review-decision-route ]; then
+  projected=
+  previous=
+  for arg in "$@"; do
+    if [ "$previous" = --file ]; then
+      projected=$arg
+      break
+    fi
+    previous=$arg
+  done
+  if [ -n "$projected" ]; then
+    dir=$(dirname "$projected")
+    for path in "$dir/active" "$dir/archive" "$projected"; do
+      if [ "$(uname)" = Darwin ]; then
+        mode=$(stat -f %Lp "$path" 2>/dev/null)
+      else
+        mode=$(stat -c %a "$path" 2>/dev/null)
+      fi
+      [ "$mode" = 600 ] || exit 2
+    done
+    : > "$FM_HOME/private-staging-checked"
+  fi
+fi
+exec "$REAL_TASKS_AXI" "$@"
+EOF
+  chmod +x "$home/fakebin/tasks-axi"
+  (umask 022; run_decisions "$home" verify "$id" >/dev/null) \
+    || fail "archived decision staging files were not private"
+  assert_present "$home/private-staging-checked" "archive projection did not check private staging modes"
+  rm -f "$home/fakebin/tasks-axi"
+
   # A second archived row for the same identity: two candidate decisions.
   case_name=duplicate
   sed -n '/^- \[x\]/p' "$pristine" | sed 's/Choose the retention route/Choose a rival route/' >> "$archive"
@@ -726,6 +759,24 @@ EOF
     fail "a malformed archived record was accepted"
   fi
   assert_grep "not in canonical form" "$home/$case_name.err" "a malformed archived row must say so"
+
+  case_name=malformed-separator
+  sed "s/^- \[x\] sample-archive-review-decision-route - /- [x] sample-archive-review-decision-route -/" \
+    "$pristine" > "$archive"
+  if run_decisions "$home" verify "$id" > "$home/$case_name.out" 2> "$home/$case_name.err"; then
+    fail "an archived record with a malformed title separator was accepted"
+  fi
+  assert_grep "not in canonical form" "$home/$case_name.err" \
+    "a malformed title separator must refuse the archived record"
+
+  case_name=missing-checkbox-close
+  sed "s/^- \[x\] sample-archive-review-decision-route /- [x sample-archive-review-decision-route /" \
+    "$pristine" > "$archive"
+  if run_decisions "$home" verify "$id" > "$home/$case_name.out" 2> "$home/$case_name.err"; then
+    fail "an archived record with an unterminated checkbox was accepted"
+  fi
+  assert_grep "not in canonical form" "$home/$case_name.err" \
+    "an unterminated checkbox must refuse the archived record"
 
   # A symlinked archive is never followed.
   case_name=symlink
