@@ -278,8 +278,42 @@ fi
 # send implementation. A failed backend send is still surfaced below as a hard
 # error with the attempted resolution attached.
 
-fm_send_claude_interrupt_proof_count() {  # <capture>
-  printf '%s\n' "$1" | grep -Fc 'Interrupted · What should Claude do instead?' || true
+fm_send_claude_interrupt_render_present() {  # <capture>
+  printf '%s\n' "$1" | awk '
+    function owned_interrupt(line, normalized) {
+      normalized = line
+      sub(/^[[:space:]]+/, "", normalized)
+      sub(/[[:space:]]+$/, "", normalized)
+      gsub(/[[:space:]]+/, " ", normalized)
+      return normalized == "⎿ Interrupted · What should Claude do instead?"
+    }
+    function composer(line) {
+      return line ~ /^[[:space:]]*([│┃║|][[:space:]]*)?❯([[:space:]]|$)/
+    }
+    function boundary_space(line, normalized) {
+      normalized = line
+      sub(/^[[:space:]]+/, "", normalized)
+      sub(/[[:space:]]+$/, "", normalized)
+      return normalized == "" || normalized ~ /^[-+─━═╭╮┌┐╔╗┏┓]+$/
+    }
+    {
+      if (owned_interrupt($0)) {
+        candidate = 1
+        gap = 0
+        next
+      }
+      if (composer($0)) {
+        proof = candidate && gap <= 3
+        candidate = 0
+        next
+      }
+      if (candidate) {
+        if (!boundary_space($0) || gap >= 3) candidate = 0
+        else gap++
+      }
+    }
+    END { exit(proof ? 0 : 1) }
+  '
 }
 
 fm_send_claude_insert_footer_present() {
@@ -290,7 +324,7 @@ fm_send_claude_insert_footer_present() {
 }
 
 fm_send_recover_claude_vim() {
-  local initial before after before_count after_count state latest_state verdict
+  local initial before after state latest_state verdict
   local attempt=0 poll retries sleep_s proof=0
   [ -n "$TARGET_SELECTOR" ] && [ -n "$TARGET_META" ] || {
     echo "error: --recover-claude-vim requires a recorded task selector" >&2
@@ -316,7 +350,10 @@ fm_send_recover_claude_vim() {
     echo "error: Claude Vim recovery could not read the pre-interrupt pane; no key was sent" >&2
     return 1
   }
-  before_count=$(fm_send_claude_interrupt_proof_count "$before")
+  if fm_send_claude_interrupt_render_present "$before"; then
+    echo "error: Claude Vim recovery found a current Interrupted render before any Escape; refusing ambiguous proof" >&2
+    return 1
+  fi
   if [ "$initial" = empty ] && ! fm_send_claude_insert_footer_present "$before"; then
     echo "error: empty-composer Claude Vim recovery requires a positive Insert-mode marker before any key is sent" >&2
     return 1
@@ -335,7 +372,6 @@ fm_send_recover_claude_vim() {
         echo "error: Claude Vim recovery lost pane readability after Escape $((attempt + 1)); refusing further keys" >&2
         return 1
       }
-      after_count=$(fm_send_claude_interrupt_proof_count "$after")
       state=$(fm_backend_composer_state "$TARGET_BACKEND" "$T" "$EXPECTED_LABEL" 2>/dev/null)
       latest_state=$state
       case "$state" in
@@ -345,7 +381,7 @@ fm_send_recover_claude_vim() {
           return 1
           ;;
       esac
-      if [ "$after_count" -gt "$before_count" ]; then
+      if fm_send_claude_interrupt_render_present "$after"; then
         [ "$state" = "$initial" ] || {
           echo "error: Claude rendered Interrupted but the composer postcondition is ambiguous (state=${state:-unknown})" >&2
           return 1
@@ -360,8 +396,6 @@ fm_send_recover_claude_vim() {
       echo "error: Claude Vim recovery could not re-verify the '$initial' composer after Escape $((attempt + 1)); refusing further keys" >&2
       return 1
     }
-    before=$after
-    before_count=$after_count
     attempt=$((attempt + 1))
   done
   [ "$proof" -eq 1 ] || {

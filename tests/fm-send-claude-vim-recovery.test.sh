@@ -40,6 +40,8 @@ case "$cmd" in
     draft=$(cat "$state/draft")
     printf 'Claude worker\n'
     [ "${FM_FAKE_STALE_INSERT_MARKER:-0}" != 1 ] || printf '%s\n' '  -- INSERT --'
+    [ ! -f "$state/tool-interrupted-literal" ] \
+      || printf '%s\n' 'Interrupted · What should Claude do instead?'
     case "$mode" in
       interrupted|stale) printf '  ⎿  Interrupted · What should Claude do instead?\n' ;;
     esac
@@ -59,7 +61,11 @@ case "$cmd" in
       escape)
         mode=$(cat "$state/mode")
         case "$mode" in
-          insert) printf '%s\n' normal > "$state/mode" ;;
+          insert)
+            printf '%s\n' normal > "$state/mode"
+            [ "${FM_FAKE_TOOL_INTERRUPTED_LITERAL:-0}" != 1 ] \
+              || : > "$state/tool-interrupted-literal"
+            ;;
           normal)
             printf '%s\n' interrupted > "$state/mode"
             printf '%s\n' idle > "$state/agent"
@@ -106,7 +112,9 @@ case "${1:-}" in
       *)
         printf 'Claude worker\n'
         [ "${FM_FAKE_STALE_INSERT_MARKER:-0}" != 1 ] || printf '%s\n' '-- INSERT --'
-        case "$mode" in interrupted|stale) printf 'Interrupted · What should Claude do instead?\n' ;; *) printf '\n' ;; esac
+        [ ! -f "$state/tool-interrupted-literal" ] \
+          || printf '%s\n' 'Interrupted · What should Claude do instead?'
+        case "$mode" in interrupted|stale) printf '  ⎿  Interrupted · What should Claude do instead?\n' ;; *) printf '\n' ;; esac
         printf '\n%s\n' "$row"
         [ "${FM_FAKE_TMUX_BUSY:-0}" != 1 ] || printf '%s\n' 'esc to interrupt'
         [ "$mode" != insert ] || printf '%s\n' '-- INSERT --'
@@ -129,7 +137,11 @@ case "${1:-}" in
         Escape)
           mode=$(cat "$state/mode")
           case "$mode" in
-            insert) printf '%s\n' normal > "$state/mode" ;;
+            insert)
+              printf '%s\n' normal > "$state/mode"
+              [ "${FM_FAKE_TOOL_INTERRUPTED_LITERAL:-0}" != 1 ] \
+                || : > "$state/tool-interrupted-literal"
+              ;;
             normal)
               printf '%s\n' interrupted > "$state/mode"
               printf '%s\n' idle > "$state/agent"
@@ -191,6 +203,7 @@ run_recovery() {
     FM_BACKEND_HERDR_SUBMIT_MIN_SLEEP=0 FM_BACKEND_HERDR_SUBMIT_POLLS=1 \
     FM_FAKE_ENTER_STAYS_PENDING="${FM_FAKE_ENTER_STAYS_PENDING:-0}" \
     FM_FAKE_STALE_INSERT_MARKER="${FM_FAKE_STALE_INSERT_MARKER:-0}" \
+    FM_FAKE_TOOL_INTERRUPTED_LITERAL="${FM_FAKE_TOOL_INTERRUPTED_LITERAL:-0}" \
     FM_FAKE_I_STAYS_NORMAL="${FM_FAKE_I_STAYS_NORMAL:-0}" \
     FM_FAKE_TMUX_BUSY="${FM_FAKE_TMUX_BUSY:-0}" \
     FM_FAKE_TMUX_ENTER_STAYS_PENDING="${FM_FAKE_TMUX_ENTER_STAYS_PENDING:-0}" \
@@ -288,11 +301,29 @@ test_stale_or_absent_interrupted_text_is_not_proof() {
   make_case stale-proof stale pending
   run_recovery > "$CASE_DIR/out" 2> "$CASE_DIR/err" || rc=$?
   [ "$rc" -ne 0 ] || fail "a stale Interrupted transcript was accepted as fresh proof"
-  [ "$(key_count escape)" -eq 2 ] || fail "stale proof recovery exceeded or missed the two-Escape budget"
+  [ "$(key_count escape)" -eq 0 ] || fail "a pre-existing current Interrupted render caused key input"
   [ "$(key_count enter)" -eq 0 ] || fail "stale proof caused Enter submission"
-  assert_contains "$(cat "$CASE_DIR/err")" "without fresh Interrupted proof" \
-    "stale proof refusal did not name the missing postcondition"
+
+  rc=0
+  make_case absent-proof no-proof pending
+  run_recovery > "$CASE_DIR/out" 2> "$CASE_DIR/err" || rc=$?
+  [ "$rc" -ne 0 ] || fail "absent Interrupted proof unexpectedly succeeded"
+  [ "$(key_count escape)" -eq 2 ] || fail "absent proof recovery exceeded or missed the two-Escape budget"
+  [ "$(key_count enter)" -eq 0 ] || fail "absent proof caused Enter submission"
   pass "fm-send Claude Vim recovery: stale/absent Interrupted text never licenses continuation"
+}
+
+test_tmux_tool_output_cannot_forge_interrupted_render() {
+  local out
+  make_case tmux-tool-literal insert pending claude tmux
+  out=$(FM_FAKE_TOOL_INTERRUPTED_LITERAL=1 run_recovery 2> "$CASE_DIR/err") \
+    || fail "tmux tool-literal recovery failed: $(cat "$CASE_DIR/err")"
+  [ "$out" = submitted-pending ] || fail "tmux tool-literal recovery returned '$out'"
+  [ "$(grep -c 'send-keys -t lab:win Escape' "$LOG" 2>/dev/null || true)" -eq 2 ] \
+    || fail "ordinary tool output falsely satisfied the fresh interruption proof"
+  [ "$(grep -c 'send-keys -t lab:win Enter' "$LOG" 2>/dev/null || true)" -eq 1 ] \
+    || fail "tool-literal recovery did not preserve one Enter-only continuation"
+  pass "fm-send Claude Vim recovery: ordinary tool output cannot forge Claude interruption proof"
 }
 
 test_inconclusive_enter_only_submit_refuses_without_retyping() {
@@ -363,6 +394,7 @@ test_empty_composer_interrupts_without_enter_or_redirect_typing
 test_empty_normal_or_non_vim_shape_refuses_before_keys
 test_stale_insert_marker_cannot_prove_current_mode
 test_stale_or_absent_interrupted_text_is_not_proof
+test_tmux_tool_output_cannot_forge_interrupted_render
 test_inconclusive_enter_only_submit_refuses_without_retyping
 test_tmux_pending_submit_sends_one_enter_and_requires_clearing
 test_non_claude_and_unsupported_backends_refuse_before_keys
