@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Shared wake classifier: the common source of truth for captain-relevant status
-# tests, declared-external-wait vocabulary, and the working/paused absorb
-# classification that makes no-verb signal and stale-pane wakes safe to absorb.
+# Shared wake classifier: the common source of truth for the keyed status fold,
+# captain-relevant and declared-external-wait vocabulary, and supervision
+# precedence across structured events, current state, and endpoint liveness.
 # Sourced by BOTH the always-on watcher
 # (bin/fm-watch.sh) and the away-mode daemon (bin/fm-supervise-daemon.sh) so the
 # overlapping triage policy lives in one place instead of two copies that can
@@ -51,18 +51,19 @@ FM_CLASSIFY_CAPTAIN_RE_DEFAULT='done:|needs-decision:|blocked:|failed:|PR ready|
 #   paused: <reason>
 # to declare it is intentionally idling on a KNOWN external dependency - an
 # upstream release, a vendor rate-limit reset, a scheduled window. Unlike
-# `blocked:` (stuck, firstmate must help) an idle `paused:` pane is EXPECTED, so
-# the stale path absorbs it instead of escalating a possible wedge. It is
-# deliberately NOT in the captain-relevant set above: a pause is a "stop
-# wedge-nagging this idle pane" signal, not work to keep surfacing. This constant
-# is the ONE definition of the verb; both the watcher and the daemon read it here
-# (status_is_paused) rather than hardcoding the literal, so the vocabulary cannot
-# drift between the two consumers. FM_CLASSIFY_PAUSED_VERB overrides it.
+# `blocked:` (stuck, firstmate must help) an idle `paused:` pane is expected only
+# while authoritative current state confirms the pause on a live endpoint.
+# The verb is deliberately absent from the captain-relevant set above and becomes
+# a long-cadence candidate that shared precedence may accept or reject.
+# This constant is the one definition of the verb; both consumers read it through
+# status_is_paused so the vocabulary cannot drift.
+# FM_CLASSIFY_PAUSED_VERB overrides it.
 FM_CLASSIFY_PAUSED_VERB_DEFAULT='paused'
 
 capture_unreadable_stale_identity() { printf 'endpoint-unreadable'; }
 
-# Bounded re-surface cadence for a declared pause or a dead-agent captain hold.
+# Bounded re-surface cadence for a validated current pause on a live endpoint or
+# a dead-agent captain hold.
 # Far longer than the wedge threshold (FM_STALE_ESCALATE_SECS, default 240s), it
 # avoids nagging a deliberate wait while ensuring a forgotten hold cannot rot
 # invisibly - it re-surfaces once for a recheck every window. One hour by default;
@@ -147,11 +148,11 @@ status_is_paused() {  # <status-line>
   [ "$verb" = "${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}" ]
 }
 
-# 0 if a status line declares either an external-wait pause or a verified
-# captain-held transfer.
-# Both declarations can intentionally leave an exited crew's endpoint idle, so
-# the watcher applies its bounded pause cadence when agent death confirms that
-# no live decision gate is being silenced.
+# 0 if a status line syntactically declares either an external-wait pause or a
+# verified captain-held transfer.
+# The shared precedence accepts a pause only when current state confirms it on a
+# live endpoint, while a captain-held transfer may absorb a confidently dead
+# endpoint.
 status_is_paused_or_captain_held() {  # <status-line>
   local line=$1 verb
   status_is_paused "$line" && return 0
@@ -165,8 +166,9 @@ status_is_paused_or_captain_held() {  # <status-line>
 # The status stream is an append-only EVENT log. Reading it last-event-wins
 # (last_status_line above) cannot represent "an earlier decision is still open
 # after a later, unrelated event": a subsequent done/paused/working line silently
-# masks a still-open needs-decision. status_open_decisions is the ONE authoritative
-# statement of the status-fold contract that fixes this - a needs-decision/blocked
+# masks a still-open decision or blocker.
+# status_open_decisions is the one authoritative statement of the status-fold
+# contract that fixes this - a needs-decision/blocked
 # line OPENS a keyed decision, and only an explicit resolution or a verified
 # captain-held backlog transfer referencing that key CLOSES it; a later unrelated
 # terminal line never clears an open captain decision.
@@ -990,8 +992,8 @@ crew_is_provably_working() {  # <id>
 }
 
 # 0 if crew <id>'s authoritative current state is a declared external-wait pause.
-# The stale path absorbs such a crew (on a long re-surface cadence) instead of
-# escalating a possible wedge.
+# This current-state predicate alone does not establish the live-endpoint proof
+# required by crew_supervision_precedence.
 crew_is_paused() {  # <id>
   [ "$(crew_absorb_class "$1")" = paused ]
 }

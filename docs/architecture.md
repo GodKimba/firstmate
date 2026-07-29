@@ -9,7 +9,7 @@ firstmate's always-loaded operating contract and routing index for conditional p
 ## Event-driven supervision
 
 A zero-token bash watcher (`bin/fm-watch.sh`) sleeps on the fleet, classifies detected wakes in bash, and wakes the first mate only when something is actionable.
-Actionable wakes include captain-relevant status signals, newly observed token-era decision occurrences retained by the durable status fold, no-verb signals whose crew is not provably working, authenticated check output such as PR merge polling or an X-mode mention, stale panes whose crew is not provably working whether their status log looks terminal or non-terminal, provably-working stale panes that persist past `FM_STALE_ESCALATE_SECS`, declared external waits that remain paused past `FM_PAUSE_RESURFACE_SECS`, and heartbeat backstop hits.
+Actionable wakes include captain-relevant status signals, newly observed open keyed decision or blocker occurrences retained by the durable status fold, no-verb signals whose crew is not provably working, authenticated check output such as PR merge polling or an X-mode mention, stale panes without a valid long-cadence wait whose crew is not provably working, provably-working stale panes that persist past `FM_STALE_ESCALATE_SECS`, valid declared external waits that remain paused past `FM_PAUSE_RESURFACE_SECS`, and heartbeat backstop hits.
 Repeated provably-working stale escalations on the same unchanged pane add an escalation count to the wake reason and, at `FM_WEDGE_DEMAND_INSPECT_COUNT`, a `demand-deep-inspection` marker.
 Those actionable wakes are written to a durable local queue (`state/.wake-queue`) before detector state advances, so a missed process exit can be recovered by draining the queue.
 When a canonical validated PR poll returns exactly `merged`, the watcher appends that durable notification before publishing a private receipt bound to the poll's registration, bytes, file identities, metadata, provider, URL, and task ID.
@@ -17,19 +17,22 @@ The receipt makes retirement safely retryable across restarts: fixed-path recove
 A concurrent replacement remains armed, every non-merged or invalid observation remains unchanged, and retirement never performs task or persistent-secondmate cleanup.
 `bin/fm-pr-lib.sh` owns the receipt format and strict identity mechanics, while `bin/fm-watch.sh` owns queue-before-retirement ordering.
 No-verb wakes, such as `working:` notes and bare turn-ended signals, are benign only when `bin/fm-crew-state.sh` reports positive evidence that the crew is still working: an actively running no-mistakes step attributed to that crew's current code, a backend busy signature, or its dedicated withheld-CI source.
-A crew that declares `paused:` for a known external wait is separately absorbed while idle and re-surfaced only on the longer pause cadence, rather than being treated as a possible wedge.
-For an ordinary crew that has stopped, the normal-mode watcher first surfaces one stale wake, then applies that same cadence to an unchanged `paused:` or durable `captain-held` endpoint only when the backend confidently reports its agent dead.
-Live or inconclusive liveness remains fail-open at that initial surface, and the secondmate idle-endpoint exemption is unchanged.
+A `paused:` declaration enters the longer pause cadence only while authoritative current state still reports paused and the backend confirms a live endpoint.
+Open keyed `needs-decision` and `blocked` occurrences outrank a later unrelated pause.
+Dead or unreadable endpoints and pause declarations that no longer match current state surface immediately instead of inheriting the pause cadence.
+A verified `captain-held` transfer is the separate exited-agent exception and may use that cadence when the backend confidently reports the endpoint dead.
+The ordinary idle-secondmate exemption remains, but paused secondmates and unreadable captures are checked so endpoint loss still surfaces once.
 Its initial normal-mode status signal still surfaces through the no-verb path, while away mode self-handles that routine signal and owns the later recheck.
 Fresh stale panes use the same current-state read before trusting ordinary terminal or blocker lines, so an active run or busy pane outranks stale non-decision evidence left behind before validation.
-A folded open token-era `needs-decision` is the exception: later working or terminal lifecycle evidence never grants authority, so the watcher keeps it actionable until a correlated resolution or verified captain-held transfer closes it.
-`bin/fm-classify-lib.sh` owns that fold and its occurrence-deduplication mechanics.
+A folded open keyed decision or blocker is the exception to last-event-wins status: a later unrelated pause cannot hide it.
+An open token-era `needs-decision` remains actionable until a correlated resolution or verified captain-held transfer closes it.
+`bin/fm-classify-lib.sh` owns that fold, occurrence deduplication, and the precedence across structured status, authoritative current state, and endpoint liveness.
 Streams whose files predate that protection stay on legacy authority, because the scaffold marks a stream only when it creates it; `bin/fm-decision-cutover-migrate.sh` is the explicitly invoked, one-home-at-a-time path that upgrades the eligible ones by appending the marker, and its header owns which histories it refuses and why.
 No-change heartbeats are also benign.
 Absorbed wakes advance their suppression markers, log to `state/.watch-triage.log`, and keep the watcher blocking without a queue record or LLM turn.
 After each drain, `fm-wake-drain.sh` runs the same liveness guard as the supervision scripts, so a lapsed watcher chain surfaces even on a turn that only drains and handles queued wakes.
 Routine watcher polling, supervision no-ops, elapsed waiting time, and absorbed benign wakes stay silent.
-A declared external wait trades that silence for one bounded recheck per pause window, so a forgotten pause cannot remain invisible indefinitely.
+A valid declared external wait trades that silence for one bounded recheck per pause window, so a forgotten pause cannot remain invisible indefinitely.
 Crew status files are append-only wake-event logs, not current-state fields.
 `bin/fm-crew-state.sh <id>` is the bounded current-state read for an actionable heartbeat review: it attributes a detailed active no-mistakes run or a code-bound terminal run, then keeps that run-step authoritative even if the pane has closed.
 A detailed active synchronous run may keep that identity through the exact submitted-code ref while its isolated rebase or fix head is not comparable in the invoking repository; coarse running rows lack gate state and fall through, while terminal and historical runs do not receive that fallback.
@@ -75,11 +78,11 @@ On every verified primary harness, tracked hook integration gives the primary se
 The guard covers the main primary and genuinely marked secondmate homes, exempts child crewmate/scout worktrees, is loop-safe per harness, and is documented in [turnend-guard.md](turnend-guard.md).
 
 A presence-gated sub-supervisor (`bin/fm-supervise-daemon.sh`) extends this for walk-away supervision: the `/afk` skill starts it through the tracked foreground helper `bin/fm-afk-start.sh`, after which the watcher reverts to daemon-managed one-shot mode and the daemon self-handles routine wakes in bash.
-The watcher and daemon share `bin/fm-classify-lib.sh` for captain-relevant status verbs, declared-external-wait vocabulary, and status-scan and open-decision primitives.
+The watcher and daemon share `bin/fm-classify-lib.sh` for captain-relevant status verbs, the keyed decision and blocker fold, declared-external-wait vocabulary, and supervision precedence.
 Terminal verbs remain captain-relevant, while a nonterminal progress verb cannot become terminal merely because its prose contains a legacy free-text token such as `merged`; bare legacy free-text lines remain compatible.
-The always-on watcher also uses that library's absorb classification on no-verb signals and first-sighting stale panes before status-log terminality is trusted, while the daemon maintains distinct wedge and declared-pause recheck cadences.
+The always-on watcher uses that shared precedence for candidate pauses, first-sighting stale panes, bounded pause rechecks, and native push blockers, while the daemon applies it to the same paths before maintaining distinct wedge and pause cadences.
 In away mode, seen-status dedupe does not clear possible-wedge aging for nonterminal progress, so housekeeping still re-escalates an unchanged idle pane at the configured bound.
-The daemon escalates captain-relevant events, plus a bounded recheck for a declared pause that remains idle, as one batched, single-line digest using the canonical `away-supervisor` kind from `bin/fm-operational-input.sh` so firstmate can distinguish it structurally from real messages.
+The daemon immediately escalates invalid pause candidates and endpoint loss, while a valid declared pause that remains idle receives one bounded recheck as a batched, single-line digest using the canonical `away-supervisor` kind from `bin/fm-operational-input.sh` so firstmate can distinguish it structurally from real messages.
 Its supervisor injection path supports tmux and herdr panes, with `FM_SUPERVISOR_BACKEND` and `FM_SUPERVISOR_TARGET` resolved independently from the task-spawn backend.
 Pane existence, busy checks, composer checks, capture, and verified submit route through `bin/fm-backend.sh`: tmux keeps the same submit core used by the tmux send backend, while herdr uses native busy state, native agent-state submit confirmation on idle baselines, and its ANSI-aware structural composer classifier for pending-input guards and submit fallback.
 The tmux submit core (shared `fm_tmux_submit_enter_core`) treats a busy pane + retries-exhausted + composer-still-pending as a queued Enter (opencode 1.18.4 accepts Enter mid-turn and queues it for after the turn), reported as `empty` so the daemon and `fm-send` do not re-send; an idle pane keeps the `pending` verdict as a genuine swallow.

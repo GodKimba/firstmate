@@ -4,12 +4,13 @@
 # Wraps bin/fm-watch.sh: runs it as a child, classifies each wake reason, and
 # either SELF-HANDLES the routine majority in bash (no firstmate turn) or
 # ESCALATES a batched, distilled digest to the supervisor pane on
-# captain-relevant events plus bounded declared-pause rechecks. This is the
-# token-efficient replacement for the prior always-inject daemon: routine
+# captain-relevant events, endpoint loss, invalid pauses, and bounded valid-pause
+# rechecks. This is the token-efficient replacement for the prior always-inject
+# daemon: routine
 # signal/stale/heartbeat wakes cost zero firstmate context; only done/
-# needs-decision/blocked/failed/persistent-wedge/check-output events and a
-# declared-pause recheck reach the LLM, and even then as one pre-read digest per
-# batch window.
+# needs-decision/blocked/failed/persistent-wedge/check-output events, endpoint
+# loss, invalid pauses, and a valid-pause recheck reach the LLM, and even then as
+# one pre-read digest per batch window.
 #
 # PRESENCE-GATING (the /afk contract). The daemon is the away-mode engine: it
 # injects ONLY when the durable away-mode flag state/.afk is present. Invoking
@@ -40,20 +41,21 @@
 #     reason.
 #   - Fail-safe-to-escalate: any wake the classifier cannot confidently mark
 #     routine is escalated.
-#   - Bounded wedge latency: a stale pane without a declared external wait is
-#     escalated only after it has been idle for STALE_ESCALATE_SECS
-#     (configurable), rechecked once. A wedged crewmate is therefore detected
-#     within STALE_ESCALATE_SECS + a tick, never lost. A declared pause instead
-#     gets its own longer PAUSE_RESURFACE_SECS recheck, never a wedge escalation.
+#   - Bounded wedge latency: a routine nonterminal stale pane that remains idle
+#     is escalated after STALE_ESCALATE_SECS (configurable), rechecked once.
+#     A wedged crewmate is therefore detected within STALE_ESCALATE_SECS + a tick,
+#     never lost. A pause gets the longer PAUSE_RESURFACE_SECS cadence only while
+#     current state confirms it on a live endpoint; invalid pauses escalate
+#     immediately and resume wedge aging.
 #     Crewmates are autonomous, so a delayed stale response does not stall a
 #     healthy crewmate's own progress.
 #     Buffered escalation delivery also has a max-defer alarm: if a digest stays
 #     undelivered past FM_MAX_DEFER_SECS, the daemon retries a normal flush and
 #     writes state/.subsuper-inject-wedged and attempts a configurable active
 #     alert if submit still cannot be confirmed.
-#   - Cheap heartbeat catch-all: every HEARTBEAT_SCAN_SECS the daemon greps all
-#     state/*.status for a captain-relevant line the per-wake classifier might
-#     have missed (e.g. a status verb outside CAPTAIN_RE) and escalates it.
+#   - Cheap heartbeat catch-all: every HEARTBEAT_SCAN_SECS the daemon scans all
+#     state/*.status for a captain-relevant line or folded open decision or
+#     blocker the per-wake classifier might have missed and escalates it.
 #
 # The robustness shell from the prior always-inject version is preserved:
 # single-instance lock (portable helper, no flock dependency), crash-loop
@@ -88,8 +90,8 @@
 #                                   kinds.
 #          FM_STALE_ESCALATE_SECS   idle seconds before a stale pane escalates
 #                                   as a possible wedge (default 240)
-#          FM_PAUSE_RESURFACE_SECS  idle seconds before a declared external wait
-#                                   re-surfaces as a recheck (default 3600)
+#          FM_PAUSE_RESURFACE_SECS  idle seconds before a valid current pause on
+#                                   a live endpoint re-surfaces (default 3600)
 #          FM_ESCALATE_BATCH_SECS   buffer window for batched escalation
 #                                   digests; 0 = flush immediately (default 90)
 #          FM_HEARTBEAT_SCAN_SECS   cadence for the catch-all status scan
@@ -442,9 +444,9 @@ EOF
     return
   fi
   if [ "$precedence" = paused ]; then
-    # A DECLARED external-wait pause (fm-classify-lib.sh): an idle pane is EXPECTED,
-    # so this is not a wedge. The caller records a pause marker (long re-surface
-    # cadence in housekeeping) rather than a wedge stale marker.
+    # A declared external-wait pause validated as current on a live endpoint is
+    # expected to idle, so this is not a wedge. The caller records a pause marker
+    # for the long housekeeping cadence rather than a wedge stale marker.
     printf 'pause|paused (awaiting external), rechecked on a long cadence: %s' "$last"
     return
   fi
@@ -523,10 +525,10 @@ stale_marker_remove() {  # <window> <state>
 }
 
 # Pause marker: state/.subsuper-paused-<key> holds the epoch a declared pause was
-# first observed idle. Housekeeping ages it against PAUSE_RESURFACE_SECS (much
-# longer than a wedge) and re-surfaces the pause once per window. Recording is
-# create-if-absent so the timestamp is stable across a churny idle pane (many
-# distinct stale hashes map to one marker), keeping the cadence hash-immune.
+# first validated as current on a live endpoint. Housekeeping ages it against
+# PAUSE_RESURFACE_SECS and revalidates before re-surfacing once per window.
+# Recording is create-if-absent so the timestamp is stable across a churny idle
+# pane, keeping the cadence hash-immune across distinct stale hashes.
 pause_marker_record() {  # <window> <state> - create if absent
   local win=$1 state=$2 key marker
   key=$(_stale_key "$(window_to_task "$win" "$state")")
@@ -650,9 +652,9 @@ $(status_open_supervision_decisions "$f")
 EOF
 }
 
-# Mark every captain-relevant status line a per-wake classification escalated as
-# seen, so the catch-all scan does not re-escalate the same line within
-# HEARTBEAT_SCAN_SECS. Mirrors classify_signal/classify_stale's relevance test.
+# Mark every folded open occurrence and captain-relevant or invalid-pause last
+# status that a per-wake classification escalated as seen, so the catch-all scan
+# does not re-escalate it within HEARTBEAT_SCAN_SECS.
 mark_escalated_seen() {  # <kind> <arg> <state>
   local kind=$1 arg=$2 state=$3 f last task
   case "$kind" in
@@ -1067,11 +1069,11 @@ _oldest_line_age() {  # <buf> -> seconds since the oldest buffered item first ar
 #     Never silently defer forever.
 #  2) stale recheck: for each pending stale marker past STALE_ESCALATE_SECS,
 #     re-peek the pane; still idle -> escalate (wedge); resumed -> clear marker.
-#  2b) pause re-surface: for each declared-pause marker past PAUSE_RESURFACE_SECS,
-#     re-peek; busy/gone -> clear; still idle + still paused -> escalate a recheck
-#     digest and reset the window (repeating bounded re-surface, never a wedge).
-#  3) heartbeat scan: every HEARTBEAT_SCAN_SECS, grep state/*.status for a
-#     captain-relevant line the per-wake classifier missed and escalate it.
+#  2b) pause re-surface: for each pause marker past PAUSE_RESURFACE_SECS,
+#     revalidate shared precedence, clear or escalate invalid state, and re-surface
+#     a still-valid idle pause before resetting the bounded window.
+#  3) heartbeat scan: every HEARTBEAT_SCAN_SECS, scan state/*.status for a
+#     captain-relevant line or folded open decision or blocker and escalate it.
 housekeeping() {  # <state>
   local state=$1 now due f key task win marker age last max_defer oldest pause_secs verdict seen
   now=$(_now)
@@ -1146,12 +1148,11 @@ housekeeping() {  # <state>
     esac
   done
 
-  # (2b) pause re-surface recheck. A DECLARED external-wait pause idles by design,
-  # so it is rechecked on a much longer cadence than a wedge (PAUSE_RESURFACE_SECS)
-  # and never escalated as one - but it MUST re-surface, so a forgotten pause cannot
-  # rot invisibly. Past the window: busy (resumed) or gone -> drop; still idle and
-  # still declaring the pause -> escalate a recheck digest and reset the marker so
-  # the window repeats.
+  # (2b) pause re-surface recheck. A declared external-wait pause validated as
+  # current on a live endpoint is rechecked on the longer PAUSE_RESURFACE_SECS
+  # cadence instead of as a wedge. Each pass revalidates the shared precedence;
+  # invalid pauses escalate and resume stale aging, while a valid forgotten pause
+  # re-surfaces once per window.
   pause_secs=${FM_PAUSE_RESURFACE_SECS:-$FM_PAUSE_RESURFACE_SECS_DEFAULT}
   for marker in "$state"/.subsuper-paused-*; do
     [ -e "$marker" ] || continue
@@ -1203,10 +1204,10 @@ housekeeping() {  # <state>
     esac
   done
 
-  # (3) heartbeat scan (catch-all for a captain-relevant status the per-wake
-  #     classifier may have missed). Cheap: status files only, no tmux. The
-  #     captain-relevant filtering is the shared classifier's
-  #     scan_captain_relevant_statuses; the daemon layers its digest dedup on top.
+  # (3) heartbeat scan catches a folded open occurrence or captain-relevant last
+  # status the per-wake classifier may have missed.
+  # It reads status files only; the shared scans own filtering and the daemon
+  # layers its digest dedup on top.
   if [ "$(_file_age "$state/.subsuper-last-scan")" -ge "${FM_HEARTBEAT_SCAN_SECS:-$HEARTBEAT_SCAN_SECS_DEFAULT}" ]; then
     _now > "$state/.subsuper-last-scan"
     local instance verb summary
@@ -1399,10 +1400,9 @@ handle_wake() {  # <reason> <state>
       [ "${FM_ESCALATE_BATCH_SECS:-$ESCALATE_BATCH_SECS_DEFAULT}" -le 0 ] && { escalate_flush "$state" || true; }
       ;;
     pause)
-      # Declared external-wait pause: record a pause marker (long re-surface
-      # cadence in housekeeping) and drop any wedge stale marker, so a pane that
-      # transitioned working->paused is not still wedge-aged. Only stale produces
-      # this action.
+      # A pause already validated by shared precedence gets the long housekeeping
+      # cadence and drops any wedge marker, so working->paused is not still
+      # wedge-aged. Only stale produces this action.
       if [ "$kind" = "stale" ]; then
         stale_marker_remove "$arg" "$state"
         pause_marker_record "$arg" "$state"

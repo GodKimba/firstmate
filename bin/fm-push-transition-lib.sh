@@ -101,7 +101,8 @@ EOF
   return "$found"
 }
 
-# Record a captain-relevant status after its durable wake has been enqueued.
+# Record folded open occurrences and the current captain-relevant status after
+# their durable wake has been enqueued.
 mark_surfaced() {  # <status-file>
   local f=$1 task last
   mark_open_decision_occurrences_surfaced "$f" || return 1
