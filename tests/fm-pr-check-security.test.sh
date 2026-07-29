@@ -66,12 +66,20 @@ SH
 printf '%s\n' "$*" >> "$FM_TEST_GH_LOG"
 case " $* " in
   *" headRefOid "*) printf '%s\n' "${FM_TEST_GH_HEAD:-0123456789abcdef0123456789abcdef01234567}" ;;
+  *" mergeCommit "*)
+    [ "${FM_TEST_GH_FAIL:-0}" = 0 ] || exit 1
+    printf '%s\n' "${FM_TEST_GH_MERGE_COMMIT:-89abcdef0123456789abcdef0123456789abcdef}"
+    ;;
   *" state "*)
     [ "${FM_TEST_GH_FAIL:-0}" = 0 ] || exit 1
     [ "${FM_TEST_GH_SLEEP:-0}" = 0 ] || sleep "$FM_TEST_GH_SLEEP"
     printf '%s\n' "${FM_TEST_GH_STATE:-OPEN}"
     ;;
 esac
+if [ "${1:-} ${2:-}" = "api --hostname" ]; then
+  [ "${FM_TEST_GH_COMPARE_FAIL:-0}" = 0 ] || exit 1
+  printf '%s\n' "${FM_TEST_GH_COMPARE_STATUS:-ahead}"
+fi
 SH
 cat > "$fakebin/gh-axi" <<'SH'
 #!/usr/bin/env bash
@@ -90,6 +98,7 @@ case "${1:-} ${2:-}" in
   "api /repos/"*)
     printf '%s\n' \
       'auto_merge_enabled: false' \
+      'merge_commit_sha: 89abcdef0123456789abcdef0123456789abcdef' \
       'merged: true' \
       'merged_at: "2026-07-27T21:58:23Z"' \
       'state: closed'
@@ -569,7 +578,7 @@ test_valid_recording_and_merge_derivation() {
     >/dev/null 2>/dev/null || fail "valid merge wrapper failed"
   grep -qxF 'pr merge 37 --repo my-org/repo_name.with-dots --merge' "$dir/gh-axi.log" \
     || fail "merge wrapper did not preserve repository derivation and method"
-  grep -qxF "api /repos/my-org/repo_name.with-dots/pulls/37 --jq {state: .state, merged: .merged, merged_at: .merged_at, auto_merge_enabled: (.auto_merge != null)}" "$dir/gh-axi.log" \
+  grep -qxF "api /repos/my-org/repo_name.with-dots/pulls/37 --jq {state: .state, merged: .merged, merged_at: .merged_at, merge_commit_sha: .merge_commit_sha, auto_merge_enabled: (.auto_merge != null)}" "$dir/gh-axi.log" \
     || fail "merge wrapper did not verify the current GitHub state"
   set +e
   FM_TEST_GH_STATE=MERGED run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/merged-watch.out" 2> "$dir/merged-watch.err"
@@ -782,6 +791,65 @@ test_static_poll_contract() {
   pass "static poll is silent except for one merged line and remains watcher-bounded"
 }
 
+test_required_ancestry_poll_contract() {
+  local dir state url ancestor merge_commit out rc
+  dir=$(make_case required-ancestry-poll)
+  state="$dir/home/state"
+  url=https://github.com/o/r/pull/81
+  ancestor=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  merge_commit=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+  write_task_meta "$dir"
+
+  FM_TEST_GH_HEAD=cccccccccccccccccccccccccccccccccccccccc \
+    run_check_entry "$dir" task-a "$url" --require-ancestor "$ancestor" \
+    >/dev/null 2>/dev/null || fail "required ancestry poll could not be armed"
+  grep -qxF "pr_required_ancestor=$ancestor" "$state/task-a.meta" \
+    || fail "required ancestry was not bound to task metadata"
+  [ "$(tail -1 "$state/task-a.pr-poll")" = "$ancestor" ] \
+    || fail "required ancestry was not bound to poll data"
+  fm_pr_poll_artifacts_valid "$state" task-a "$POLL" \
+    || fail "required ancestry poll failed provenance validation"
+
+  printf '\n' >> "$state/task-a.check.sh"
+  FM_TEST_GH_HEAD=cccccccccccccccccccccccccccccccccccccccc \
+    run_check_entry "$dir" task-a "$url" >/dev/null 2>/dev/null \
+    || fail "same-PR migration and rearm without the option failed"
+  grep -qxF "pr_required_ancestor=$ancestor" "$state/task-a.meta" \
+    || fail "same-PR migration dropped required ancestry metadata"
+  [ "$(tail -1 "$state/task-a.pr-poll")" = "$ancestor" ] \
+    || fail "same-PR migration dropped required ancestry poll data"
+
+  out=$(FM_TEST_GH_STATE=MERGED FM_TEST_GH_MERGE_COMMIT="$merge_commit" \
+    FM_TEST_GH_COMPARE_STATUS=ahead run_poll "$dir")
+  [ "$out" = merged ] || fail "proven final ancestry did not report merged"
+  out=$(FM_TEST_GH_STATE=MERGED FM_TEST_GH_MERGE_COMMIT="$merge_commit" \
+    FM_TEST_GH_COMPARE_STATUS=diverged run_poll "$dir")
+  [ -z "$out" ] || fail "diverged final ancestry reported merged"
+  out=$(FM_TEST_GH_STATE=MERGED FM_TEST_GH_MERGE_COMMIT="$merge_commit" \
+    FM_TEST_GH_COMPARE_FAIL=1 run_poll "$dir")
+  [ -z "$out" ] || fail "unreadable final ancestry reported merged"
+
+  out=$(FM_TEST_GH_STATE=MERGED FM_TEST_GH_MERGE_COMMIT="$merge_commit" \
+    FM_TEST_GH_COMPARE_STATUS=ahead FM_TEST_GH_LOG="$dir/gh.log" \
+    PATH="$dir/fakebin:$BASE_PATH" \
+    "$POLL" --validated github "$url" github.com o/r 81 "$ancestor")
+  [ "$out" = merged ] || fail "validated watcher path lost required ancestry"
+
+  rm -f "$state/.last-check"
+  set +e
+  FM_TEST_GH_STATE=MERGED FM_TEST_GH_MERGE_COMMIT="$merge_commit" \
+    FM_TEST_GH_COMPARE_STATUS=ahead FM_TEST_GH_LOG="$dir/gh.log" \
+    FM_TEST_GLAB_LOG="$dir/glab.log" run_watcher_bounded "$dir/home" "$dir/fakebin" \
+    > "$dir/watch.out" 2> "$dir/watch.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "required ancestry watcher did not complete"
+  assert_poll_absent "$state" task-a
+  [ "$(grep -c '^check: .*: merged$' "$dir/watch.out")" -eq 1 ] \
+    || fail "required ancestry watcher did not report exactly one landed result"
+  pass "required ancestry survives rearm and gates poll retirement"
+}
+
 test_atomic_interruption_leaves_no_partial_artifact() {
   local dir rc
   dir=$(make_case interrupted-write)
@@ -820,7 +888,14 @@ test_concurrent_watcher_sees_only_complete_publication() {
 '$REAL_CP' "\$@" || exit 1
 sleep 0.3
 SH
-    chmod +x "$dir/fakebin/cp"
+    cat > "$dir/fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  capture-pane) printf '%s\n' fixture-busy ;;
+  *) exit 1 ;;
+esac
+SH
+    chmod +x "$dir/fakebin/cp" "$dir/fakebin/tmux"
 
     FM_TEST_GH_HEAD=0123456789abcdef0123456789abcdef01234567 \
       run_check_entry "$dir" task-a https://github.com/o/r/pull/1 > "$dir/direct.out" 2> "$dir/direct.err" &
@@ -833,7 +908,8 @@ SH
     [ "$i" -lt 100 ] || fail "atomic publication did not reach staged check"
 
     set +e
-    FM_TEST_GH_STATE=MERGED run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch.out" 2> "$dir/watch.err"
+    FM_BUSY_REGEX=fixture-busy FM_TEST_GH_STATE=MERGED \
+      run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch.out" 2> "$dir/watch.err"
     rc=$?
     set -e
     wait "$direct_pid" || fail "concurrent direct arming failed"
@@ -3355,6 +3431,7 @@ test_invalid_entrypoints_have_zero_side_effects
 test_valid_recording_and_merge_derivation
 test_rejected_metacharacter_bytes_are_inert
 test_static_poll_contract
+test_required_ancestry_poll_contract
 test_atomic_interruption_leaves_no_partial_artifact
 test_concurrent_watcher_sees_only_complete_publication
 test_postrename_poll_validation_revokes_and_retries

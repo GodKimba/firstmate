@@ -88,7 +88,7 @@ state/               volatile runtime signals; gitignored
   <id>.turn-ended    touched by turn-end hooks
   <id>.grok-turnend-token   firstmate-owned grok hook registry token for the task; removed by teardown
   <id>.kimi-turnend-token   firstmate-owned Kimi hook registry token for the task; removed by teardown
-  <id>.meta          written by fm-spawn with the recorded endpoint, worktree/project, harness profile, task kind, delivery settings, acquisition-branch provenance, and temp root; kind=secondmate also records its home and projects; docs/configuration.md "Runtime backend" owns backend-specific fields; fm-pr-check, including through fm-pr-merge, records one canonical pr= and the forge's pr_head= when available (GitHub pull requests and GitLab merge requests; docs/gitlab-merge-watch.md); fm-x-link appends x_request=, x_request_ts=, x_followups=, and optional x_platform=/x_reply_max_chars= for an X-mode-originated task (section 14)
+  <id>.meta          written by fm-spawn with the recorded endpoint, worktree/project, harness profile, task kind, delivery settings, acquisition-branch provenance, and temp root; kind=secondmate also records its home and projects; docs/configuration.md "Runtime backend" owns backend-specific fields; fm-pr-check, including through fm-pr-merge, records one canonical pr= for a GitHub pull request or GitLab merge request, the forge's pr_head= when available, and pr_required_ancestor= only for an ancestry-sensitive GitHub merge poll (docs/gitlab-merge-watch.md); fm-x-link appends x_request=, x_request_ts=, x_followups=, and optional x_platform=/x_reply_max_chars= for an X-mode-originated task (section 14)
   <id>.treehouse-return  identity-bound generic-return journal retained only when provider completion or exact acquisition-branch cleanup still needs a safe retry; bin/fm-teardown.sh owns its contract
   <id>.herdr-presentation  quarantinable attempt and restart-binding journal for Herdr's optional visual projection; never task or endpoint authority; see docs/herdr-backend.md "Optional presentation spaces"
   <id>.check.sh      authenticated slow poll; the watcher dispatches validated PR data and the byte-identified X shim through trusted repository scripts, runs registered custom checks from hash-validated private snapshots, and rejects every other state check without execution
@@ -467,6 +467,8 @@ Firstmate's shared instruction surface reaches running homes only after it lands
 Only `AGENTS.md`, `bin/`, and `.agents/skills/` are loaded by a running firstmate; public `skills/` is an installer-facing surface.
 When the captain invokes `/updatefirstmate` or asks to update firstmate, load the `/updatefirstmate` skill.
 It performs guarded fast-forward updates of firstmate and registered secondmate homes, refreshes instructions, and never touches anything under `projects/`.
+When the captain invokes `/syncfirstmate` or asks what changed upstream or to sync from upstream, load the `/syncfirstmate` skill.
+It reports upstream-only changes for the captain to accept, adapt, or reject, then prepares an ancestry-preserving merge as a reviewed PR that must be landed with a true merge commit; it never merges and never updates a running home.
 
 ## 13. Agent-only reference skills
 

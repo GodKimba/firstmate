@@ -172,6 +172,10 @@
       "audience": "agent-runtime"
     },
     {
+      "path": ".agents/skills/syncfirstmate/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": ".agents/skills/updatefirstmate/SKILL.md",
       "audience": "agent-runtime"
     },

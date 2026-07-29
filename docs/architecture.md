@@ -13,7 +13,7 @@ Actionable wakes include captain-relevant status signals, newly observed open ke
 Repeated provably-working stale escalations on the same unchanged pane add an escalation count to the wake reason and, at `FM_WEDGE_DEMAND_INSPECT_COUNT`, a `demand-deep-inspection` marker.
 Those actionable wakes are written to a durable local queue (`state/.wake-queue`) before detector state advances, so a missed process exit can be recovered by draining the queue.
 When a canonical validated PR poll returns exactly `merged`, the watcher appends that durable notification before publishing a private receipt bound to the poll's registration, bytes, file identities, metadata, provider, URL, and task ID.
-The receipt makes retirement safely retryable across restarts: fixed-path recovery revalidates the same evidence, removes the runnable check first, removes its registration and data sidecars, removes the receipt last, and preserves task metadata including `pr=` and `pr_head=`.
+The receipt makes retirement safely retryable across restarts: fixed-path recovery revalidates the same evidence, removes the runnable check first, removes its registration and data sidecars, removes the receipt last, and preserves task metadata including `pr=`, `pr_head=`, and optional `pr_required_ancestor=`.
 A concurrent replacement remains armed, every non-merged or invalid observation remains unchanged, and retirement never performs task or persistent-secondmate cleanup.
 `bin/fm-pr-lib.sh` owns the receipt format and strict identity mechanics, while `bin/fm-watch.sh` owns queue-before-retirement ordering.
 No-verb wakes, such as `working:` notes and bare turn-ended signals, are benign only when `bin/fm-crew-state.sh` reports positive evidence that the crew is still working: an actively running no-mistakes step attributed to that crew's current code, a backend busy signature, or its dedicated withheld-CI source.
@@ -215,10 +215,12 @@ The `data/secondmates.md` line contract is owned by the [`secondmate-provisionin
 When a selected delivery path calls for a diff, `bin/fm-review-diff.sh` refreshes the authoritative base and, when task meta records `pr=`, always fetches and compares against `refs/pull/<n>/head` by default (recorded `pr_head=` is only an offline fallback) before falling back to the local branch with a warning.
 For target project repos shipped through their own no-mistakes pipeline, commits under `.no-mistakes/evidence/` are the pipeline's PR-viewable validation evidence and are expected to stay in the crew branch until the evidence-hosting design changes.
 The firstmate repo itself is the exception: its `.no-mistakes/` directory is local state, stays gitignored, and is rejected by CI if tracked.
-PR-based task merges go through `bin/fm-pr-merge.sh`, which records `pr=` and any available `pr_head=` through `bin/fm-pr-check.sh` before calling `gh-axi pr merge`.
-The helper suppresses the merge command's human-oriented success label and then reads the current GitHub REST pull-request state: only a closed PR with `merged=true` and a merge timestamp returns success and prints `merged`, while an open PR with auto-merge enabled prints `auto-merge enabled: <url>; waiting on checks`, returns its distinct waiting status, and leaves ordinary merge monitoring in place.
+PR-based task merges go through `bin/fm-pr-merge.sh`, which records `pr=`, any available `pr_head=`, and an optional synchronization-specific `pr_required_ancestor=` through `bin/fm-pr-check.sh` before calling `gh-axi pr merge`.
+The optional ancestry guard binds the reviewed upstream SHA and exact PR head before mutation, requires an explicit true merge method, persists the requirement through auto-merge polling, and authorizes landing only when the final merge commit preserves that ancestry.
+Its exact command form and refusal syntax are owned by `bin/fm-pr-merge.sh`'s header and the [`syncfirstmate` skill](../.agents/skills/syncfirstmate/SKILL.md).
+The helper suppresses the merge command's human-oriented success label and then reads the current GitHub REST pull-request state: only a closed PR with `merged=true`, a merge timestamp, and any required final ancestry verified returns success and prints `merged`, while an open PR with auto-merge enabled prints `auto-merge enabled: <url>; waiting on checks`, returns its distinct waiting status, and leaves ordinary merge monitoring in place.
 An unreadable or contradictory GitHub response refuses rather than authorizing cleanup, and teardown independently requires live merged state or another landed-work proof before discarding task work.
-The helper requires a full `https://github.com/<owner>/<repo>/pull/<n>` URL, pins both mutation and verification to its parsed host, invokes `gh-axi pr merge <n> --repo <owner>/<repo>`, defaults to `--squash`, preserves explicit merge-method flags, and rejects malformed URLs or repository or hostname override flags before recording merge state; a well-formed GitLab merge request URL (see [docs/gitlab-merge-watch.md](gitlab-merge-watch.md)) is refused too, explicitly, rather than sent to the wrong forge.
+The helper requires a full `https://github.com/<owner>/<repo>/pull/<n>` URL, pins both mutation and verification to its parsed host, invokes `gh-axi pr merge <n> --repo <owner>/<repo>`, defaults ordinary requests to `--squash`, preserves explicit merge-method flags, and rejects malformed URLs or repository or hostname override flags before recording merge state; a well-formed GitLab merge request URL (see [docs/gitlab-merge-watch.md](gitlab-merge-watch.md)) is refused too, explicitly, rather than sent to the wrong forge.
 Teardown is fail-closed for ship worktrees: dirty worktrees refuse, and committed work must be landed before the worktree is returned.
 [`bin/fm-teardown.sh`](../bin/fm-teardown.sh)'s header owns the landed-work proofs, PR-discovery fallback, and stale-lock recovery procedure.
 
@@ -276,12 +278,14 @@ Fetches blocked by an orphaned `.git/packed-refs.lock` use bounded retries and r
 Local-only projects, clones without an origin remote, and fetch failures remain benign skips.
 The refresh also prunes local branches whose remote is gone and that no worktree still needs.
 
-## Self-updates stay safe
+## Upstream synchronization and self-updates stay separate
 
+`/syncfirstmate` reviews upstream-only changes with the captain, prepares a full-tip ancestry-preserving integration as a reviewed PR, and never lands it or updates a running home.
+The [`syncfirstmate` skill](../.agents/skills/syncfirstmate/SKILL.md) owns the complete review, preparation, and synchronization-only landing contract.
 `/updatefirstmate` fast-forwards the running firstmate repo and registered secondmate homes from `origin`, then re-reads updated instructions and nudges updated secondmates without touching project clones.
 The update is fast-forward only: dirty, diverged, offline, and off-default targets are reported and left untouched.
 The origin-based updater and the local secondmate sync share the same guarded fast-forward helper; only the origin mode fetches.
-The mechanics are owned by the `/updatefirstmate` skill and firstmate's operating manual in [`AGENTS.md`](../AGENTS.md) (self-update).
+The update mechanics are owned by the `/updatefirstmate` skill and firstmate's operating manual in [`AGENTS.md`](../AGENTS.md) (self-update).
 
 ## Restart-proof
 
