@@ -19,17 +19,18 @@ This guard is not a general sandbox.
 It classifies shell command positions only; it never evaluates, expands, sources, or runs any byte of the submitted command.
 Its threat model is agent mistakes, the same as the watcher-arm seatbelt: an accidental bare `cd projects/foo`, not a deliberately obfuscated bypass.
 
-## Scope: plain firstmate checkouts only
+## Scope: checkout shape only
 
 The guard fires only in a plain firstmate checkout where git-dir equals git-common-dir.
-It is a silent no-op (exit 0, no output) everywhere else, so it never interferes with a crewmate or scout that legitimately works inside its own project or firstmate task worktree.
+It is a silent no-op (exit 0, no output) for linked worktrees and non-Firstmate repositories.
+This scope is based only on checkout shape, so a provider-leased full clone satisfies it even when the clone hosts an ordinary crewmate.
 
 `bin/fm-cd-pretool-check.sh` owns its checkout detection; the turn-end guard's marker-aware scope is a separate contract (`docs/turnend-guard.md`).
 A plain, non-worktree checkout has `git rev-parse --git-dir` equal to `git rev-parse --git-common-dir`.
-A crewmate or scout task worktree - the shape `bin/fm-spawn.sh` always hands out - is a linked git worktree where the two differ, so the guard is inert there.
+A linked crewmate or scout task worktree has different git and common dirs, so the guard is inert there.
 The checkout must also carry `AGENTS.md` and `bin/`, and any failure to confirm the primary is treated as inert, never as a block.
 
-The cd-guard does not inspect `.fm-secondmate-home`.
+The cd-guard does not inspect `FM_CREW_TASK` or `.fm-secondmate-home`.
 It therefore applies in a git-cloned secondmate home where git-dir equals git-common-dir, but remains inert in a treehouse-leased secondmate home that is itself a linked worktree.
 Secondmate child crew and scout worktrees are likewise inert under the linked-worktree test.
 

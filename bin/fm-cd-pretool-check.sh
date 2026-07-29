@@ -123,15 +123,13 @@ esac
 SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" 2>/dev/null && pwd -P) || exit 0
 FM_ROOT=${FM_ROOT_OVERRIDE:-$(CDPATH='' cd -- "$SCRIPT_DIR/.." 2>/dev/null && pwd -P)} || exit 0
 
-# Scope to a plain, non-worktree firstmate checkout, where git-dir equals
-# git-common-dir. A crewmate/scout task worktree - the shape bin/fm-spawn.sh
-# always hands out - is a linked git worktree where the two differ. This guard
-# does not inspect .fm-secondmate-home, so it applies in a git-cloned secondmate
-# home but remains inert when the secondmate home is itself a treehouse-leased
-# linked worktree. docs/cd-guard.md owns this scope; docs/turnend-guard.md owns
-# the turn-end guard's separate marker-aware scope. Any failure to confirm the
-# checkout is inert (exit 0), never a block, so a broken environment never
-# denies a shell command.
+# Scope only by plain-checkout shape, where git-dir equals git-common-dir.
+# A linked crewmate/scout task worktree has different dirs and stays inert; a
+# provider-leased full clone has equal dirs and is in scope. This guard does not
+# inspect FM_CREW_TASK or .fm-secondmate-home. docs/cd-guard.md owns this scope;
+# docs/turnend-guard.md owns the separate shared primary scope. Any failure to
+# confirm the checkout is inert (exit 0), never a block, so a broken environment
+# never denies a shell command.
 [ -f "$FM_ROOT/AGENTS.md" ] || exit 0
 [ -d "$FM_ROOT/bin" ] || exit 0
 command -v git >/dev/null 2>&1 || exit 0

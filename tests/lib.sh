@@ -34,6 +34,15 @@ FM_TEST_LIB_SOURCED=1
 # strips this to verify real refusal.
 export FM_GATE_REFUSE_BYPASS=1
 
+# Drop the crewmate launch identity (bin/fm-primary-scope-lib.sh) for the same
+# reason. This suite is normally run BY a crewmate working on firstmate itself,
+# whose own launch line carries FM_CREW_TASK, and every primary-scoped hook test
+# builds its own fixture home and asserts primary behavior there. Leaving the
+# ambient identity in place would make each of those fixtures read as a worker
+# and turn a real regression suite silently green. A test that needs the worker
+# side sets the variable explicitly for the one invocation under test.
+unset FM_CREW_TASK
+
 # Resolve the repo root from this library's own location. Consumed by sourcing
 # test files, not by this library, so it reads as "unused" here.
 # shellcheck disable=SC2034

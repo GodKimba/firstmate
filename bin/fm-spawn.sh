@@ -1617,7 +1617,22 @@ LAUNCH=${LAUNCH//__PIWATCH__/$sq_piwatch}
 LAUNCH=${LAUNCH//__OPINPUT__/$sq_opinput}
 if [ "$KIND" = secondmate ]; then
   sq_home=$(shell_quote "$PROJ_ABS")
-  LAUNCH="FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_HOME=$sq_home $LAUNCH"
+  # A secondmate runs its OWN primary firstmate session, so it must NOT carry the
+  # crewmate launch identity. Clear it explicitly rather than relying on it being
+  # unset: this launch line may run in a pane whose ambient environment already
+  # carries one (a secondmate spawned from inside a crewmate's own pane).
+  LAUNCH="export FM_CREW_TASK=; FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_HOME=$sq_home $LAUNCH"
+else
+  # Ordinary direct report (kind=ship or kind=scout). Stamp the launch identity
+  # bin/fm-primary-scope-lib.sh reads, so every tracked primary-only hook this
+  # worker's harness may auto-load stays inert before it can reach the model.
+  # This matters most when the worker's own project is the firstmate repo: that
+  # checkout carries this repo's tracked primary extensions and hooks, so
+  # trusting it would otherwise let a coordinator startup instruction reach an
+  # implementation worker. Nothing else about the launch environment changes -
+  # the identity alone denies primary standing, whatever the worker's checkout
+  # shape or inherited home variables happen to be.
+  LAUNCH="export FM_CREW_TASK=$(shell_quote "$ID"); $LAUNCH"
 fi
 # Export GOTMPDIR into the crewmate's pane shell so the agent and every child
 # process (go build, go test, ...) inherit it. Sent before the launch command so

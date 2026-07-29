@@ -56,7 +56,21 @@ function markLoaded(): void {
   writeFileSync(marker, `${extensionVersion}\n${process.pid}\n`);
 }
 
+// Pi auto-loads this tracked extension from any TRUSTED project directory, and a
+// crewmate working on the firstmate repo itself sits in a checkout that carries
+// it. bin/fm-primary-scope-lib.sh owns the primary-vs-worker identity contract
+// and the wrapper already enforces it; this early return keeps an ordinary
+// worker from even spawning the wrapper, so no coordinator startup instruction
+// can be produced in a worker session. Only fm-spawn sets FM_CREW_TASK, and only
+// for kind=ship/kind=scout - a secondmate coordinator has it explicitly cleared.
+// Non-empty is the identity; empty is how a secondmate coordinator sheds an
+// inherited one, exactly as fm_launched_as_crewmate treats it.
+function launchedAsCrewmate(): boolean {
+  return (process.env.FM_CREW_TASK ?? "") !== "";
+}
+
 function runSessionstartNudge(): string {
+  if (launchedAsCrewmate()) return "";
   const result = spawnSync(`${root}/bin/fm-sessionstart-nudge.sh`, [], { encoding: "utf8" });
   if (result.status !== 0) return "";
   return result.stdout.trim();
