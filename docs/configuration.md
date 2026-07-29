@@ -302,7 +302,9 @@ Activation is deliberately minimal, so that a capacity question never becomes a 
   It remains the sole owner of provider quota semantics; the view only presents what it reports per account.
 - The pool's account directory must be readable by the firstmate home's user.
   It defaults to `~/.cli-proxy-api` and is overridable with `FM_POOL_QUOTA_DIR`.
-- Nothing else is required.
+- On Linux, `xdg-open` must be available for the skill to open the freshly regenerated panel.
+  Without it, the quota read and panel regeneration still complete, but the skill reports that it could not open the panel.
+- No proxy service or Management API access is required.
   The adapter never contacts the proxy service or its Management API, so the proxy does not need to be running and its management interface does not need to be enabled.
   A capacity read that fails is reported as a failed read, never as a reason to enable a management route or restart the service.
 
@@ -318,9 +320,11 @@ Account identity uses a stable masked label across runs, and a full address is n
 
 `bin/fm-pool-quota.sh --help` owns the exact flags, bounds, environment overrides, and output contract.
 
-Every `/poolquota` invocation regenerates the private local panel from its fresh read and opens it through the supported local path.
+Every `/poolquota` invocation regenerates the private local panel from its fresh read and attempts to open it with the operating system's ordinary nonblocking browser opener.
+The poolquota skill owns platform selection and the immediate-return behavior on supported macOS and Linux hosts.
+The display-only dashboard does not enter `lavish-axi`'s interactive feedback flow, which remains available for genuine review surfaces.
 The panel artifact is private local operational detail about paid subscriptions.
-Open it only with `lavish-axi <path>`; it carries no credential and no full account address, but it must not be published, shared, or attached to an issue, a pull request, or a commit.
+Open it only from its local path; it carries no credential and no full account address, but it must not be published, shared, or attached to an issue, a pull request, or a commit.
 
 GitHub stays with `gh-axi`; this view is subscription quota only.
 

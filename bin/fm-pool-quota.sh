@@ -48,8 +48,8 @@
 #
 # The panel is deliberately self-contained with inline CSS and zero external
 # requests: this artifact renders subscription health next to credential-derived
-# state, so it must not pull third-party script or style at view time. Open it
-# with the supported local path, `lavish-axi <panel>`; never publish or share it.
+# state, so it must not pull third-party script or style at view time and must
+# never be published or shared.
 #
 # GitHub stays out of scope: `gh-axi` already owns the GitHub dashboard.
 #

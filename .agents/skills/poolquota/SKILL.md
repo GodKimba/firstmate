@@ -19,8 +19,12 @@ When the captain asks about pull requests, checks, or review load, that is `gh-a
 
 ## What it does
 
-1. Runs `bin/fm-pool-quota.sh` for a fresh read; the script's header and `--help` own its exact flags, bounds, environment overrides, output contract, and safety mechanics.
-2. Opens the returned `panel` path with `lavish-axi <path>` on every invocation.
+1. Runs `bin/fm-pool-quota.sh` for a fresh read; its `--help` owns the supported flags, bounds, environment overrides, and output contract.
+2. Attempts to open the returned `panel` path with the platform's ordinary nonblocking browser opener on every invocation.
+   On macOS (`uname -s` reports `Darwin`), run `open "$panel"`; it returns after handing the local file to the browser.
+   On Linux, require `xdg-open`, then launch `nohup xdg-open "$panel" </dev/null >/dev/null 2>&1 &` so the opener cannot keep the invoking shell in the foreground.
+   If the platform or its opener is unsupported, report that the fresh panel was regenerated but could not be opened, and do not substitute another review tool.
+   Do not use `lavish-axi` for this display-only dashboard because its feedback poll is appropriate for review surfaces, not a read-only status view.
 3. Reports the provider-level summary in chat: per provider, how many accounts are answering, how much the healthiest account has left, how constrained the tightest one is, and when the next window resets.
 4. Adds `--accounts` only when the captain wants the masked per-account and per-window detail in the terminal as well.
 
@@ -30,8 +34,8 @@ A previous run's numbers are already out of date, and the panel is rebuilt from 
 ## The panel is local and private
 
 The panel describes the captain's paid accounts and their remaining capacity.
-Open it only through the local path, `lavish-axi <path>`.
-Never run `lavish-axi share` on it, never copy its contents into a message that leaves this machine, and never attach it to an issue, a pull request, or a commit.
+Open it only through the platform-specific local opener above.
+Never run `lavish-axi` or `lavish-axi share` on it, never copy its contents into a message that leaves this machine, and never attach it to an issue, a pull request, or a commit.
 
 The artifact itself carries no credential and no full account address, but it is still private operational detail about the captain's subscriptions.
 
