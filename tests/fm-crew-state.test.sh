@@ -702,7 +702,7 @@ EOF
 
 test_no_run_ci_ready_done_log_with_zero_check_runs_stays_working() {
   reset_fakes
-  local d; d=$(new_case no-run-ready-zero-runs)
+  local d absorb; d=$(new_case no-run-ready-zero-runs)
   make_repo_on_branch "$d/wt" fm/feat-norunzero
   make_fakebin "$d" >/dev/null
   fm_write_meta "$d/state/feat-norunzero.meta" "window=fm:fm-feat-norunzero" "worktree=$d/wt" "kind=ship" "mode=no-mistakes"
@@ -710,10 +710,36 @@ test_no_run_ci_ready_done_log_with_zero_check_runs_stays_working() {
   FM_FAKE_GH_CHECKS=none
   local out; out=$(run_crew_state "$d" feat-norunzero)
   assert_contains "$out" "state: working" "no-run checks-green report with zero check runs -> working"
-  assert_contains "$out" "source: status-log" "no-run withheld report stays status-log sourced"
+  assert_contains "$out" "source: ci-withheld" "no-run withheld report uses its trusted wait source"
   assert_not_contains "$out" "state: done" "no-run status line must not claim green without evidence"
   assert_contains "$out" "no check runs reported" "no-run withheld report names the missing evidence"
-  pass "the no-run ready path also requires forge evidence"
+  absorb=$(PATH="$d/fakebin:$PATH" FM_STATE_OVERRIDE="$d/state" crew_absorb_class feat-norunzero)
+  [ "$absorb" = working ] || fail "no-run withheld CI wait was not classed absorbable"
+  printf 'working: ordinary uncorroborated progress note\n' > "$d/state/feat-norunzero.status"
+  absorb=$(PATH="$d/fakebin:$PATH" FM_STATE_OVERRIDE="$d/state" crew_absorb_class feat-norunzero)
+  [ "$absorb" = none ] || fail "plain status-log working event became absorbable"
+  pass "the no-run ready path requires evidence and remains wedge-monitored"
+}
+
+test_cross_branch_no_run_ci_ready_uses_task_pr() {
+  reset_fakes
+  local d calls; d=$(new_case cross-branch-ready-task-pr)
+  make_repo_on_branch "$d/wt" fm/feat-taskpr
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-taskpr.meta" "window=fm:fm-feat-taskpr" "worktree=$d/wt" "kind=ship" "mode=no-mistakes" "pr=https://github.com/o/r/pull/8"
+  printf 'done: PR https://github.com/o/r/pull/8 checks green\n' > "$d/state/feat-taskpr.status"
+  FM_FAKE_AXI_STATUS="$(run_ci_monitoring fm/other-crew | sed 's#https://github.com/o/r/pull/2#https://gitlab.example.com/other/repo/-/merge_requests/2#')"
+  FM_FAKE_RUNS_LIST="  running    fm/other-crew aaaaaaa  2026-07-02 22:10"
+  FM_FAKE_GH_CHECKS=none
+  FM_FAKE_GH_CALLS="$d/gh.calls"
+  : > "$FM_FAKE_GH_CALLS"
+  local out; out=$(run_crew_state "$d" feat-taskpr)
+  assert_contains "$out" "state: working" "cross-branch no-run task with zero checks -> working"
+  assert_contains "$out" "source: ci-withheld" "cross-branch withheld task remains wedge-monitored"
+  calls=$(cat "$FM_FAKE_GH_CALLS")
+  assert_contains "$calls" "pr view https://github.com/o/r/pull/8" "probe did not use this task's metadata PR"
+  assert_not_contains "$calls" "gitlab.example.com/other/repo" "probe used another task's PR"
+  pass "cross-branch fallback corroborates only this task's PR"
 }
 
 test_no_run_direct_pr_mode_keeps_its_ready_signal() {
@@ -1743,6 +1769,7 @@ test_ci_green_marker_with_unreadable_checks_stays_working
 test_ci_ready_done_log_with_zero_check_runs_stays_working
 test_coarse_ci_ready_done_log_with_zero_check_runs_stays_working
 test_no_run_ci_ready_done_log_with_zero_check_runs_stays_working
+test_cross_branch_no_run_ci_ready_uses_task_pr
 test_no_run_direct_pr_mode_keeps_its_ready_signal
 test_checks_passed_outcome_with_zero_check_runs_stays_working
 test_checks_passed_outcome_with_green_checks_surfaces_done

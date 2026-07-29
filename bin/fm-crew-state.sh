@@ -16,7 +16,7 @@
 # fixed mapping logic, no heuristics and no LLM. Output is one stable, parseable,
 # token-tight line firstmate can read every heartbeat:
 #
-#   state: <working|parked|done|blocked|paused|failed|unknown> · source: <run-step|pane|status-log|none> · <detail>
+#   state: <working|parked|done|blocked|paused|failed|unknown> · source: <run-step|pane|ci-withheld|status-log|none> · <detail>
 #
 # Logic, in order:
 #   1. Resolve worktree + backend target + kind from state/<id>.meta.
@@ -414,11 +414,11 @@ gh_bounded() {  # <args...>
 }
 
 # The PR a green-ready claim is about, most authoritative source first. The
-# run's own pr field is used ONLY on the full path: a coarse run object belongs
-# to whichever branch `axi status` answered for, so its PR is another crew's.
+# run's own pr field is used ONLY when a full run was attributed to this crew:
+# otherwise `axi status` may describe another crew and its PR.
 ci_pr_url() {
   local url=""
-  [ "${RUN_SOURCE:-}" = full ] && url=$(strip_quotes "$(nm_field pr)")
+  [ "${HAVE_RUN:-0}" = 1 ] && [ "${RUN_SOURCE:-}" = full ] && url=$(strip_quotes "$(nm_field pr)")
   [ -n "$url" ] || url=$(meta_value pr)
   [ -n "$url" ] || url=$(printf '%s\n' "$LOG_LINE" | grep -oE 'https://[^[:space:]]+' | head -1)
   printf '%s' "$url"
@@ -807,7 +807,7 @@ if [ -n "$LOG_VERB" ]; then
       if ci_ready_log_allowed; then
         emit "done" status-log "$CI_READY_LOG_DETAIL"
       fi
-      emit working status-log "$CI_READY_LOG_DETAIL"
+      emit working ci-withheld "$CI_READY_LOG_DETAIL"
     fi
     emit "$LOG_STATE" status-log "$(status_line_note "$LOG_LINE")"
   fi
