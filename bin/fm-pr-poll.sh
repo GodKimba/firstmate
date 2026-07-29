@@ -1,21 +1,24 @@
 #!/usr/bin/env bash
 # Static watcher program for a validated PR/MR poll sidecar.
 # It emits exactly one merged line for a merged PR or MR and stays silent
-# otherwise, including on every error, so a failed lookup can never be read as
-# a merge. The provider-tagged identity is data in the sidecar and is never
-# interpolated into this source: these bytes are identical for every task.
+# otherwise, including when a required final ancestry cannot be proven, so a
+# failed lookup can never be read as a merge. The provider-tagged identity and
+# optional required ancestor are data in the sidecar and are never interpolated
+# into this source: these bytes are identical for every task.
 # Each provider is read through its own standard CLI, gh for GitHub and glab
 # for GitLab, so an upstream checkout needs no extra tooling to follow either.
 set -u
 LC_ALL=C
 export LC_ALL
 
-if [ "$#" -eq 6 ] && [ "$1" = --validated ]; then
+required_ancestor=
+if { [ "$#" -eq 6 ] || [ "$#" -eq 7 ]; } && [ "$1" = --validated ]; then
   provider=$2
   url=$3
   host=$4
   path=$5
   number=$6
+  [ "$#" -eq 6 ] || required_ancestor=$7
 elif [ "$#" -eq 0 ]; then
   case "$0" in
     *.check.sh) data=${0%.check.sh}.pr-poll ;;
@@ -29,8 +32,10 @@ elif [ "$#" -eq 0 ]; then
   IFS= read -r host <&3 || exit 0
   IFS= read -r path <&3 || exit 0
   IFS= read -r number <&3 || exit 0
-  if IFS= read -r _extra <&3; then
-    exit 0
+  if IFS= read -r required_ancestor <&3; then
+    if IFS= read -r _extra <&3; then
+      exit 0
+    fi
   fi
   exec 3<&-
 else
@@ -44,6 +49,10 @@ esac
 case "$number" in
   *[!0-9]*) exit 0 ;;
 esac
+if [ -n "$required_ancestor" ]; then
+  [ "$provider" = github ] || exit 0
+  [[ "$required_ancestor" =~ ^[0-9a-f]{40}$|^[0-9a-f]{64}$ ]] || exit 0
+fi
 
 # Every component is revalidated here rather than trusted from the sidecar, and
 # the stored URL must then be exactly reconstructible from those components, so
@@ -63,7 +72,19 @@ case "$provider" in
     esac
     [ "$url" = "https://github.com/$owner/$repo/pull/$number" ] || exit 0
     state=$(gh pr view "$url" --json state -q .state 2>/dev/null) || exit 0
-    [ "$state" = MERGED ] && printf '%s\n' merged
+    [ "$state" = MERGED ] || exit 0
+    if [ -n "$required_ancestor" ]; then
+      merge_commit=$(gh pr view "$url" --json mergeCommit -q .mergeCommit.oid 2>/dev/null) || exit 0
+      [[ "$merge_commit" =~ ^[0-9a-f]{40}$|^[0-9a-f]{64}$ ]] || exit 0
+      ancestry=$(gh api --hostname "$host" \
+        "/repos/$owner/$repo/compare/$required_ancestor...$merge_commit" \
+        --jq .status 2>/dev/null) || exit 0
+      case "$ancestry" in
+        ahead|identical) ;;
+        *) exit 0 ;;
+      esac
+    fi
+    printf '%s\n' merged
     ;;
   gitlab)
     [ "${#host}" -ge 1 ] && [ "${#host}" -le 253 ] || exit 0

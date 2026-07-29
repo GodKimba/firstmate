@@ -55,12 +55,16 @@ make_case() {
 add_gh_mocks() {
   local case_dir=$1 head=$2 state=${3:-closed} merged=${4:-true}
   local merged_at=${5:-\"2026-07-27T21:58:23Z\"} auto_merge=${6:-false}
+  local merge_commit=${7:-cccccccccccccccccccccccccccccccccccccccc}
   printf '%s\n' \
     "auto_merge_enabled: $auto_merge" \
+    "merge_commit_sha: $merge_commit" \
     "merged: $merged" \
     "merged_at: $merged_at" \
     "state: $state" > "$case_dir/pr-state.out"
   printf '%s\n' 'status: ahead' > "$case_dir/ancestor-status.out"
+  printf '%s\n' 'status: ahead' > "$case_dir/final-ancestor-status.out"
+  printf '%s\n' "$merge_commit" > "$case_dir/merge-commit.out"
   cat > "$case_dir/fakebin/gh-axi.behavior" <<'SH'
 #!/usr/bin/env bash
 case "${1:-} ${2:-}" in
@@ -68,7 +72,14 @@ case "${1:-} ${2:-}" in
     printf '%s\n' 'merged:' '  number: 9' '  status: ok' '  method: squash'
     exit 0
     ;;
-  "api /repos/"*"/compare/"*) cat "$FM_TEST_ANCESTOR_STATUS_FILE" ; exit 0 ;;
+  "api /repos/"*"/compare/"*)
+    merge_commit=$(cat "$FM_TEST_MERGE_COMMIT_FILE")
+    case "$2" in
+      *"...$merge_commit") cat "$FM_TEST_FINAL_ANCESTOR_STATUS_FILE" ;;
+      *) cat "$FM_TEST_ANCESTOR_STATUS_FILE" ;;
+    esac
+    exit 0
+    ;;
   "api /repos/"*) cat "$FM_TEST_PR_STATE_FILE" ; exit 0 ;;
 esac
 exit 0
@@ -80,7 +91,13 @@ case "\${1:-} \${2:-}" in
   "pr view")
     case " \$* " in
       *headRefOid*) printf '%s\n' '$head' ; exit 0 ;;
+      *" state "*) printf '%s\n' "\${FM_TEST_GH_STATE:-OPEN}" ; exit 0 ;;
+      *" mergeCommit "*) printf '%s\n' "\${FM_TEST_GH_MERGE_COMMIT:-$merge_commit}" ; exit 0 ;;
     esac
+    ;;
+  "api --hostname")
+    printf '%s\n' "\${FM_TEST_POLL_ANCESTOR_STATUS:-ahead}"
+    exit 0
     ;;
 esac
 exit 0
@@ -178,6 +195,8 @@ run_pr_merge() {
   FM_TEST_GH_HOST_LOG="$case_dir/gh-host.log" \
   FM_TEST_PR_STATE_FILE="$case_dir/pr-state.out" \
   FM_TEST_ANCESTOR_STATUS_FILE="$case_dir/ancestor-status.out" \
+  FM_TEST_FINAL_ANCESTOR_STATUS_FILE="$case_dir/final-ancestor-status.out" \
+  FM_TEST_MERGE_COMMIT_FILE="$case_dir/merge-commit.out" \
   FM_TEST_GH_AXI_VERSION="${FM_TEST_GH_AXI_VERSION:-gh-axi 0.1.28}" \
   FM_TEST_GH_AXI_API_JQ="${FM_TEST_GH_AXI_API_JQ:-1}" \
   PATH="$case_dir/fakebin:$PATH" \
@@ -210,7 +229,7 @@ test_records_pr_and_head_before_merging() {
     "records-before-merge: pr_head= was not recorded"
   grep -qxF 'pr merge 9 --repo example/repo --squash' "$case_dir/gh-axi.log" \
     || fail "records-before-merge: gh-axi pr merge was not invoked with number, --repo, and default --squash"
-  grep -qxF "api /repos/example/repo/pulls/9 --jq {state: .state, merged: .merged, merged_at: .merged_at, auto_merge_enabled: (.auto_merge != null)}" "$case_dir/gh-axi.log" \
+  grep -qxF "api /repos/example/repo/pulls/9 --jq {state: .state, merged: .merged, merged_at: .merged_at, merge_commit_sha: .merge_commit_sha, auto_merge_enabled: (.auto_merge != null)}" "$case_dir/gh-axi.log" \
     || fail "records-before-merge: current GitHub state was not read after the merge command"
   assert_grep 'merged: https://github.com/example/repo/pull/9' "$case_dir/stdout" \
     "records-before-merge: verified actual merge was not reported"
@@ -235,7 +254,7 @@ test_merge_failure_propagates_after_recording() {
   expect_code 1 "$rc" "merge-fails: fm-pr-merge should propagate the gh-axi merge failure"
   assert_grep 'pr=https://github.com/example/repo/pull/13' "$case_dir/state/task-x1.meta" \
     "merge-fails: pr= should already be recorded even though the merge itself failed"
-  grep -qxF "api /repos/example/repo/pulls/13 --jq {state: .state, merged: .merged, merged_at: .merged_at, auto_merge_enabled: (.auto_merge != null)}" "$case_dir/gh-axi.log" \
+  grep -qxF "api /repos/example/repo/pulls/13 --jq {state: .state, merged: .merged, merged_at: .merged_at, merge_commit_sha: .merge_commit_sha, auto_merge_enabled: (.auto_merge != null)}" "$case_dir/gh-axi.log" \
     || fail "merge-fails: current GitHub state was not read after the failed merge command"
   assert_grep 'merge command failed and the PR was not verified as merged' "$case_dir/stderr" \
     "merge-fails: unconfirmed command failure was not preserved"
@@ -257,7 +276,7 @@ test_post_merge_command_failure_uses_confirmed_state() {
 
   grep -qxF 'pr merge 14 --repo example/repo --squash --delete-branch' "$case_dir/gh-axi.log" \
     || fail "post-merge-command-failure: delete-branch argument was not forwarded"
-  grep -qxF "api /repos/example/repo/pulls/14 --jq {state: .state, merged: .merged, merged_at: .merged_at, auto_merge_enabled: (.auto_merge != null)}" "$case_dir/gh-axi.log" \
+  grep -qxF "api /repos/example/repo/pulls/14 --jq {state: .state, merged: .merged, merged_at: .merged_at, merge_commit_sha: .merge_commit_sha, auto_merge_enabled: (.auto_merge != null)}" "$case_dir/gh-axi.log" \
     || fail "post-merge-command-failure: current GitHub state was not read after the failed command"
   assert_grep 'merged: https://github.com/example/repo/pull/14' "$case_dir/stdout" \
     "post-merge-command-failure: authoritative merged state was not reported"
@@ -647,9 +666,10 @@ ROWS
 }
 
 test_required_ancestor_binds_exact_pr_head() {
-  local case_dir ancestor head
+  local case_dir ancestor head merge_commit
   ancestor=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
   head=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+  merge_commit=cccccccccccccccccccccccccccccccccccccccc
   case_dir=$(make_case required-ancestor)
   mkdir -p "$case_dir/wt"
   add_gh_mocks "$case_dir" "$head"
@@ -663,10 +683,15 @@ test_required_ancestor_binds_exact_pr_head() {
   grep -qxF "api /repos/example/repo/compare/$ancestor...$head --jq {status: .status}" \
     "$case_dir/gh-axi.log" \
     || fail "required-ancestor: exact ancestor and PR head were not compared"
+  grep -qxF "api /repos/example/repo/compare/$ancestor...$merge_commit --jq {status: .status}" \
+    "$case_dir/gh-axi.log" \
+    || fail "required-ancestor: final merge commit ancestry was not verified"
   grep -qxF "pr merge 41 --repo example/repo --match-head-commit $head --merge" \
     "$case_dir/gh-axi.log" \
     || fail "required-ancestor: merge was not pinned to the verified PR head"
-  pass "ancestry-sensitive merge verifies the reviewed ancestor and pins the PR head"
+  assert_grep "pr_required_ancestor=$ancestor" "$case_dir/state/task-x1.meta" \
+    "required-ancestor: delayed verification requirement was not recorded"
+  pass "ancestry-sensitive merge verifies the PR head and final merge commit"
 }
 
 test_required_ancestor_refuses_rewritten_head() {
@@ -716,6 +741,72 @@ test_required_ancestor_requires_true_merge() {
   pass "ancestry guard cannot be combined with a history-dropping merge method"
 }
 
+test_required_ancestor_survives_delayed_auto_merge() {
+  local case_dir ancestor head merge_commit out rc
+  ancestor=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  head=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+  merge_commit=dddddddddddddddddddddddddddddddddddddddd
+  case_dir=$(make_case delayed-required-ancestor)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" "$head" open false null true "$merge_commit"
+  : > "$case_dir/gh-axi.log"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/44 \
+    --require-ancestor "$ancestor" -- --merge \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 3 "$rc" "delayed-required-ancestor: queued auto-merge must keep waiting"
+  assert_grep "pr_required_ancestor=$ancestor" "$case_dir/state/task-x1.meta" \
+    "delayed-required-ancestor: metadata lost the final ancestry requirement"
+  [ "$(tail -1 "$case_dir/state/task-x1.pr-poll")" = "$ancestor" ] \
+    || fail "delayed-required-ancestor: authenticated poll lost the required ancestor"
+
+  out=$(FM_TEST_GH_STATE=MERGED FM_TEST_GH_MERGE_COMMIT="$merge_commit" \
+    FM_TEST_POLL_ANCESTOR_STATUS=ahead PATH="$case_dir/fakebin:$PATH" \
+    bash "$case_dir/state/task-x1.check.sh")
+  [ "$out" = merged ] \
+    || fail "delayed-required-ancestor: valid final ancestry did not report merged"
+
+  out=$(FM_TEST_GH_STATE=MERGED FM_TEST_GH_MERGE_COMMIT="$merge_commit" \
+    FM_TEST_POLL_ANCESTOR_STATUS=diverged PATH="$case_dir/fakebin:$PATH" \
+    bash "$case_dir/state/task-x1.check.sh")
+  [ -z "$out" ] \
+    || fail "delayed-required-ancestor: rewritten final ancestry was treated as landed"
+  pass "delayed auto-merge reports landed only after final ancestry verification"
+}
+
+test_required_ancestor_refuses_invalid_final_merge() {
+  local case_dir ancestor head merge_commit rc
+  ancestor=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  head=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+  merge_commit=eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee
+  case_dir=$(make_case invalid-final-ancestor)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" "$head" closed true \
+    '"2026-07-27T21:58:23Z"' false "$merge_commit"
+  printf '%s\n' 'status: diverged' > "$case_dir/final-ancestor-status.out"
+  : > "$case_dir/gh-axi.log"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/45 \
+    --require-ancestor "$ancestor" -- --merge \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "invalid-final-ancestor: invalid landed ancestry must refuse"
+  assert_grep 'is not an ancestor of final merge commit' "$case_dir/stderr" \
+    "invalid-final-ancestor: refusal did not identify the final ancestry loss"
+  assert_no_grep '^merged:' "$case_dir/stdout" \
+    "invalid-final-ancestor: invalid final ancestry was reported as merged"
+  [ -f "$case_dir/state/task-x1.check.sh" ] \
+    || fail "invalid-final-ancestor: merge monitoring was not preserved"
+  pass "immediate completion refuses when final merged ancestry was lost"
+}
+
 test_records_pr_and_head_before_merging
 test_merge_failure_propagates_after_recording
 test_post_merge_command_failure_uses_confirmed_state
@@ -739,3 +830,5 @@ test_incompatible_stale_session_refuses_before_mutation
 test_required_ancestor_binds_exact_pr_head
 test_required_ancestor_refuses_rewritten_head
 test_required_ancestor_requires_true_merge
+test_required_ancestor_survives_delayed_auto_merge
+test_required_ancestor_refuses_invalid_final_merge

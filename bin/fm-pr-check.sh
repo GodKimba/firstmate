@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
 # Record a PR-ready task: store one validated canonical pr=<url> and the forge's
 # exact pr_head=<sha> when available, then atomically arm a static merge poll.
+# An optional required ancestor becomes authenticated poll state for
+# ancestry-sensitive merge completion.
 # The watcher check source is byte-for-byte bin/fm-pr-poll.sh; task and PR data
 # live only in a private sidecar and are never interpolated into shell source.
 # A GitHub pull request URL and a GitLab merge request URL are both accepted,
 # including a merge request on a self-hosted GitLab instance.
-# Usage: fm-pr-check.sh <task-id> <pr-url>
+# Usage: fm-pr-check.sh <task-id> <pr-url> [--require-ancestor <sha>]
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -16,12 +18,20 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 
-if [ "$#" -ne 2 ]; then
+if [ "$#" -ne 2 ] && [ "$#" -ne 4 ]; then
   echo "error: invalid PR check request" >&2
   exit 2
 fi
 ID=$1
 RAW_URL=$2
+REQUIRED_ANCESTOR=
+if [ "$#" -eq 4 ]; then
+  if [ "$3" != --require-ancestor ] || ! fm_pr_head_valid "$4"; then
+    echo "error: invalid PR check request" >&2
+    exit 2
+  fi
+  REQUIRED_ANCESTOR=$4
+fi
 if ! fm_pr_task_id_valid "$ID" || ! fm_pr_url_parse "$RAW_URL"; then
   echo "error: invalid PR check request" >&2
   exit 2
@@ -31,6 +41,10 @@ PROVIDER=$FM_PR_PROVIDER
 HOST=$FM_PR_HOST
 PROJECT_PATH=$FM_PR_PATH
 NUMBER=$FM_PR_NUMBER
+if [ -n "$REQUIRED_ANCESTOR" ] && [ "$PROVIDER" != github ]; then
+  echo "error: required ancestry is supported only for GitHub pull requests" >&2
+  exit 2
+fi
 
 # Task-derived paths are constructed only after the canonical ID validation.
 META="$STATE/$ID.meta"
@@ -77,6 +91,12 @@ if [ "$PROVIDER" = github ] && [ -n "$WT" ] && [ -d "$WT" ] && command -v gh >/d
   fi
 fi
 
+if [ -z "$REQUIRED_ANCESTOR" ] && fm_pr_metadata_identity_parse "$META" 2>/dev/null; then
+  if [ "$FM_PR_META_URL" = "$URL" ]; then
+    REQUIRED_ANCESTOR=$FM_PR_META_REQUIRED_ANCESTOR
+  fi
+fi
+
 META_TMP=
 pr_check_cleanup() {
   fm_pr_poll_cleanup
@@ -84,7 +104,8 @@ pr_check_cleanup() {
 }
 trap pr_check_cleanup EXIT
 trap 'exit 1' HUP INT TERM
-fm_pr_poll_prepare "$STATE" "$ID" "$PROVIDER" "$URL" "$HOST" "$PROJECT_PATH" "$NUMBER" "$SCRIPT_DIR/fm-pr-poll.sh" \
+fm_pr_poll_prepare "$STATE" "$ID" "$PROVIDER" "$URL" "$HOST" "$PROJECT_PATH" "$NUMBER" \
+  "$SCRIPT_DIR/fm-pr-poll.sh" "$REQUIRED_ANCESTOR" \
   || { echo "error: could not prepare PR poll" >&2; exit 1; }
 
 META_DEVICE=$(fm_pr_file_device "$META") || exit 1
@@ -93,18 +114,21 @@ STATE_DEVICE=$(fm_pr_file_device "$STATE") || exit 1
 META_TMP=$(mktemp "$STATE/.fm-pr-meta.XXXXXX") || exit 1
 while IFS= read -r line || [ -n "$line" ]; do
   case "$line" in
-    pr=*|pr_head=*) ;;
+    pr=*|pr_head=*|pr_required_ancestor=*) ;;
     *) printf '%s\n' "$line" >> "$META_TMP" || exit 1 ;;
   esac
 done < "$META"
 printf 'pr=%s\n' "$URL" >> "$META_TMP" || exit 1
 [ -z "$PR_HEAD" ] || printf 'pr_head=%s\n' "$PR_HEAD" >> "$META_TMP" || exit 1
+[ -z "$REQUIRED_ANCESTOR" ] \
+  || printf 'pr_required_ancestor=%s\n' "$REQUIRED_ANCESTOR" >> "$META_TMP" || exit 1
 chmod 0600 "$META_TMP" || exit 1
 fm_pr_private_file_valid "$META_TMP" 600 "$STATE_DEVICE" || exit 1
 fm_pr_metadata_identity_parse "$META_TMP" || exit 1
 [ "$FM_PR_META_PROVIDER" = "$PROVIDER" ] && [ "$FM_PR_META_URL" = "$URL" ] \
   && [ "$FM_PR_META_HOST" = "$HOST" ] && [ "$FM_PR_META_PATH" = "$PROJECT_PATH" ] \
-  && [ "$FM_PR_META_NUMBER" = "$NUMBER" ] || exit 1
+  && [ "$FM_PR_META_NUMBER" = "$NUMBER" ] \
+  && [ "$FM_PR_META_REQUIRED_ANCESTOR" = "$REQUIRED_ANCESTOR" ] || exit 1
 fm_pr_regular_destination_on_device_or_absent "$META" "$STATE_DEVICE" || exit 1
 mv -f -- "$META_TMP" "$META" || exit 1
 META_TMP=
@@ -112,7 +136,8 @@ fm_pr_private_file_valid "$META" 600 "$STATE_DEVICE" || exit 1
 fm_pr_metadata_identity_parse "$META" || exit 1
 [ "$FM_PR_META_PROVIDER" = "$PROVIDER" ] && [ "$FM_PR_META_URL" = "$URL" ] \
   && [ "$FM_PR_META_HOST" = "$HOST" ] && [ "$FM_PR_META_PATH" = "$PROJECT_PATH" ] \
-  && [ "$FM_PR_META_NUMBER" = "$NUMBER" ] || exit 1
+  && [ "$FM_PR_META_NUMBER" = "$NUMBER" ] \
+  && [ "$FM_PR_META_REQUIRED_ANCESTOR" = "$REQUIRED_ANCESTOR" ] || exit 1
 
 fm_pr_poll_publish_prepared || {
   echo "error: could not publish PR poll" >&2

@@ -81,7 +81,7 @@ bin/fm-pr-merge.sh <task-id> <pr-url> --require-ancestor <recorded-upstream-tip>
 ```
 
 The ancestry guard verifies that the exact reviewed upstream SHA is an ancestor of the current PR head and pins the merge to that head.
-This also catches any later CI repair that rebased the synchronization branch.
+The authenticated merge poll carries the same requirement through delayed auto-merge and verifies the final merge commit before reporting the PR as landed.
 If it refuses, do not land the PR; run a fresh check and prepare a new synchronization PR from the newly reviewed pair.
 
 Without the guard and `-- --merge` the PR can land after the upstream ancestry was rewritten away or be squashed into a single-parent commit.

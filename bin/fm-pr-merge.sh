@@ -11,9 +11,10 @@
 # --hostname, or a competing --match-head-commit because those bindings come
 # only from the URL and the ancestry check.
 # After gh-axi returns, the helper reads the current GitHub REST state. Exit 0
-# means GitHub verifies the PR is merged; exit 3 means auto-merge is enabled on
-# an open PR and the existing merge poll must keep watching; every unreadable or
-# contradictory result exits 1 and preserves the task work.
+# means GitHub verifies the PR is merged and any required ancestor reaches the
+# final merge commit; exit 3 means auto-merge is enabled on an open PR and the
+# authenticated merge poll must keep watching with the same requirement; every
+# unreadable or contradictory result exits 1 and preserves the task work.
 # The shared gh-axi compatibility probe must pass immediately before mutation.
 # Usage: fm-pr-merge.sh <task-id> <pr-url> [--require-ancestor <sha>] [-- <extra gh-axi pr merge args>]
 set -eu
@@ -129,11 +130,19 @@ if [ ! -f "$META" ] || [ -L "$META" ]; then
   exit 1
 fi
 
-"$SCRIPT_DIR/fm-pr-check.sh" "$ID" "$URL"
+check_args=("$ID" "$URL")
+[ -z "$REQUIRED_ANCESTOR" ] \
+  || check_args+=(--require-ancestor "$REQUIRED_ANCESTOR")
+"$SCRIPT_DIR/fm-pr-check.sh" "${check_args[@]}"
 grep -qxF "pr=$URL" "$META" || {
   echo "error: PR metadata recording failed" >&2
   exit 1
 }
+if [ -n "$REQUIRED_ANCESTOR" ] \
+  && ! grep -qxF "pr_required_ancestor=$REQUIRED_ANCESTOR" "$META"; then
+  echo "error: required PR ancestry was not recorded for delayed verification" >&2
+  exit 1
+fi
 
 merge_args=()
 if ! caller_has_merge_method "$@"; then
@@ -178,17 +187,39 @@ GH_HOST="$PR_HOST" gh-axi pr merge "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" \
   "$@" >/dev/null || MERGE_STATUS=$?
 
 if ! PR_STATE_OUTPUT=$(GH_HOST="$PR_HOST" gh-axi api "/repos/$PR_OWNER/$PR_REPO/pulls/$PR_NUMBER" --jq \
-  '{state: .state, merged: .merged, merged_at: .merged_at, auto_merge_enabled: (.auto_merge != null)}'); then
+  '{state: .state, merged: .merged, merged_at: .merged_at, merge_commit_sha: .merge_commit_sha, auto_merge_enabled: (.auto_merge != null)}'); then
   echo "error: GitHub PR state could not be verified after the merge request; task work is preserved" >&2
   exit 1
 fi
 PR_STATE=$(state_field "$PR_STATE_OUTPUT" state) || PR_STATE=
 PR_MERGED=$(state_field "$PR_STATE_OUTPUT" merged) || PR_MERGED=
 PR_MERGED_AT=$(state_field "$PR_STATE_OUTPUT" merged_at) || PR_MERGED_AT=
+PR_MERGE_COMMIT=$(state_field "$PR_STATE_OUTPUT" merge_commit_sha) || PR_MERGE_COMMIT=
 PR_AUTO_MERGE=$(state_field "$PR_STATE_OUTPUT" auto_merge_enabled) || PR_AUTO_MERGE=
 
 case "$PR_STATE:$PR_MERGED:$PR_MERGED_AT" in
   closed:true:\"????-??-??T??:??:??Z\")
+    if [ -n "$REQUIRED_ANCESTOR" ]; then
+      if ! fm_pr_head_valid "$PR_MERGE_COMMIT"; then
+        echo "error: the final merge commit could not be read for the ancestry check; task work is preserved" >&2
+        exit 1
+      fi
+      if ! FINAL_ANCESTRY_OUTPUT=$(GH_HOST="$PR_HOST" gh-axi api \
+        "/repos/$PR_OWNER/$PR_REPO/compare/$REQUIRED_ANCESTOR...$PR_MERGE_COMMIT" \
+        --jq '{status: .status}'); then
+        echo "error: the final merged ancestry could not be verified; task work is preserved" >&2
+        exit 1
+      fi
+      FINAL_ANCESTRY_STATUS=$(state_field "$FINAL_ANCESTRY_OUTPUT" status) \
+        || FINAL_ANCESTRY_STATUS=
+      case "$FINAL_ANCESTRY_STATUS" in
+        ahead|identical) ;;
+        *)
+          echo "error: required commit $REQUIRED_ANCESTOR is not an ancestor of final merge commit $PR_MERGE_COMMIT; task work is preserved" >&2
+          exit 1
+          ;;
+      esac
+    fi
     printf 'merged: %s\n' "$URL"
     exit 0
     ;;
