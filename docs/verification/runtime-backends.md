@@ -222,7 +222,13 @@ FM_SEND_MARKER_HERDR_E2E=1 \
 
 ### Busy submit confirmation
 
-The busy-send path was measured on 2026-07-28 against Herdr 0.7.5 with Claude Code and Pi driven into a real long foreground tool wait inside an isolated lab session.
+The busy-send path was measured on 2026-07-28 against Herdr 0.7.5, protocol 16, on macOS aarch64.
+Claude Code 2.1.220 was launched as `claude --dangerously-skip-permissions`, and Pi 0.82.1 was launched as `pi`.
+`bin/fm-herdr-lab.sh name fmhsbd-final` produced the non-default `fm-lab-` session used for the run.
+The EXIT-trap teardown was installed before provision; provision used the lab helper, and every non-lifecycle Herdr command went through the guarded `bin/fm-herdr-lab.sh run <session> ...` path.
+Both harnesses were driven into a real `sleep 70` foreground tool wait with a long timeout before the send.
+One logical `fm_backend_herdr_send_text_submit` was issued with `retries=3`, `enter-sleep=0.4`, and `settle=0.3`.
+The queued-instruction count came from a 500-line capture grepped for a unique sentinel.
 
 Rejected signal: `agent get` counters are not an acceptance signal.
 Claude advanced `revision` from 1 to 2 during quiet work with no input at all, and did not advance it when it accepted a queued instruction; Pi moved neither `revision` nor `state_change_seq` in either situation.
@@ -242,7 +248,9 @@ ok - pi: exactly one queued instruction after one logical send (1)
 ok - dead shell: never reported as delivered (unknown)
 ```
 
-The deterministic cases are pinned in `tests/fm-backend-herdr.test.sh`; this record owns only the live evidence that the counters were rejected and the composer transition holds on real harnesses.
+Limitation: this live run measured commit `5f5d138` before the later pipeline fix rounds, so the current post-fix code was not measured live.
+The post-fix guarantees rest on the deterministic fixtures in `tests/fm-backend-herdr.test.sh` and `tests/fm-send-strict.test.sh` rather than on a reconstructed live rerun.
+This record owns only the live evidence that the counters were rejected and the composer transition holds on real harnesses.
 
 ### Native blocked event
 
