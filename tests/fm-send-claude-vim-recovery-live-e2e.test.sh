@@ -3,7 +3,7 @@
 # It uses a disposable Firstmate home and git project inside a guarded named
 # Herdr lab, never the live fleet pane. The helper's fleet-identity tripwire is
 # the lifecycle owner for every provision, call, and teardown.
-set -u
+set -eu
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
@@ -26,11 +26,12 @@ HERDR_LOG="$TMP_ROOT/recovery-herdr.log"
 ORIGINAL_PATH=$PATH
 PANE=
 TARGET=
+LAB_READY=0
 
 cleanup() {
   local rc=$?
   trap - EXIT
-  if ! "$LAB_HELPER" teardown "$SESSION"; then rc=1; fi
+  if [ "$LAB_READY" = 1 ] && ! "$LAB_HELPER" teardown "$SESSION"; then rc=1; fi
   rm -rf "$TMP_ROOT"
   exit "$rc"
 }
@@ -44,7 +45,9 @@ printf '# Disposable Claude Vim recovery verification\n' > "$PROJECT/README.md"
 git -C "$PROJECT" add README.md
 git -C "$PROJECT" commit -qm init
 
-"$LAB_HELPER" provision "$SESSION"
+"$LAB_HELPER" provision "$SESSION" \
+  || fail "guarded Herdr lab provisioning failed before live recovery verification"
+LAB_READY=1
 cat > "$FAKEBIN/herdr" <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
