@@ -64,8 +64,8 @@ Task metadata selects only that harness's verified signature, so output from one
 The exact selection contract and safety rationale live in [architecture](architecture.md#runtime-session-backends), while the signatures live in [the harness-adapters skill](../.agents/skills/harness-adapters/SKILL.md).
 
 `bin/fm-tmux-lib.sh` owns exact type-and-submit mechanics.
-It types a message once and retries Enter only until the composer clears.
-Only a proven empty composer is a positive delivery acknowledgement.
+It types a message once and retries only Enter while the composer remains provably pending.
+Outside the OpenCode exception below, only a proven empty composer is a positive delivery acknowledgement.
 Text left in established structure remains `pending`, text in ambiguous structure remains unproven, and unreadable or unsafe state remains unknown.
 `fm-send.sh` reports every unconfirmed verdict as a failure instead of retyping or assuming delivery.
 

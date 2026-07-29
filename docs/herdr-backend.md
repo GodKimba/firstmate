@@ -170,11 +170,12 @@ Text is typed once; only Enter is retried.
 On an idle or done native baseline, submit confirmation waits for `working` or `blocked` across a bounded polling window.
 The poll density bounds the residual possibility of an extremely fast complete turn; a missed transition can cause only a redundant Enter on an empty composer, never duplicate message text.
 
-On an already active or unreadable baseline, native state cannot distinguish an accepted instruction from an unsent one because the pane reads `working` either way, so confirmation reads the composer transition instead.
+On an already active baseline, native state cannot distinguish an accepted instruction from an unsent one because the pane reads `working` either way.
+An unreadable baseline provides no native acceptance signal either, so both cases use the composer transition instead.
 The adapter requires the composer to be empty before typing and pending afterward, which proves this send changed the box, and only then treats a drained composer after Enter as delivery.
 A non-empty or unreadable pre-send composer, or a post-send composer that is not provably pending, stops safely as unknown and sends no Enter at all.
 Requiring that ownership proof keeps unrelated pre-existing text from being drained and mistaken for this instruction.
-`revision` and `state_change_seq` were evaluated as acceptance signals and rejected on measured evidence; the adapter comment in `bin/backends/herdr.sh` records that evidence.
+`revision` and `state_change_seq` are deliberately not acceptance signals; [runtime backend verification](verification/runtime-backends.md#busy-submit-confirmation) owns the measured evidence.
 
 `pane read --lines N` can return empty output when N is below the viewport height.
 The capture owner requests at least 200 lines from Herdr and trims locally to the caller's bound.

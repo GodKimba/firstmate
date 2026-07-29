@@ -12,8 +12,9 @@
 # as "pending input" and the away-mode daemon deferred 100% of escalations for
 # 9.5 hours with no escape. The detector below strips the box borders before
 # deciding, so a bordered-but-empty composer is correctly seen as empty. The same
-# corrected detector backs the submit acknowledgement (a submit "landed" iff the
-# composer is empty afterward), fixing the parallel false "Enter swallowed".
+# corrected detector backs the normal submit acknowledgement (a submit "landed"
+# when the composer is empty afterward), fixing the parallel false "Enter
+# swallowed"; the OpenCode busy-queue exception is documented below.
 #
 # Ghost text (incident composer-robust): claude renders a predicted-next-prompt
 # "suggestion" as dim/faint text inside an otherwise-empty composer. A plain

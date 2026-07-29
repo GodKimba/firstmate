@@ -2094,8 +2094,8 @@ fm_backend_herdr_submit_composer_state() {  # <target> -> empty|pending|unknown
 
 # fm_backend_herdr_send_text_submit: type <text> into <target> once (raw,
 # unsubmitted, via send_literal), then submit with a named Enter key, retried
-# (Enter only, never retyped) until herdr's NATIVE agent-state (agent get)
-# confirms a real turn started. Verified hazard (herdr-verification-p2.md
+# (Enter only, never retyped) until native agent state or an ownership-proven
+# busy-composer transition confirms delivery. Verified hazard (herdr-verification-p2.md
 # "slash/$ autocomplete popup"): a `/`- or `$`-prefixed send opens a
 # completion popup within ~0.1s, exactly like tmux's claude/codex popups, so
 # the caller's <settle> before the first Enter matters here the same way it
@@ -2168,8 +2168,8 @@ fm_backend_herdr_submit_composer_state() {  # <target> -> empty|pending|unknown
 # silent one.
 #
 # Failure-mode analysis (the two directions the caller-facing contract must
-# not get wrong - see docs/herdr-backend.md "Native agent-state submit
-# confirmation" for the empirical timing behind this):
+# not get wrong - see docs/herdr-backend.md "Current transport behavior" for
+# the empirical timing behind this):
 #   - Slow transition: fm_backend_herdr_wait_for_working samples repeatedly
 #     across herdr's per-attempt confirmation budget (not once at the end), so a
 #     transition landing partway through a window is still caught before this

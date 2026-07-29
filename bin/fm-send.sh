@@ -16,6 +16,10 @@
 # contract). Because the token cannot exist before the request opened, no queued
 # generic command, unkeyed message, or earlier input can close it. Plain sends
 # are unchanged and still reach a busy worker's queue.
+# The token remains live only after confirmed delivery.
+# Every pre-submit failure or unconfirmed send revokes it, and a revocation
+# failure is reported loudly because retrying could otherwise duplicate answer
+# authority for one request.
 # Key support is backend-specific: tmux/herdr support Escape, Enter, and C-c;
 # Orca currently supports Enter and C-c only, and rejects Escape.
 #
@@ -213,8 +217,8 @@ MARK_FROM_FIRSTMATE=0
 PENDING_REPLY_CORR=
 PENDING_REPLY_CREATED=0
 TARGET_TASK_ID=
-# Set once a --decision answer token has been minted and recorded. Any path that
-# does not confirm delivery must revoke it, so an unconfirmed answer never
+# Set once a --decision answer token has been minted. Any later path that does
+# not confirm delivery must revoke its record, so an unconfirmed answer never
 # leaves standing authority a later resend could duplicate.
 DECISION_MINTED=0
 DECISION_KEY=
