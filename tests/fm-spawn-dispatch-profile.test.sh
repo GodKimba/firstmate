@@ -118,7 +118,7 @@ test_no_profile_keeps_claude_profile_defaults() {
   assert_meta_profile "$HOME_DIR/state/$id.meta" claude default default
 
   launch=$(cat "$LAUNCH_LOG")
-  expected="CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions \"\$('${ROOT}/bin/fm-operational-input.sh' encode launch-brief < '$HOME_DIR/data/$id/brief.md')\""
+  expected="FM_CREW_TASK='$id' CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions \"\$('${ROOT}/bin/fm-operational-input.sh' encode launch-brief < '$HOME_DIR/data/$id/brief.md')\""
   [ "$launch" = "$expected" ] || fail "no-profile claude launch did not use the canonical launch kind"$'\n'"expected: $expected"$'\n'"actual:   $launch"
   pass "no --model/--effort records defaults and types the claude launch instructions"
 }
@@ -204,7 +204,11 @@ test_active_dispatch_profile_allows_raw_launch_command() {
   assert_contains "$out" "spawned $id harness=custom-agent" "spawn did not report raw command harness"
   assert_meta_profile "$HOME_DIR/state/$id.meta" custom-agent default default
   launch=$(cat "$LAUNCH_LOG")
-  [ "$launch" = "custom-agent --flag" ] || fail "raw launch command changed"$'\n'"actual: $launch"
+  # The escape hatch keeps the operator's command body verbatim, but an unknown
+  # harness is still an ordinary worker, so it carries the same launch identity
+  # every other kind=ship launch does.
+  [ "$launch" = "FM_CREW_TASK='$id' custom-agent --flag" ] \
+    || fail "raw launch command changed"$'\n'"actual: $launch"
   pass "active crew-dispatch profile allows the raw launch-command escape hatch"
 }
 
@@ -366,6 +370,10 @@ test_pi_signed_threads_shared_pi_profile_and_preserves_identity() {
   launch=$(cat "$LAUNCH_LOG")
   assert_contains "$launch" "FM_PI_HARNESS=pi-signed pi-signed --model 'openai-codex/gpt-5.6-sol' --thinking 'max' -e" \
     "pi-signed launch did not share Pi's model, thinking, and extension semantics"
+  case "$launch" in
+    "FM_CREW_TASK='$id' "*) ;;
+    *) fail "pi-signed ship launch did not lead with the crewmate identity"$'\n'"actual: $launch" ;;
+  esac
   assert_contains "$launch" "fm-operational-input.sh' encode launch-brief" \
     "pi-signed launch lost the canonical typed launch-brief envelope"
   assert_present "$HOME_DIR/state/$id.pi-ext.ts" "pi-signed launch did not install Pi's turn-end extension"
@@ -415,6 +423,71 @@ test_pi_signed_persistent_secondmate_uses_pi_extensions_and_identity() {
   assert_contains "$launch" "FM_PI_HARNESS=pi-signed pi-signed -e '$sm/.pi/extensions/fm-primary-turnend-guard.ts' -e '$sm/.pi/extensions/fm-primary-pi-watch.ts'" \
     "pi-signed secondmate did not share Pi's primary extension launch shape"
   pass "pi-signed is a distinct persistent secondmate runtime with shared Pi supervision semantics"
+}
+
+# bin/fm-primary-scope-lib.sh owns the primary-vs-worker contract, but it can
+# only refuse a worker that actually carries the launch identity. These three
+# tests pin the stamping side of that contract at its single site.
+#
+# The stamp is applied to the assembled launch line for every kind=ship and
+# kind=scout dispatch, after per-harness flag resolution, so harness coverage
+# here guards against a future per-harness launch path skipping it. pi-signed is
+# asserted in its own case above; kimi is out of reach for this fixture because
+# it resolves a real installed executable and installs a turn-end hook.
+test_every_harness_stamps_the_crewmate_launch_identity() {
+  local rec id out status launch harness
+  for harness in claude codex opencode pi grok; do
+    id="profile-identity-$harness-z17"
+    rec=$(make_spawn_case "profile-identity-$harness" "$harness" "$id")
+    read_case_record "$rec"
+    out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+    status=$?
+    expect_code 0 "$status" "$harness ship spawn should succeed"
+    launch=$(cat "$LAUNCH_LOG")
+    case "$launch" in
+      "FM_CREW_TASK='$id' "*) ;;
+      *) fail "$harness ship launch did not lead with the crewmate identity"$'\n'"actual: $launch" ;;
+    esac
+  done
+  pass "every verified harness stamps the crewmate launch identity on a ship launch"
+}
+
+test_scout_stamps_the_crewmate_launch_identity() {
+  local rec id out status launch
+  id=profile-identity-scout-z18
+  rec=$(make_spawn_case profile-identity-scout claude "$id")
+  read_case_record "$rec"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --scout)
+  status=$?
+  expect_code 0 "$status" "scout spawn should succeed"
+  launch=$(cat "$LAUNCH_LOG")
+  case "$launch" in
+    "FM_CREW_TASK='$id' "*) ;;
+    *) fail "scout launch did not lead with the crewmate identity"$'\n'"actual: $launch" ;;
+  esac
+  pass "a scout carries the same crewmate launch identity as a ship"
+}
+
+test_secondmate_launch_clears_the_crewmate_identity() {
+  local rec id sm out status launch
+  id=profile-identity-secondmate-z19
+  rec=$(make_spawn_case profile-identity-secondmate codex "$id")
+  read_case_record "$rec"
+  sm="$CASE_DIR/secondmate-home"
+  make_seeded_secondmate_home "$sm" "$id"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$sm" --secondmate)
+  status=$?
+  expect_code 0 "$status" "secondmate spawn should succeed"
+  launch=$(cat "$LAUNCH_LOG")
+  # A secondmate runs its own coordinator session, so it must shed the identity
+  # rather than merely lack it: the pane that spawned it may already carry one.
+  case "$launch" in
+    "FM_CREW_TASK= "*) ;;
+    *) fail "secondmate launch did not clear the crewmate identity"$'\n'"actual: $launch" ;;
+  esac
+  pass "a persistent secondmate launch explicitly clears the crewmate identity"
 }
 
 test_batch_forwards_shared_profile_flags() {
@@ -471,6 +544,9 @@ test_pi_threads_model_and_max_effort
 test_pi_signed_threads_shared_pi_profile_and_preserves_identity
 test_pi_signed_missing_binary_refuses_before_endpoint_or_metadata
 test_pi_signed_persistent_secondmate_uses_pi_extensions_and_identity
+test_every_harness_stamps_the_crewmate_launch_identity
+test_scout_stamps_the_crewmate_launch_identity
+test_secondmate_launch_clears_the_crewmate_identity
 test_batch_forwards_shared_profile_flags
 test_active_dispatch_profile_does_not_block_secondmate_launch
 

@@ -46,12 +46,26 @@ pi -p -e .pi/extensions/fm-primary-turnend-guard.ts \
 Observed result: `PI_SMOKE_DONE`, with one session-start execution.
 The earlier `sendUserMessage` counterfactual raced the positional prompt; the current non-triggering `pi.sendMessage` custom message did not.
 The installed pi-signed 0.82.0 wrapper repeated the Pi primary extension and session-start path on 2026-07-27.
+
+The launch-identity scope was measured on 2026-07-28 with Pi 0.82.0 in an isolated Herdr lab session, against a trusted full clone of this repository whose plain-checkout shape satisfies the predicate's git-dir test, with an instrumented wrapper recording every spawn and a stand-in startup script recording every execution.
+
+| Launched as | Wrapper spawns | Startup executions | Observed result |
+| --- | --- | --- | --- |
+| Ship worker with a stamped identity | 0 | 0 | The worker ran its own instructions and finished them. |
+| Coordinator with no identity | 1 | 1 | The startup command ran once, as before. |
+| Secondmate coordinator with a cleared identity | 1 | 1 | The explicit empty assignment preserved coordinator behavior. |
+| Ship worker with the identity check removed | 1 | 1 | The counterfactual reached the startup command and abandoned its own instructions. |
+
+The protected default and named fleet sessions were unchanged throughout, and the lab session was removed through the guarded teardown with its fleet-state tripwire intact.
+pi-signed is not installed on the machine that ran this pass, so its identical adapter path is covered deterministically rather than live.
+
 [`runtime-backends.md`](runtime-backends.md#tmux) owns the shared-ancestry evidence and authoritative selection-marker boundary.
 
 Current deterministic and live entry points:
 
 ```sh
 tests/fm-sessionstart-nudge.test.sh
+tests/fm-spawn-dispatch-profile.test.sh
 tests/fm-captain-translation-contract.test.sh
 FM_PI_LIVE_E2E=1 tests/fm-pi-primary-live-e2e.test.sh
 FM_OPENCODE_LIVE_E2E=1 tests/fm-opencode-primary-live-e2e.test.sh
