@@ -35,15 +35,16 @@
 #      submitted or run head, or diverged from it, invalidates attribution.
 #      The run-step is AUTHORITATIVE: running/fixing -> working, ci -> working,
 #      awaiting_approval/fix_review -> parked (with gate findings), terminal
-#      passed/checks-passed -> done, failed/cancelled -> failed. EXCEPT: while
-#      the active step is ci, `axi status` alone cannot tell "still waiting on
-#      checks" from "checks green, waiting on merge" (see nm_ci_checks_state) -
-#      a ci-step log-tail check overrides working -> done once checks read
-#      green, so a green PR is never silently read as still-validating.
-#      Every green-ready verdict on no-mistakes work additionally requires
-#      positive check-run evidence from the forge (see ci_evidence): a green
-#      reading with zero, pending, failing, or unreadable checks stays
-#      non-ready instead of being reported as checks green.
+#      passed -> done, checks-passed -> done subject to the readiness policy
+#      below, and failed/cancelled -> failed. EXCEPT: while the active step is
+#      ci, `axi status` alone cannot tell "still waiting on checks" from "checks
+#      green, waiting on merge" (see nm_ci_checks_state) - a ci-step log-tail
+#      check overrides working -> done once checks read green, so a green PR is
+#      never silently read as still-validating.
+#      Every green-ready verdict for GitHub-hosted no-mistakes work additionally
+#      requires positive GitHub check-run evidence (see ci_evidence): a green
+#      reading with zero, pending, failing, or unreadable checks stays non-ready
+#      instead of being reported as checks green.
 #   3. Reconcile the status log: if its last line says needs-decision/blocked but
 #      the run-step shows the run moved on, the log is deterministically stale and
 #      is flagged superseded. A genuinely parked run plus a needs-decision log
@@ -87,7 +88,7 @@ case "$NM_TIMEOUT" in ''|*[!0-9]*) NM_TIMEOUT=10 ;; esac
 # history every call.
 FM_CREW_STATE_RUNS_LIMIT=${FM_CREW_STATE_RUNS_LIMIT:-200}
 case "$FM_CREW_STATE_RUNS_LIMIT" in ''|*[!0-9]*) FM_CREW_STATE_RUNS_LIMIT=200 ;; esac
-# Seconds allowed for the one forge check-run probe behind a green-ready
+# Seconds allowed for the one GitHub check-run probe behind a green-ready
 # verdict (ci_evidence). Kept separate from NM_TIMEOUT because it bounds a
 # network call to GitHub rather than a local CLI.
 FM_CREW_STATE_GH_TIMEOUT=${FM_CREW_STATE_GH_TIMEOUT:-20}
@@ -376,7 +377,8 @@ nm_ci_checks_state() {
 # --- forge check-run evidence ----------------------------------------------
 #
 # Positive evidence that this crew's PR really is green, required before any
-# green-ready verdict on no-mistakes work. Local signals alone cannot supply it:
+# green-ready verdict on GitHub-hosted no-mistakes work. Local signals alone
+# cannot supply it:
 # the ci log marker, the `checks-passed` outcome, and the crew's own status line
 # all read green during a zero-check period, so each is corroborated once
 # against the forge's own check-runs.
