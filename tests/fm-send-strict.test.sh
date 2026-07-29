@@ -262,6 +262,38 @@ test_unconfirmed_decision_answer_revokes_its_token() {
   pass "fm-send strict: an unconfirmed decision send revokes its answer token, so a resend cannot leave two tokens able to close one request"
 }
 
+test_secondmate_pre_submit_failure_revokes_its_decision_token() {
+  local dir fb home err rc log
+  dir="$TMP_ROOT/decision-secondmate-prepare"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); home=$(setup_home decision-secondmate-prepare); err="$dir/send.err"; log="$dir/tmux.log"; : > "$log"
+  fm_write_meta "$home/state/lane-d5.meta" "window=sess:fm-lane-d5" "kind=secondmate"
+  fm_decision_cutover_ensure_status "$home/state/lane-d5.status" \
+    || fail "could not establish a post-cutover secondmate send fixture"
+  printf 'needs-decision [key=red-test]: accept the red test, or keep fixing?\n' \
+    >> "$home/state/lane-d5.status"
+  cat > "$fb/mv" <<'SH'
+#!/usr/bin/env bash
+set -u
+last=
+for last do :; done
+case "$last" in
+  */.delivery-confirmed-*) exit 1 ;;
+esac
+exec /bin/mv "$@"
+SH
+  chmod +x "$fb/mv"
+
+  PATH="$fb:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_TMUX_LOG="$log" FM_SEND_SETTLE=0 \
+    "$SEND" lane-d5 --decision red-test "keep fixing" >/dev/null 2>"$err"; rc=$?
+  [ "$rc" -ne 0 ] || fail "a failed pending-reply delivery preparation must stop the decision send"
+  assert_contains "$(cat "$err")" "failed to durably prepare pending-reply delivery" \
+    "the pre-submit failure should identify pending-reply preparation"
+  [ ! -s "$home/state/lane-d5.decision-answers" ] \
+    || fail "a pre-submit secondmate failure left a live decision token behind:"$'\n'"$(cat "$home/state/lane-d5.decision-answers")"
+  [ ! -s "$log" ] || fail "a failed secondmate preparation still typed the decision answer"$'\n'"$(cat "$log")"
+  pass "fm-send strict: a pre-submit secondmate preparation failure revokes its decision token"
+}
+
 test_decision_answer_resend_leaves_exactly_one_live_token() {
   local dir fb home rc token count
   dir="$TMP_ROOT/decision-resend"; mkdir -p "$dir"
@@ -296,6 +328,7 @@ test_unset_fm_home_fails
 test_decision_answer_requires_an_open_request
 test_decision_answer_mints_a_correlated_token
 test_unconfirmed_decision_answer_revokes_its_token
+test_secondmate_pre_submit_failure_revokes_its_decision_token
 test_decision_answer_resend_leaves_exactly_one_live_token
 test_unresolvable_target_does_not_tmux_fallback
 test_prefixless_herdr_pane_id_fails

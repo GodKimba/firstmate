@@ -228,7 +228,23 @@ fm_send_revoke_unconfirmed_decision() {
   DECISION_MINTED=0
   if ! fm_decision_revoke_answer "$DECISION_ANSWERS" "$DECISION_TOKEN" "$DECISION_KEY" "$DECISION_INSTANCE"; then
     echo "error: could not revoke the unconfirmed decision answer token in $DECISION_ANSWERS; that token can still close decision '$DECISION_KEY'. Inspect it before answering again." >&2
+    return 1
   fi
+}
+fm_send_cleanup_unconfirmed_decision() {
+  local exit_status=$1
+  trap - EXIT
+  fm_send_revoke_unconfirmed_decision || exit_status=1
+  exit "$exit_status"
+}
+fm_send_arm_decision_cleanup() {
+  DECISION_MINTED=1
+  trap 'fm_send_cleanup_unconfirmed_decision "$?"' EXIT
+}
+fm_send_disarm_decision_cleanup() {
+  [ "$DECISION_MINTED" = 1 ] || return 0
+  DECISION_MINTED=0
+  trap - EXIT
 }
 if [ -n "$TARGET_SELECTOR" ] && [ -n "$TARGET_META" ] && [ "$(fm_meta_get "$TARGET_META" kind)" = secondmate ]; then
   MARK_FROM_FIRSTMATE=1
@@ -290,10 +306,10 @@ EOF
     DECISION_ANSWERS=$(fm_decision_answers_file "$DECISION_STATUS")
     DECISION_TOKEN=$(fm_decision_mint_answer_token "$DECISION_INSTANCE") \
       || { echo "error: could not mint a decision answer token" >&2; exit 1; }
+    fm_send_arm_decision_cleanup
     fm_decision_record_answer "$DECISION_ANSWERS" "$DECISION_TOKEN" "$DECISION_KEY" "$DECISION_INSTANCE" >/dev/null \
       || { echo "error: could not record the decision answer token in $DECISION_ANSWERS" >&2; exit 1; }
     MESSAGE=$(fm_decision_answer_message "$DECISION_KEY" "$DECISION_TOKEN" "$DECISION_TEXT")
-    DECISION_MINTED=1
   fi
   if [ "$MARK_FROM_FIRSTMATE" = 1 ]; then
     # Reuse an existing correlation id for recovery resends; otherwise create a
@@ -343,18 +359,17 @@ EOF
     if [ "$PENDING_REPLY_CREATED" = 1 ] && [ -n "$PENDING_REPLY_CORR" ]; then
       fm_pending_reply_discard_undelivered "$STATE" "$PENDING_REPLY_CORR" || true
     fi
-    fm_send_revoke_unconfirmed_decision
     echo "error: text not sent to $T ($TARGET_BACKEND send failed; tried $RESOLUTION_TRIED)" >&2
     exit 1
   fi
   case "$verdict" in
     empty)
+      fm_send_disarm_decision_cleanup
       ;;
     send-failed)
       if [ "$PENDING_REPLY_CREATED" = 1 ] && [ -n "$PENDING_REPLY_CORR" ]; then
         fm_pending_reply_discard_undelivered "$STATE" "$PENDING_REPLY_CORR" || true
       fi
-      fm_send_revoke_unconfirmed_decision
       echo "error: text not sent to $T ($TARGET_BACKEND send failed; tried $RESOLUTION_TRIED)" >&2
       exit 1
       ;;
@@ -362,7 +377,6 @@ EOF
       if [ "$PENDING_REPLY_CREATED" = 1 ] && [ -n "$PENDING_REPLY_CORR" ]; then
         fm_pending_reply_discard_undelivered "$STATE" "$PENDING_REPLY_CORR" || true
       fi
-      fm_send_revoke_unconfirmed_decision
       echo "error: text not submitted to $T (delivery unconfirmed; verdict=${verdict:-unknown}; tried $RESOLUTION_TRIED)" >&2
       exit 1
       ;;

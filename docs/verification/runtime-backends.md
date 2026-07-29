@@ -229,6 +229,8 @@ Claude advanced `revision` from 1 to 2 during quiet work with no input at all, a
 
 Active signal: the composer transition.
 On both harnesses the composer read pending while the message sat typed-but-unsubmitted, and drained within 100ms of an accepted Enter, while native state stayed `working` throughout and could not distinguish the two.
+The adapter binds that measured transition to its own send by requiring empty before typing, pending after typing, and empty after Enter.
+A non-empty or unreadable pre-send composer and an unreadable or non-pending post-send composer return unknown without any Enter.
 
 Observed guarantees for one logical send into an already-busy harness:
 

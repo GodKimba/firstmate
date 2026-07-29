@@ -2078,11 +2078,11 @@ fm_backend_herdr_composer_state() {  # <target> -> empty|pending|unknown
 # instruction Pi had actually accepted and queued - the exact ambiguity that
 # invited a duplicate resend (task fm-herdr-send-busy-duplicate).
 #
-# This never widens injection authority: it is only ever consulted AFTER this
-# adapter has already typed the text itself, so there is no "is it safe to
-# type here" decision left to make. The pre-injection guard used by the
-# away-mode daemon still routes through fm_backend_composer_state and is
-# unchanged.
+# This never widens the generic injection question. The explicit submit path
+# may use it before typing to prove an empty composer, but the pre-injection
+# guard used by the away-mode daemon still routes through
+# fm_backend_composer_state and FM_BACKEND_HERDR_COMPOSER_FOUND, so a working Pi
+# remains refused there.
 fm_backend_herdr_submit_composer_state() {  # <target> -> empty|pending|unknown
   local target=$1 cap
   fm_backend_herdr_parse_target "$target" || { printf 'unknown'; return 0; }
@@ -2135,20 +2135,21 @@ fm_backend_herdr_submit_composer_state() {  # <target> -> empty|pending|unknown
 # ALREADY working before Enter, agent-state cannot prove anything - it reads
 # "working" both for an accepted-and-queued instruction and for one still
 # sitting unsent in the composer. Confirmation therefore falls back to the
-# composer, but on the TRANSITION rather than the absolute state:
+# composer, but on an ownership-proving TRANSITION rather than the absolute
+# state:
 #
-#   1. Before the first Enter, require the composer to read 'pending'. That is
-#      positive proof this adapter's own literal text is in the box.
-#   2. After Enter, 'empty' means the box drained, so the busy harness took the
+#   1. Before typing, require the composer to read 'empty'.
+#   2. After typing, require it to read 'pending'. Together those reads prove
+#      this adapter's own literal text changed the box.
+#   3. After Enter, 'empty' means the box drained, so the busy harness took the
 #      instruction into its queue. 'pending' means it is still unsent and the
 #      Enter is retried (Enter only, never retyped).
 #
-# Requiring step 1 is what keeps step 2 honest. Without it, a busy pane whose
-# composer is empty for any other reason (the literal never landed, or the
-# harness consumed it some other way) would read 'empty' after Enter and be
-# reported as delivered - a false success for genuinely unsent text. When step
-# 1 cannot be proven, this reports 'unknown' and sends no Enter at all, so an
-# ambiguous busy pane stops safely instead of guessing.
+# Requiring steps 1 and 2 is what keeps step 3 honest. A pre-existing pending
+# composer belongs to someone else, while a post-send empty or unreadable
+# composer does not prove the literal landed. Either case reports 'unknown' and
+# sends no Enter at all, so an ambiguous busy pane stops safely instead of
+# guessing.
 #
 # Measured in the lab: the busy composer drains within 100ms of Enter on both
 # claude and pi, comfortably inside one <enter-sleep>, and neither harness
@@ -2192,16 +2193,16 @@ fm_backend_herdr_submit_composer_state() {  # <target> -> empty|pending|unknown
 fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep> <settle>
   local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 i=0 verdict baseline confirm_sleep
   fm_backend_herdr_parse_target "$target" || { printf 'unknown'; return 0; }
-  fm_backend_herdr_send_literal "$target" "$text" || { printf 'send-failed'; return 0; }
-  sleep "$settle"
   baseline=$(fm_backend_herdr_classify_submit_agent_status \
     "$(fm_backend_herdr_agent_status_raw "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE")")
+  if [ "$baseline" != idle ]; then
+    verdict=$(fm_backend_herdr_submit_composer_state "$target")
+    [ "$verdict" = empty ] || { printf 'unknown'; return 0; }
+  fi
+  fm_backend_herdr_send_literal "$target" "$text" || { printf 'send-failed'; return 0; }
+  sleep "$settle"
   confirm_sleep=$(fm_backend_herdr_submit_confirm_budget "$sleep_s")
   if [ "$baseline" != idle ]; then
-    # Busy or unreadable baseline: agent-state cannot distinguish accepted from
-    # unsent, so confirmation reads the composer transition instead. Anchor it
-    # first - without proof our own text is in the box, a later 'empty' proves
-    # nothing about THIS instruction.
     verdict=$(fm_backend_herdr_submit_composer_state "$target")
     [ "$verdict" = pending ] || { printf 'unknown'; return 0; }
   fi
@@ -2261,10 +2262,10 @@ fm_backend_herdr_classify_submit_agent_status() {  # <raw-agent_status>
 # failure. Deliberately skips fm_backend_herdr_target_ready's server-ensure
 # round trip (an extra `status --json` call) that fm_backend_herdr_busy_state
 # pays on every call: fm_backend_herdr_wait_for_working polls this in a tight
-# loop right after a caller has already parsed the target and confirmed the
-# server is live (e.g. fm_backend_herdr_send_text_submit, immediately after a
-# successful send-text), so re-checking server liveness on every poll would
-# only add latency without adding safety.
+# loop after a caller has already confirmed the server is live. The submit
+# path's single pre-send baseline may run before that confirmation, but an
+# unreadable result takes the composer path, whose capture performs the
+# readiness check before any text or Enter is sent.
 fm_backend_herdr_agent_status_raw() {  # <session> <pane_id>
   local session=$1 pane_id=$2 out
   out=$(fm_backend_herdr_cli "$session" agent get "$pane_id" 2>/dev/null) || { printf ''; return 0; }
