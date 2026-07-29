@@ -117,12 +117,6 @@ reject_target_overrides() {
   done
 }
 
-reject_target_overrides "$@" || exit 1
-if [ -n "$REQUIRED_ANCESTOR" ] && ! caller_requests_true_merge "$@"; then
-  echo "error: --require-ancestor requires an explicit true merge method" >&2
-  exit 1
-fi
-
 # Task-derived paths are constructed only after the canonical ID validation.
 META="$STATE/$ID.meta"
 if [ ! -f "$META" ] || [ -L "$META" ]; then
@@ -130,16 +124,37 @@ if [ ! -f "$META" ] || [ -L "$META" ]; then
   exit 1
 fi
 
+PERSISTED_ANCESTOR=
+if fm_pr_metadata_identity_parse "$META" 2>/dev/null \
+  && [ "$FM_PR_META_URL" = "$URL" ]; then
+  PERSISTED_ANCESTOR=$FM_PR_META_REQUIRED_ANCESTOR
+fi
+if [ -n "$PERSISTED_ANCESTOR" ]; then
+  if [ -n "$REQUIRED_ANCESTOR" ] \
+    && [ "$REQUIRED_ANCESTOR" != "$PERSISTED_ANCESTOR" ]; then
+    echo "error: the recorded PR ancestry requirement cannot be replaced on retry" >&2
+    exit 1
+  fi
+  REQUIRED_ANCESTOR=$PERSISTED_ANCESTOR
+fi
+
+reject_target_overrides "$@" || exit 1
+if [ -n "$REQUIRED_ANCESTOR" ] && ! caller_requests_true_merge "$@"; then
+  echo "error: --require-ancestor requires an explicit true merge method" >&2
+  exit 1
+fi
+
 check_args=("$ID" "$URL")
 [ -z "$REQUIRED_ANCESTOR" ] \
   || check_args+=(--require-ancestor "$REQUIRED_ANCESTOR")
 "$SCRIPT_DIR/fm-pr-check.sh" "${check_args[@]}"
-grep -qxF "pr=$URL" "$META" || {
+if ! fm_pr_metadata_identity_parse "$META" \
+  || [ "$FM_PR_META_URL" != "$URL" ]; then
   echo "error: PR metadata recording failed" >&2
   exit 1
-}
+fi
 if [ -n "$REQUIRED_ANCESTOR" ] \
-  && ! grep -qxF "pr_required_ancestor=$REQUIRED_ANCESTOR" "$META"; then
+  && [ "$FM_PR_META_REQUIRED_ANCESTOR" != "$REQUIRED_ANCESTOR" ]; then
   echo "error: required PR ancestry was not recorded for delayed verification" >&2
   exit 1
 fi

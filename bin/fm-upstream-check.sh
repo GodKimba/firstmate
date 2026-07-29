@@ -133,11 +133,11 @@ ORIGIN_REF="origin/$origin_branch"
 if [ "$DO_FETCH" = yes ]; then
   git -C "$FM_ROOT" fetch --quiet --prune --no-tags --no-prune-tags \
     --no-write-fetch-head --no-recurse-submodules --refmap= "$UPSTREAM_REMOTE" \
-    "+refs/heads/*:refs/remotes/$UPSTREAM_REMOTE/*" \
+    "+refs/heads/*:refs/remotes/$UPSTREAM_REMOTE/*" >/dev/null 2>&1 \
     || die "fetch from '$UPSTREAM_REMOTE' failed"
   git -C "$FM_ROOT" fetch --quiet --prune --no-tags --no-prune-tags \
     --no-write-fetch-head --no-recurse-submodules --refmap= origin \
-    "+refs/heads/*:refs/remotes/origin/*" \
+    "+refs/heads/*:refs/remotes/origin/*" >/dev/null 2>&1 \
     || die "fetch from 'origin' failed"
 fi
 
@@ -160,16 +160,16 @@ origin_tip=$(git -C "$FM_ROOT" rev-parse "$ORIGIN_REF")
 # --- divergence -------------------------------------------------------------
 
 echo "== remotes =="
-printf 'origin      %s  %s\n' "$ORIGIN_REF" "$(git -C "$FM_ROOT" remote get-url origin)"
-printf 'upstream    %s  %s\n' "$UPSTREAM_REF" "$(git -C "$FM_ROOT" remote get-url "$UPSTREAM_REMOTE")"
+printf 'origin        %s\n' "$ORIGIN_REF"
+printf 'upstream      %s\n' "$UPSTREAM_REF"
 printf 'upstream-tip  %s\n' "$upstream_tip"
 printf 'origin-tip    %s\n' "$origin_tip"
 echo
 
-counts=$(git -C "$FM_ROOT" rev-list --left-right --count "$UPSTREAM_REF...$ORIGIN_REF")
+counts=$(git -C "$FM_ROOT" rev-list --left-right --count "$upstream_tip...$origin_tip")
 upstream_only=$(printf '%s\n' "$counts" | awk '{print $1}')
 fork_only=$(printf '%s\n' "$counts" | awk '{print $2}')
-if ! merge_base=$(git -C "$FM_ROOT" merge-base "$ORIGIN_REF" "$UPSTREAM_REF"); then
+if ! merge_base=$(git -C "$FM_ROOT" merge-base "$origin_tip" "$upstream_tip"); then
   echo "fm-upstream-check: '$ORIGIN_REF' and '$UPSTREAM_REF' have no common ancestor" >&2
   echo "  Refusing because the configured remotes do not describe related histories." >&2
   echo "  Verify the upstream remote and branch, then re-run." >&2
@@ -193,15 +193,15 @@ echo
 # is called out here and not only in the skill.
 
 echo "== ancestry =="
-if git -C "$FM_ROOT" merge-base --is-ancestor "$UPSTREAM_REF" "$ORIGIN_REF"; then
-  echo "status  in-sync: $UPSTREAM_REF is an ancestor of $ORIGIN_REF"
+if git -C "$FM_ROOT" merge-base --is-ancestor "$upstream_tip" "$origin_tip"; then
+  echo "status  in-sync: the recorded upstream tip is an ancestor of the recorded origin tip"
   echo "action  nothing to prepare"
   echo
   echo "== summary =="
   echo "result  in-sync"
   exit 0
 fi
-echo "status  outstanding: $upstream_only upstream commit(s) are not in $ORIGIN_REF"
+echo "status  outstanding: $upstream_only upstream commit(s) are not in the recorded origin tip"
 echo "action  a true merge commit is required at landing so this count reaches 0"
 printf 'landing bin/fm-pr-merge.sh <task-id> <pr-url> --require-ancestor %s -- --merge\n' \
   "$upstream_tip"
@@ -214,7 +214,7 @@ echo
 echo "== conflict preview =="
 conflict_rc=0
 preview=$(git -C "$FM_ROOT" merge-tree --write-tree --name-only \
-  "$ORIGIN_REF" "$UPSTREAM_REF" 2>/dev/null) || conflict_rc=$?
+  "$origin_tip" "$upstream_tip" 2>/dev/null) || conflict_rc=$?
 
 conflicted_files=
 if [ "$conflict_rc" -eq 0 ]; then
@@ -230,7 +230,7 @@ elif [ "$conflict_rc" -eq 1 ]; then
 else
   echo "fm-upstream-check: conflict preview failed" >&2
   git -C "$FM_ROOT" merge-tree --write-tree --name-only \
-    "$ORIGIN_REF" "$UPSTREAM_REF" >/dev/null || true
+    "$origin_tip" "$upstream_tip" >/dev/null || true
   exit 2
 fi
 echo
@@ -240,12 +240,12 @@ echo
 # One block per upstream-only commit, oldest first, so the captain can accept,
 # adapt, or reject with the collision evidence in front of them.
 
-fork_files=$(git -C "$FM_ROOT" diff --name-only "$merge_base" "$ORIGIN_REF" | sort -u)
+fork_files=$(git -C "$FM_ROOT" diff --name-only "$merge_base" "$origin_tip" | sort -u)
 
 echo "== upstream-only commits =="
 printf 'reviewing %s commit(s), oldest first\n\n' "$upstream_only"
 
-git -C "$FM_ROOT" rev-list --reverse "$UPSTREAM_REF" "^$ORIGIN_REF" | while IFS= read -r sha; do
+git -C "$FM_ROOT" rev-list --reverse "$upstream_tip" "^$origin_tip" | while IFS= read -r sha; do
   short=$(git -C "$FM_ROOT" rev-parse --short "$sha")
   subject=$(git -C "$FM_ROOT" log -1 --format=%s "$sha")
   files=$(git -C "$FM_ROOT" show --pretty=format: --name-only "$sha" | grep . | sort -u || true)

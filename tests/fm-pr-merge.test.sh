@@ -807,6 +807,64 @@ test_required_ancestor_refuses_invalid_final_merge() {
   pass "immediate completion refuses when final merged ancestry was lost"
 }
 
+test_persisted_required_ancestor_controls_retries() {
+  local case_dir ancestor other head rc
+  ancestor=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  other=ffffffffffffffffffffffffffffffffffffffff
+  head=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+  case_dir=$(make_case persisted-required-ancestor)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" "$head" open false null true
+  : > "$case_dir/gh-axi.log"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/46 \
+    --require-ancestor "$ancestor" -- --merge \
+    > "$case_dir/seed.stdout" 2> "$case_dir/seed.stderr"
+  rc=$?
+  set -e
+  expect_code 3 "$rc" "persisted-ancestor: initial auto-merge request must remain monitored"
+
+  : > "$case_dir/gh-axi.log"
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/46 \
+    > "$case_dir/plain.stdout" 2> "$case_dir/plain.stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "persisted-ancestor: plain retry must not default to squash"
+  assert_grep 'requires an explicit true merge method' "$case_dir/plain.stderr" \
+    "persisted-ancestor: plain retry did not retain the merge-method guard"
+  assert_no_grep '^pr merge ' "$case_dir/gh-axi.log" \
+    "persisted-ancestor: plain retry reached a squash mutation"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/46 \
+    --require-ancestor "$other" -- --merge \
+    > "$case_dir/replace.stdout" 2> "$case_dir/replace.stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "persisted-ancestor: retry must not replace the recorded ancestor"
+  assert_grep 'recorded PR ancestry requirement cannot be replaced' "$case_dir/replace.stderr" \
+    "persisted-ancestor: conflicting retry did not identify the recorded requirement"
+
+  : > "$case_dir/gh-axi.log"
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/46 -- --merge \
+    > "$case_dir/retry.stdout" 2> "$case_dir/retry.stderr"
+  rc=$?
+  set -e
+  expect_code 3 "$rc" "persisted-ancestor: true-merge retry must remain monitored"
+  grep -qxF "api /repos/example/repo/compare/$ancestor...$head --jq {status: .status}" \
+    "$case_dir/gh-axi.log" \
+    || fail "persisted-ancestor: retry did not verify the recorded ancestor"
+  grep -qxF "pr merge 46 --repo example/repo --match-head-commit $head --merge" \
+    "$case_dir/gh-axi.log" \
+    || fail "persisted-ancestor: retry was not pinned to the verified head"
+  assert_grep "pr_required_ancestor=$ancestor" "$case_dir/state/task-x1.meta" \
+    "persisted-ancestor: retry changed the recorded requirement"
+  pass "persisted ancestry remains authoritative across merge retries"
+}
+
 test_records_pr_and_head_before_merging
 test_merge_failure_propagates_after_recording
 test_post_merge_command_failure_uses_confirmed_state
@@ -832,3 +890,4 @@ test_required_ancestor_refuses_rewritten_head
 test_required_ancestor_requires_true_merge
 test_required_ancestor_survives_delayed_auto_merge
 test_required_ancestor_refuses_invalid_final_merge
+test_persisted_required_ancestor_controls_retries

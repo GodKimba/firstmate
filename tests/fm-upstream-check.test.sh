@@ -27,6 +27,7 @@ set -u
 fm_git_identity fmtest fmtest@example.invalid
 
 CHECK="$ROOT/bin/fm-upstream-check.sh"
+REAL_GIT=$(command -v git)
 TMP_ROOT=$(fm_test_tmproot fm-upstream-check-tests)
 # fm_test_tmproot registers its cleanup trap inside a command substitution, so
 # the directory it just made is removed when that subshell exits. Suites that
@@ -347,6 +348,115 @@ git -C "$fork" show-ref --verify --quiet refs/tags/upstream-release \
 git -C "$fork" show-ref --verify --quiet refs/tags/local-only \
   || fail "fetch pruned a local-only tag"
 pass "fetch updates only remote-tracking branches despite hostile refspec and tag config"
+
+# --- case: report input remains bound to the recorded tips ------------------
+
+new_case
+fork="$FORK"
+up="$UPSTREAM_WORK"
+commit_file "$up" upstream-one.txt one "upstream: recorded change"
+push_upstream "$up"
+commit_file "$fork" fork-one.txt one "fork: recorded change"
+push_fork "$fork"
+git -C "$fork" fetch --quiet upstream
+git -C "$fork" fetch --quiet origin
+recorded_upstream=$(git -C "$fork" rev-parse refs/remotes/upstream/main)
+recorded_origin=$(git -C "$fork" rev-parse refs/remotes/origin/main)
+
+commit_file "$up" upstream-two.txt two "upstream: later change"
+push_upstream "$up"
+commit_file "$fork" fork-two.txt two "fork: later change"
+push_fork "$fork"
+git -C "$fork" fetch --quiet upstream \
+  '+refs/heads/main:refs/test/new-upstream'
+git -C "$fork" fetch --quiet origin \
+  '+refs/heads/main:refs/test/new-origin'
+new_upstream=$(git -C "$fork" rev-parse refs/test/new-upstream)
+new_origin=$(git -C "$fork" rev-parse refs/test/new-origin)
+git -C "$fork" update-ref refs/remotes/upstream/main "$recorded_upstream"
+git -C "$fork" update-ref refs/remotes/origin/main "$recorded_origin"
+
+fakebin="$TMP_ROOT/ref-move-fakebin"
+marker="$TMP_ROOT/ref-move.marker"
+mkdir -p "$fakebin"
+cat > "$fakebin/git" <<'SH'
+#!/usr/bin/env bash
+if [ ! -e "$FM_TEST_MOVED_MARKER" ]; then
+  case " $* " in
+    *" rev-list --left-right --count "*)
+      : > "$FM_TEST_MOVED_MARKER"
+      "$FM_TEST_REAL_GIT" -C "$FM_TEST_REPO" \
+        update-ref refs/remotes/upstream/main "$FM_TEST_NEW_UPSTREAM"
+      "$FM_TEST_REAL_GIT" -C "$FM_TEST_REPO" \
+        update-ref refs/remotes/origin/main "$FM_TEST_NEW_ORIGIN"
+      ;;
+  esac
+fi
+exec "$FM_TEST_REAL_GIT" "$@"
+SH
+chmod +x "$fakebin/git"
+
+rc=0
+out=$(FM_ROOT_OVERRIDE="$fork" FM_TEST_MOVED_MARKER="$marker" \
+  FM_TEST_REAL_GIT="$REAL_GIT" FM_TEST_REPO="$fork" \
+  FM_TEST_NEW_UPSTREAM="$new_upstream" FM_TEST_NEW_ORIGIN="$new_origin" \
+  PATH="$fakebin:$PATH" "$CHECK" --no-fetch 2>&1) || rc=$?
+expect_code 0 "$rc" "moving refs must not change the recorded analysis"
+assert_contains "$out" "recorded-upstream-tip $recorded_upstream" \
+  "analysis did not retain the recorded upstream tip"
+assert_contains "$out" "recorded-origin-tip   $recorded_origin" \
+  "analysis did not retain the recorded origin tip"
+assert_contains "$out" "upstream: recorded change" \
+  "analysis omitted work from the recorded upstream tip"
+assert_not_contains "$out" "upstream: later change" \
+  "analysis followed a moved upstream ref"
+assert_contains "$out" "upstream-only-commits  1" \
+  "analysis count did not stay bound to the recorded pair"
+pass "all analysis remains bound to the recorded immutable tips"
+
+# --- case: report never emits credential-bearing remote URLs ----------------
+
+new_case
+fork="$FORK"
+git -C "$fork" fetch --quiet upstream
+git -C "$fork" remote set-url origin \
+  'https://oauth2:origin-secret@example.invalid/fork/repo.git'
+git -C "$fork" remote set-url upstream \
+  'https://token-user:upstream-secret@example.invalid/owner/repo.git'
+
+out=$(run_check "$fork" --no-fetch)
+expect_code 0 "$(check_rc)" "credential-bearing remote report must still succeed"
+assert_contains "$out" "origin/main" "report omitted the origin ref name"
+assert_contains "$out" "upstream/main" "report omitted the upstream ref name"
+assert_not_contains "$out" "origin-secret" "report exposed origin credentials"
+assert_not_contains "$out" "upstream-secret" "report exposed upstream credentials"
+assert_not_contains "$out" "oauth2@" "report exposed origin URL userinfo"
+assert_not_contains "$out" "token-user@" "report exposed upstream URL userinfo"
+
+fakebin="$TMP_ROOT/fetch-fail-fakebin"
+mkdir -p "$fakebin"
+cat > "$fakebin/git" <<'SH'
+#!/usr/bin/env bash
+case " $* " in
+  *" fetch "*)
+    echo "fatal: unable to access 'https://token-user:upstream-secret@example.invalid/owner/repo.git'" >&2
+    exit 1
+    ;;
+esac
+exec "$FM_TEST_REAL_GIT" "$@"
+SH
+chmod +x "$fakebin/git"
+rc=0
+out=$(FM_ROOT_OVERRIDE="$fork" FM_TEST_REAL_GIT="$REAL_GIT" \
+  PATH="$fakebin:$PATH" "$CHECK" 2>&1) || rc=$?
+expect_code 2 "$rc" "failed credential-bearing fetch must refuse safely"
+assert_contains "$out" "fetch from 'upstream' failed" \
+  "failed fetch did not return the safe refusal"
+assert_not_contains "$out" "upstream-secret" \
+  "failed fetch exposed remote credentials"
+assert_not_contains "$out" "token-user@" \
+  "failed fetch exposed remote URL userinfo"
+pass "remote report names refs without exposing configured credentials"
 
 # --- case: unrelated remotes refuse instead of reporting conflicts ----------
 
