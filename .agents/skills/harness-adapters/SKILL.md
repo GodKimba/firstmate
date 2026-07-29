@@ -169,7 +169,7 @@ The shared symptom is a healthy-looking pane with no work in progress, so each a
 |---|---|
 | Busy-pane signature | Current turns match the harness-scoped `…[[:space:]]+\([0-9]+[smh]` shape after a rotating glyph and word, for example `✢ Pollinating… (16s · ...)`; legacy `esc to interrupt` remains accepted, while `Worked for 31s` is idle. |
 | Exit command | `/exit` |
-| Interrupt | single Escape |
+| Interrupt | Use the Claude Vim recovery procedure below when Vim mode is possible; a raw single Escape is safe only when Vim mode is excluded. |
 | Skill invocation | `/<skill>` (e.g. `/no-mistakes`) |
 
 ### Claude Vim interruption recovery

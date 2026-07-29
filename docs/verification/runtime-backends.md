@@ -92,7 +92,7 @@ Expected submit matrix: proven pending plus busy is accepted as queued; proven p
 ## Herdr
 
 The compatibility floor is protocol 14.
-The latest active verification uses Herdr 0.7.5 protocol 16 on macOS aarch64, with earlier 0.7.4, protocol-14, and 0.7.3 evidence retained where they define current behavior or fallbacks.
+The latest active verification uses Herdr 0.7.5 protocol 17 on macOS aarch64, with earlier 0.7.4, protocol-14, and 0.7.3 evidence retained where they define current behavior or fallbacks.
 
 Core read-only probes:
 
@@ -106,7 +106,7 @@ Observed current shapes:
 
 ```text
 herdr 0.7.5
-{"client":16,"server":16}
+{"client":17,"server":17}
 ["pane.output_matched","pane.agent_status_changed","pane.scroll_changed"]
 ```
 
@@ -217,7 +217,8 @@ Real captures verified these active distinctions:
 ### Fleet tripwire identity and Claude Vim recovery
 
 The named-session fleet tripwire and Claude Vim recovery were verified on 2026-07-29 against Herdr 0.7.5 protocol 17 and Claude Code 2.1.220.
-The live fleet session was `firstmate`, established by the caller's `HERDR_ENV`, `HERDR_SESSION`, `HERDR_SOCKET_PATH`, and `HERDR_PANE_ID` identity and an explicit pane round trip.
+The live fleet session was `firstmate`, established by `HERDR_ENV=1`, exact `HERDR_SOCKET_PATH`, exact `HERDR_PANE_ID`, and an explicit pane round trip.
+`HERDR_SESSION` was deliberately excluded from identity because lab callers may override it to select the disposable backend.
 The compatibility path for a running `default` session and the refusal for incomplete ambient identity are deterministic regressions in `tests/fm-herdr-lab.test.sh`.
 
 Exact commands:
