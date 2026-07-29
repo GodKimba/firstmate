@@ -30,6 +30,8 @@ WAKE_LOG="$TMP/wakes"
 SLEEP_LOG="$TMP/sleeps"
 wake() { printf '%s\n' "$1" >> "$WAKE_LOG"; return 0; }
 sleep() { printf 'SLEEP\n' >> "$SLEEP_LOG"; }
+crew_absorb_class() { printf '%s' "${FM_TEST_CREW_CLASS:-none}"; }
+fm_backend_agent_alive() { printf '%s' "${FM_TEST_ENDPOINT:-alive}"; }
 
 reset_state() {
   rm -f "$STATE_DIR"/*.meta "$STATE_DIR"/*.status "$STATE_DIR"/.wake-queue \
@@ -40,6 +42,8 @@ reset_state() {
   _event_cap_key=""
   _event_cap_ok=0
   _event_cap_fails=0
+  FM_TEST_CREW_CLASS=none
+  FM_TEST_ENDPOINT=alive
 }
 
 mkrec() {  # <pane_id> <status>
@@ -74,6 +78,7 @@ pass "handle_push_transition: enqueue failure cannot commit the Herdr dedupe mar
 reset_state
 fm_write_meta "$STATE_DIR/tk2.meta" "window=default:wG:pQ" "backend=herdr" "kind=ship"
 printf 'paused: waiting on the upstream release\n' > "$STATE_DIR/tk2.status"
+FM_TEST_CREW_CLASS=paused
 handle_push_transition herdr default "$(mkrec wG:pQ blocked)"
 if [ -e "$STATE_DIR/.wake-queue" ] && grep -q 'stale' "$STATE_DIR/.wake-queue"; then
   fail "a declared-pause crew must NOT be fast-escalated: $(cat "$STATE_DIR/.wake-queue")"
@@ -81,6 +86,36 @@ fi
 [ ! -s "$WAKE_LOG" ] || fail "a declared-pause crew must not wake the supervisor from the event fast-path"
 grep -q 'absorbed push' "$STATE_DIR/.watch-triage.log" 2>/dev/null || fail "the paused absorb should be logged to the triage log"
 pass "handle_push_transition: a declared-pause crew is absorbed (no fast wake), left to the poll loop's long cadence"
+
+# A later pause cannot hide an earlier open keyed decision.
+reset_state
+fm_write_meta "$STATE_DIR/tk2.meta" "window=default:wG:pQ" "backend=herdr" "kind=ship"
+printf 'needs-decision [key=maintenance-window]: approve the maintenance window\npaused: waiting for PostgreSQL maintenance completion\n' > "$STATE_DIR/tk2.status"
+FM_TEST_CREW_CLASS=paused
+handle_push_transition herdr default "$(mkrec wG:pQ blocked)"
+grep -q 'stale' "$STATE_DIR/.wake-queue" || fail "an open keyed decision was hidden by a later pause"
+[ -s "$WAKE_LOG" ] || fail "an open keyed decision did not wake from the visual blocked edge"
+pass "handle_push_transition: an open keyed decision outranks a later declared pause"
+
+# With no valid pause, the visual human-block edge remains immediate.
+reset_state
+fm_write_meta "$STATE_DIR/tk2.meta" "window=default:wG:pQ" "backend=herdr" "kind=ship"
+printf 'working: implementing the change\n' > "$STATE_DIR/tk2.status"
+handle_push_transition herdr default "$(mkrec wG:pQ blocked)"
+grep -q 'waiting on human' "$STATE_DIR/.wake-queue" || fail "a genuine visual blocker lost immediate escalation"
+pass "handle_push_transition: a genuine visual blocker without a pause still escalates immediately"
+
+# A pause never hides endpoint loss or an unreadable endpoint.
+for endpoint in dead unknown; do
+  reset_state
+  fm_write_meta "$STATE_DIR/tk2.meta" "window=default:wG:pQ" "backend=herdr" "kind=ship"
+  printf 'paused: waiting for PostgreSQL maintenance completion\n' > "$STATE_DIR/tk2.status"
+  FM_TEST_CREW_CLASS=paused
+  FM_TEST_ENDPOINT=$endpoint
+  handle_push_transition herdr default "$(mkrec wG:pQ blocked)"
+  grep -q 'stale' "$STATE_DIR/.wake-queue" || fail "a declared pause hid a $endpoint endpoint"
+done
+pass "handle_push_transition: dead and unknown endpoints are never masked by a pause"
 
 # --- event_wait_or_sleep: secondmate windows are excluded from the pane list --
 

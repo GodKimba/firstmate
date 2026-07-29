@@ -372,7 +372,7 @@ EOF
 # first sight of a non-terminal stale it returns "self" and the caller records a
 # timestamp marker; persistence is escalated by housekeeping's recheck, not here.
 classify_stale() {  # <window> <state>
-  local win=$1 state=$2 task last seen key instance summary rel="" all_seen=1 distilled=""
+  local win=$1 state=$2 task last seen key instance summary rel="" all_seen=1 distilled="" precedence current endpoint
   task=$(window_to_task "$win" "$state")
   while IFS=$'\t' read -r key instance summary || [ -n "$key" ]; do
     [ -n "$key" ] || continue
@@ -392,7 +392,21 @@ EOF
     return
   fi
   last=$(last_status_line "$state/$task.status")
-  if [ -n "$last" ] && status_is_paused "$last"; then
+  current=none
+  endpoint=unknown
+  if status_is_paused "$last"; then
+    # Away-mode persistence separately rechecks pane liveness before retaining a
+    # pause marker. Supply the status-confirmed pause here so the shared owner can
+    # still enforce open-decision/blocker precedence without a second policy.
+    current=paused
+    endpoint=alive
+  fi
+  precedence=$(crew_supervision_precedence "$state/$task.status" "$current" "$endpoint")
+  if [ "$precedence" = actionable ] && { [ -z "$last" ] || ! status_is_captain_relevant "$last"; }; then
+    printf 'escalate|stale + open structured decision or blocker'
+    return
+  fi
+  if [ "$precedence" = paused ]; then
     # A DECLARED external-wait pause (fm-classify-lib.sh): an idle pane is EXPECTED,
     # so this is not a wedge. The caller records a pause marker (long re-surface
     # cadence in housekeeping) rather than a wedge stale marker. Cheap: reuses the
@@ -401,7 +415,7 @@ EOF
     printf 'pause|paused (awaiting external), rechecked on a long cadence: %s' "$last"
     return
   fi
-  if [ -n "$last" ] && status_is_captain_relevant "$last"; then
+  if [ "$precedence" = actionable ]; then
     # Independent of free-text captain-relevant matching: a nonterminal progress
     # verb (working:) must never take the terminal stale path. Seen-status dedupe
     # must not permanently suppress or clear possible-wedge aging merely because

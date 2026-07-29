@@ -898,6 +898,54 @@ crew_absorb_class() {  # <id>
   printf 'none'
 }
 
+# Fold structured status, authoritative current state, and endpoint liveness into
+# one idle-supervision precedence verdict. Callers supply crew_absorb_class's
+# current verdict and the backend-neutral fm_backend_agent_alive verdict so this
+# owner stays independent of runtime adapters. Prints exactly one token:
+#   actionable - an open needs-decision/blocked event or current terminal status;
+#   working    - authoritative run-step/pane work outranks an old pause line;
+#   paused     - a current declared pause on a live endpoint, or a verified
+#                captain-held transfer whose agent has exited;
+#   none       - no safe absorb proof, including dead/unknown ordinary endpoints.
+# Open structured decisions outrank every later unrelated pause event. A plain
+# paused: declaration outranks a visual human-block label only while current
+# state still confirms paused and the endpoint is live; it never hides a dead or
+# unreadable endpoint.
+crew_supervision_precedence() {  # <status-file> <crew-absorb-class> <alive|dead|unknown>
+  local f=$1 current=${2:-none} endpoint=${3:-unknown} last verb key _verb _instance _summary
+  while IFS=$'\t' read -r key _verb _instance _summary || [ -n "$key" ]; do
+    [ -n "$key" ] || continue
+    printf 'actionable'
+    return
+  done <<EOF
+$(status_open_decisions "$f" --with-instance)
+EOF
+  last=$(last_status_line "$f")
+  if [ -n "$last" ] && status_is_captain_relevant "$last"; then
+    printf 'actionable'
+    return
+  fi
+  if [ "$current" = working ]; then
+    printf 'working'
+    return
+  fi
+  if status_is_paused "$last"; then
+    if [ "$current" = paused ] && [ "$endpoint" = alive ]; then
+      printf 'paused'
+    else
+      printf 'none'
+    fi
+    return
+  fi
+  verb=$(status_line_verb "$last")
+  if [ "$verb" = "${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}" ] \
+    && [ "$endpoint" = dead ]; then
+    printf 'paused'
+    return
+  fi
+  printf 'none'
+}
+
 # 0 if crew <id> shows POSITIVE evidence it is still working (crew_absorb_class
 # reports `working`). This is the "provably working" predicate at the heart of
 # absorb-only-when-provably-working: a no-verb turn-end or stale wake is absorbed
@@ -945,11 +993,9 @@ signal_crew_provably_working() {  # <file> ...
 # crew_is_provably_working, while the away-mode daemon applies its persistence
 # recheck.
 stale_is_terminal() {  # <window> <state>
-  local win=$1 state=$2 last f
+  local win=$1 state=$2 f
   f="$state/$(window_to_task "$win" "$state").status"
-  status_has_open_needs_decision "$f" && return 0
-  last=$(last_status_line "$f")
-  [ -n "$last" ] && status_is_captain_relevant "$last"
+  [ "$(crew_supervision_precedence "$f" none unknown)" = actionable ]
 }
 
 # Print "<file>\t<task>\t<last-line>" for every state/*.status whose last line is

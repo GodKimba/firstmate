@@ -313,6 +313,31 @@ test_crew_absorb_class_classifier() {
 # signal_crew_provably_working: a no-verb "signal:" wake is benign ONLY when EVERY
 # task it references is provably working; if any crew has stopped, or no task can be
 # resolved, it surfaces. Files map to ids by stripping .status / .turn-ended.
+test_crew_supervision_precedence_classifier() {
+  local dir state status
+  dir=$(make_case classify-supervision-precedence); state="$dir/state"; status="$state/task.status"
+  printf 'paused: waiting for PostgreSQL maintenance completion\n' > "$status"
+  [ "$(crew_supervision_precedence "$status" paused alive)" = paused ] \
+    || fail "a live authoritative pause lost precedence over visual human-block detection"
+  [ "$(crew_supervision_precedence "$status" paused dead)" = none ] \
+    || fail "a declared pause masked a dead endpoint"
+  [ "$(crew_supervision_precedence "$status" paused unknown)" = none ] \
+    || fail "a declared pause masked an unknown endpoint"
+  printf 'needs-decision [key=maintenance]: approve maintenance\npaused: waiting for PostgreSQL maintenance completion\n' > "$status"
+  [ "$(crew_supervision_precedence "$status" paused alive)" = actionable ] \
+    || fail "a later pause masked an open keyed decision"
+  printf 'blocked [key=database]: PostgreSQL maintenance failed\npaused [key=external]: waiting for maintenance completion\n' > "$status"
+  [ "$(crew_supervision_precedence "$status" paused alive)" = actionable ] \
+    || fail "a later unrelated pause masked an open blocker"
+  printf 'paused: waiting for PostgreSQL maintenance completion\n' > "$status"
+  [ "$(crew_supervision_precedence "$status" working alive)" = working ] \
+    || fail "an active run did not outrank an old pause"
+  printf 'working: implementation under way\n' > "$status"
+  [ "$(crew_supervision_precedence "$status" none alive)" = none ] \
+    || fail "an ordinary idle endpoint gained an unsafe absorb verdict"
+  pass "crew supervision precedence keeps decisions/blockers immediate, live pauses bounded, and dead/unknown endpoints visible"
+}
+
 test_signal_crew_provably_working_classifier() {
   local dir fakebin state
   dir=$(make_case signal-provably-working); fakebin="$dir/fakebin"; state="$dir/state"
@@ -640,7 +665,7 @@ test_nonterminal_stale_paused_absorbed_then_resurfaced() {
   # Phase A: a fresh pause (status file just written) under a high re-surface
   # threshold is absorbed - no wake, no wedge timer.
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
-    FM_FAKE_TMUX_CURRENT_COMMAND=zsh \
+    FM_FAKE_TMUX_CURRENT_COMMAND=claude \
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
@@ -664,7 +689,7 @@ test_nonterminal_stale_paused_absorbed_then_resurfaced() {
   : > "$out"
   printf 'idle, holding for upstream (token 2)' > "$capture_file"
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
-    FM_FAKE_TMUX_CURRENT_COMMAND=zsh \
+    FM_FAKE_TMUX_CURRENT_COMMAND=claude \
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_PAUSE_RESURFACE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
@@ -679,14 +704,11 @@ test_nonterminal_stale_paused_absorbed_then_resurfaced() {
   pass "a declared pause is absorbed on first sight, then re-surfaced as a recheck past the threshold, never wedge-escalated"
 }
 
-# A captain-held crew can leave a stable backend endpoint after its agent exits.
-# fm-crew-state then authoritatively reports stopped rather than paused, but the
-# confirmed-dead agent plus the declared wait or captain-held transfer must retain
-# bounded pause handling.
-# A still-live agent at an external-decision gate is the disconfirming case: it
-# must surface once, while the unchanged hash must not append the same wake on
-# every watcher re-arm.
-test_exited_declared_pause_is_bounded_but_live_gate_surfaces() {
+# A plain pause never masks a dead endpoint, while a verified captain-held transfer
+# remains the explicit exception that may outlive its worker. A still-live endpoint
+# with an open keyed decision also surfaces immediately even if a later pause event
+# exists, while the unchanged hash must not append the same wake on every re-arm.
+test_dead_pause_surfaces_but_captain_hold_and_open_decision_keep_precedence() {
   local dir state fakebin out capture_file statusf window key pane_hash sig pid back round wakes bare
   dir=$(make_case exited-declared-pause); state="$dir/state"; fakebin="$dir/fakebin"
   out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/held.status"
@@ -715,10 +737,8 @@ test_exited_declared_pause_is_bounded_but_live_gate_surfaces() {
   done
   wakes=$(awk -F '\t' -v w="$window" '$3 == "stale" && $4 == w { n++ } END { print n + 0 }' "$state/.wake-queue")
   bare=$(awk -F '\t' -v w="$window" '$3 == "stale" && $4 == w && $5 == "stale: " w { n++ } END { print n + 0 }' "$state/.wake-queue")
-  [ "$wakes" -le 1 ] || fail "dead-agent declared pause flooded $wakes stale wakes across six unchanged polls"
-  [ "$bare" -eq 0 ] || fail "dead-agent declared pause surfaced as $bare bare stopped-crew wakes"
-  grep -F "awaiting external" "$state/.wake-queue" >/dev/null \
-    || fail "dead-agent declared pause did not use the bounded paused recheck"
+  [ "$wakes" -eq 1 ] || fail "dead-agent declared pause should surface once, got $wakes wakes"
+  [ "$bare" -eq 1 ] || fail "dead-agent declared pause did not surface as one bare endpoint-loss wake"
 
   dir=$(make_case exited-captain-held); state="$dir/state"; fakebin="$dir/fakebin"
   out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/held.status"
@@ -748,7 +768,7 @@ test_exited_declared_pause_is_bounded_but_live_gate_surfaces() {
   window="test:fm-gate"
   printf 'idle external-decision gate\n' > "$capture_file"
   printf 'window=%s\nkind=ship\nharness=grok\nbackend=tmux\n' "$window" > "$state/gate.meta"
-  printf 'paused: waiting at an active external-decision gate\n' > "$statusf"
+  printf 'needs-decision [key=external-gate]: choose whether to continue through the external gate\npaused: waiting at an active external-decision gate\n' > "$statusf"
   sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-gate_status"
   key=$(printf '%s' "$window" | tr ':/.' '___')
   pane_hash=$(hash_text "idle external-decision gate")
@@ -764,11 +784,8 @@ test_exited_declared_pause_is_bounded_but_live_gate_surfaces() {
   pid=$!
   wait_for_exit "$pid" 40 || fail "live external-decision gate did not surface immediately"
 
-  # Re-arm with the stale timer already beyond the wedge threshold. This is the
-  # exact unchanged-hash fallback after the immediate surface: it must retain
-  # the pause cadence and discard any residual wedge timer instead of emitting
-  # a second possible-wedge wake.
-  printf '%s\n' $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
+  # Re-arm on the unchanged hash. The open-decision surface must stay deduped
+  # and must not be reclassified as either a pause or a possible wedge.
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
     FM_FAKE_TMUX_CURRENT_COMMAND=grok FM_FAKE_CREW_STATE='state: paused · source: status-log · waiting at an active external-decision gate' \
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=240 FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
@@ -778,14 +795,14 @@ test_exited_declared_pause_is_bounded_but_live_gate_surfaces() {
     reap "$pid"
     fail "live external-decision gate escalated on the wedge timer after its immediate surface: $(cat "$out")"
   fi
-  [ -e "$state/.paused-$key" ] || { reap "$pid"; fail "live external-decision gate lost its pause cadence marker"; }
-  [ ! -e "$state/.stale-since-$key" ] || { reap "$pid"; fail "live external-decision gate retained the wedge timer"; }
+  grep -F "possible wedge" "$out" >/dev/null && { reap "$pid"; fail "open decision was reclassified as a possible wedge"; }
+  [ ! -e "$state/.paused-$key" ] || { reap "$pid"; fail "open decision was reclassified as a pause"; }
   reap "$pid"
   wakes=$(awk -F '\t' -v w="$window" '$3 == "stale" && $4 == w { n++ } END { print n + 0 }' "$state/.wake-queue")
   bare=$(awk -F '\t' -v w="$window" '$3 == "stale" && $4 == w && $5 == "stale: " w { n++ } END { print n + 0 }' "$state/.wake-queue")
   [ "$wakes" -eq 1 ] || fail "live external-decision gate should surface once, got $wakes wakes"
   [ "$bare" -eq 1 ] || fail "live external-decision gate lost its immediate bare stale surface"
-  pass "exited declared-pause and captain-held panes use bounded pause cadence while a live decision gate still surfaces once"
+  pass "dead pauses surface, captain-held exits stay bounded, and open decisions outrank later pauses"
 }
 
 test_secondmate_paused_resurfaces_in_normal_mode() {
@@ -1422,6 +1439,7 @@ test_classifier_primitives
 test_crew_is_provably_working_classifier
 test_status_is_paused_classifier
 test_crew_absorb_class_classifier
+test_crew_supervision_precedence_classifier
 test_signal_crew_provably_working_classifier
 test_provably_working_signal_absorbed
 test_turn_ended_provably_working_absorbed
@@ -1435,7 +1453,7 @@ test_wedge_escalation_marks_demand_deep_inspection_after_threshold
 test_wedge_escalation_resets_when_pane_becomes_active
 test_nonterminal_stale_not_working_surfaced
 test_nonterminal_stale_paused_absorbed_then_resurfaced
-test_exited_declared_pause_is_bounded_but_live_gate_surfaces
+test_dead_pause_surfaces_but_captain_hold_and_open_decision_keep_precedence
 test_secondmate_paused_resurfaces_in_normal_mode
 test_secondmate_nonpaused_stale_remains_suppressed
 test_secondmate_unpause_clears_pause_tracking

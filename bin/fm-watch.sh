@@ -329,53 +329,42 @@ clear_pause_tracking() {  # <window>
   rm -f "$STATE/.stale-$key" "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key"
 }
 
-# Reconcile a declared pause or captain-held status with authoritative crew state.
-# Only a confidently dead ordinary crew may recover paused classification after
-# fm-crew-state has fallen back to stopped or unknown.
+# Reconcile structured status, authoritative current state, and endpoint liveness
+# through crew_supervision_precedence, the single owner of their ordering.
 pause_state_class() {  # <window> <task>
-  local win=$1 task=$2 key last recheck_file class agent_alive
+  local win=$1 task=$2 key recheck_file current endpoint verdict
   key=${win//:/_}
   key=${key//\//_}
   key=${key//./_}
-  last=$(last_status_line "$STATE/$task.status")
   recheck_file="$STATE/.paused-rechecked-$key"
-  if ! status_is_paused_or_captain_held "$last"; then
-    rm -f "$recheck_file"
-    crew_absorb_class "$task"
-    return
+  if [ "$(window_kind "$win")" = secondmate ]; then
+    endpoint=alive
+  else
+    endpoint=$(fm_backend_agent_alive "$(window_backend "$win")" "$win" 2>/dev/null) || endpoint=unknown
   fi
   if [ -e "$STATE/.paused-$key" ] && [ "$(age_of "$recheck_file")" -lt "$STALE_ESCALATE_SECS" ]; then
-    if [ "$(window_kind "$win")" != secondmate ]; then
-      agent_alive=$(fm_backend_agent_alive "$(window_backend "$win")" "$win" 2>/dev/null) || agent_alive=unknown
-      if [ "$agent_alive" != dead ]; then
-        rm -f "$recheck_file"
-        printf 'none'
-        return
-      fi
-    fi
-    printf 'paused'
-    return
-  fi
-  class=$(crew_absorb_class "$task")
-  if [ "$class" = working ]; then
-    rm -f "$recheck_file"
-    printf 'working'
-    return
-  fi
-  if [ "$(window_kind "$win")" != secondmate ]; then
-    agent_alive=$(fm_backend_agent_alive "$(window_backend "$win")" "$win" 2>/dev/null) || agent_alive=unknown
-    if [ "$agent_alive" != dead ]; then
-      rm -f "$recheck_file"
-      printf 'none'
+    verdict=$(crew_supervision_precedence "$STATE/$task.status" paused "$endpoint")
+    if [ "$verdict" = paused ]; then
+      printf 'paused'
       return
     fi
   fi
-  [ "$class" = none ] && [ "${agent_alive:-unknown}" = dead ] && class=paused
-  case "$class" in
-    paused) date +%s > "$recheck_file" ;;
-    *) rm -f "$recheck_file" ;;
+  current=$(crew_absorb_class "$task")
+  verdict=$(crew_supervision_precedence "$STATE/$task.status" "$current" "$endpoint")
+  case "$verdict" in
+    paused)
+      date +%s > "$recheck_file"
+      printf 'paused'
+      ;;
+    working)
+      rm -f "$recheck_file"
+      printf 'working'
+      ;;
+    *)
+      rm -f "$recheck_file"
+      printf 'none'
+      ;;
   esac
-  printf '%s' "$class"
 }
 
 surface_nonterminal_stale() {  # <window> <hash>

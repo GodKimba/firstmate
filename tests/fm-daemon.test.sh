@@ -164,7 +164,10 @@ test_stale_paused_classifies_pause() {
   printf '%s\n' "$pause_reason" > "$state/held-w9.status"
   out=$(FM_STATE_OVERRIDE="$state" classify_stale "sess:fm-held-w9" "$state")
   case "$out" in pause\|*) ;; *) fail "declared pause did not classify as pause: $out" ;; esac
-  pass "paused reasons with captain phrases remain pause-classified"
+  printf 'blocked [key=database]: maintenance failed\npaused [key=external]: waiting for maintenance completion\n' > "$state/held-w9.status"
+  out=$(FM_STATE_OVERRIDE="$state" classify_stale "sess:fm-held-w9" "$state")
+  case "$out" in escalate\|*) ;; *) fail "open blocker was hidden by a later pause: $out" ;; esac
+  pass "paused reasons stay bounded while open blockers retain precedence"
 }
 
 # handle_wake on a paused stale records a pause marker, drops any pre-existing wedge
