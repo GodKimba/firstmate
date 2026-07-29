@@ -463,8 +463,10 @@ test_kimi_falls_back_to_expanded_home_binary() {
   rc=$?
   expect_code 0 "$rc" "Kimi HOME fallback spawn should succeed"
   launch=$(cat "$CASE_DIR/launch.log")
-  [ "$launch" = "'$fallback' --auto" ] \
-    || fail "Kimi fallback did not expand HOME into an absolute executable: $launch"
+  # The fallback changes only the resolved executable path; it remains an
+  # ordinary worker launch and therefore keeps the same identity prefix.
+  [ "$launch" = "export FM_CREW_TASK='$id'; '$fallback' --auto" ] \
+    || fail "Kimi fallback lost its worker identity or absolute executable: $launch"
   pass "fm-spawn: Kimi fallback expands the active HOME"
 }
 

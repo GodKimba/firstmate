@@ -99,18 +99,9 @@ if [ "$CLAUDE_MODE" -eq 0 ] && [ "$STOP_HOOK_ACTIVE" = "true" ]; then
   exit 0
 fi
 
-# --- scope precisely to a PRIMARY checkout ----------------------------------
-# A genuinely-marked secondmate home runs its OWN primary firstmate session, so
-# force-INCLUDE it as a guarded primary whether treehouse leased it as a linked
-# worktree (git-dir != git-common-dir) or it is a git-cloned plain checkout. This
-# mirrors the cd-guard's intent that a secondmate's own session is a guarded
-# primary. Only an UNMARKED checkout (or one with an invalid marker) falls
-# through to the linked-worktree exemption: firstmate hands out crewmate/scout
-# task worktrees as genuine linked `git worktree`s (bin/fm-spawn.sh aborts
-# otherwise), whose git-dir lives under the parent repo's .git/worktrees/<name>
-# and differs from the common (shared) git-dir, while a main, non-worktree
-# checkout has the two equal. Child worktrees never carry the gitignored marker,
-# so this exempts them while guarding every real secondmate home.
+# --- scope precisely to a PRIMARY launch and checkout ------------------------
+# bin/fm-primary-scope-lib.sh owns the shared launch-identity refusal,
+# secondmate-marker inclusion, checkout-shape backstop, and required paths.
 fm_primary_scope_matches "$FM_ROOT" "$STATE" || exit 0
 
 # --- the actual predicate ----------------------------------------------------

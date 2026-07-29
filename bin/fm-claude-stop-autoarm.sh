@@ -7,9 +7,10 @@
 # deduplication across firings. It owns routine tokenless watcher continuity
 # for Claude primaries (main home and marked secondmate homes):
 #
-#   - Scope: only a genuine primary checkout (plain checkout or validly marked
-#     secondmate home) with AGENTS.md, bin/, and the effective state dir - the
-#     exact fm-turnend-guard.sh scope. Child crew/scout worktrees stay inert.
+#   - Scope: only a launch and checkout accepted by
+#     bin/fm-primary-scope-lib.sh - the exact fm-turnend-guard.sh scope. That
+#     shared header owns launch identity, marker inclusion, checkout-shape
+#     fallback, and required paths. Ordinary crew/scout sessions stay inert.
 #   - Identity: only when THIS session's harness ancestor holds state/.lock.
 #     When an existing numeric owner fails the shared harness-liveness predicate,
 #     the hook delegates guarded recovery to bin/fm-lock.sh and then re-verifies
@@ -67,7 +68,7 @@ EPOCH="$STATE/.claude-autoarm-epoch"
 # payload is read so a slow writer can never wedge on a full pipe.
 cat >/dev/null 2>&1 || true
 
-# --- scope: genuine primary checkout only -----------------------------------
+# --- scope: genuine primary launch and checkout only ------------------------
 fm_primary_scope_matches "$FM_ROOT" "$STATE" || exit 0
 
 # --- identity: only the lock-owning session's hooks may arm ------------------

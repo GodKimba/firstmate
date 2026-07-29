@@ -15,7 +15,7 @@ The Shared Predicate section of [`turnend-guard.md`](turnend-guard.md#shared-pre
 That same file is the single owner of the launch identity separating a coordinator from an ordinary crewmate, and its header owns the exact mechanics.
 `bin/fm-spawn.sh` stamps `FM_CREW_TASK` onto the launch command of every ordinary ship and scout dispatch at one site and clears it for a secondmate launch, so the predicate refuses a stamped worker before any checkout-shape test.
 A non-empty value is the identity, so the explicit empty assignment a secondmate coordinator carries preserves its own primary standing.
-The decision never depends on paths, prompts, lock outcomes, or pane names, which is what keeps these tracked primary adapters inert when the worker's own project is this repository and its checkout is trusted.
+That worker refusal never depends on paths, prompts, lock outcomes, or pane names, which is what keeps these tracked primary adapters inert when the worker's own project is this repository and its checkout is trusted.
 
 Before printing, the wrapper reads `state/.lock` and walks at most eight parents from its own pid, matching `bin/fm-lock.sh` and Pi's `lockOwnership()` ancestry depth.
 If the lock names a live pid in that ancestry, session start already ran in this harness session and the wrapper stays silent.
