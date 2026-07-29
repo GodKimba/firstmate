@@ -352,12 +352,11 @@ nm_effective_ci_step_status() {
 # so the last match is current): green with nothing red after it means CI is
 # green right now, still only waiting on merge/close.
 #
-# "no CI checks reported" is NOT green: it states the opposite, that the forge
-# has reported nothing at all. no-mistakes still enters its merge-monitor phase
-# on that reading and marks the change CI-ready, so firstmate PRs #7 and #8
-# (2026-07) were reported as checks green while GitHub held zero check-runs.
-# The marker is therefore not-ready here, and every remaining green reading is
-# separately corroborated against the forge by ci_green_ready_allowed below.
+# "no CI checks reported" is not positive green evidence for GitHub readiness:
+# no-mistakes still enters its merge-monitor phase when GitHub has reported
+# nothing at all. The provider-specific gate below owns whether that marker may
+# retain its previous ready behavior, so this log parser must not impose a
+# GitHub-shaped result on other providers.
 nm_ci_checks_state() {
   local run_id log_tail marker
   run_id=$(strip_quotes "$(nm_field id)")
