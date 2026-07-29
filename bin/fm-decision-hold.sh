@@ -574,7 +574,8 @@ command_hold() {
   if [ "$lookup_rc" -eq 0 ]; then
     state=$(show_field "$show" state)
     kind=$(show_field "$show" kind)
-    existing_title=$(show_field "$show" title)
+    existing_title=$(fm_tasks_axi_show_string "$show" title) \
+      || fail "existing captain hold $id has an unreadable or ambiguous title"
     [ "$state" != "done" ] || fail "captain decision $id is already durably resolved; use a new decision key for a new decision"
     [ "$kind" = captain ] || fail "existing backlog identity $id is not kind captain"
     [ "$existing_title" = "$title" ] || fail "existing captain hold $id has a different title"

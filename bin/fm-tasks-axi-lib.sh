@@ -20,6 +20,44 @@ fm_tasks_axi_version_parts() {
     head -1
 }
 
+# Decode one string field from tasks-axi's TOON detail output through the same
+# TOON package that owns tasks-axi's scalar presentation and escape syntax.
+# The field must appear exactly once at detail indentation, and malformed,
+# duplicate, non-string, or otherwise ambiguous output refuses.
+fm_tasks_axi_show_string() {  # <show-output> <field>
+  local output=$1 field=$2 cli
+  case "$field" in
+    ''|*[!A-Za-z0-9_]*) return 2 ;;
+  esac
+  cli=${REAL_TASKS_AXI:-$(command -v tasks-axi 2>/dev/null || true)}
+  [ -n "$cli" ] || return 2
+  # shellcheck disable=SC2016 # JavaScript template expressions are literal input to Node.
+  printf '%s\n' "$output" | node --input-type=module -e '
+    import { realpathSync, readFileSync } from "node:fs";
+    import { createRequire } from "node:module";
+    import { pathToFileURL } from "node:url";
+
+    const [cli, field] = process.argv.slice(1);
+    const require = createRequire(pathToFileURL(realpathSync(cli)));
+    const codec = await import(pathToFileURL(require.resolve("@toon-format/toon")));
+    const prefix = `  ${field}: `;
+    const matches = readFileSync(0, "utf8")
+      .split(/\r?\n/)
+      .filter((line) => line.startsWith(prefix));
+    if (matches.length !== 1) process.exit(2);
+    let decoded;
+    try {
+      decoded = codec.decode(`value: ${matches[0].slice(prefix.length)}`);
+    } catch {
+      process.exit(2);
+    }
+    if (decoded === null || typeof decoded !== "object"
+        || Array.isArray(decoded) || Object.keys(decoded).length !== 1
+        || typeof decoded.value !== "string") process.exit(2);
+    process.stdout.write(decoded.value);
+  ' "$cli" "$field" 2>/dev/null
+}
+
 fm_tasks_axi_compatible() {
   local parts major minor patch rest
   parts=$(fm_tasks_axi_version_parts) || return 1
