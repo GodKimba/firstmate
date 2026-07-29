@@ -951,16 +951,20 @@ EOF
     printf 'actionable'
     return
   fi
-  if [ "$current" = working ]; then
-    printf 'working'
-    return
-  fi
   if status_is_paused "$last"; then
-    if [ "$current" = paused ] && [ "$endpoint" = alive ]; then
+    if [ "$endpoint" != alive ]; then
+      printf 'none'
+    elif [ "$current" = working ]; then
+      printf 'working'
+    elif [ "$current" = paused ]; then
       printf 'paused'
     else
       printf 'none'
     fi
+    return
+  fi
+  if [ "$current" = working ]; then
+    printf 'working'
     return
   fi
   verb=$(status_line_verb "$last")

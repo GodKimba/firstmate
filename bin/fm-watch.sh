@@ -875,11 +875,19 @@ EOF
       if [ -e "$STATE/.paused-$key" ] || status_is_paused_or_captain_held "$last"; then
         h=$(cat "$STATE/.stale-$key" 2>/dev/null || true)
         [ -n "$h" ] || h=endpoint-unreadable
-        case "$(pause_state_class "$w" "$task")" in
-          paused)  handle_paused_stale "$w" "$task" "$h" ;;
-          working) clear_pause_state "$w" ;;
-          *)       surface_nonterminal_stale_once "$w" "$h" ;;
-        esac
+        if afk_present; then
+          if [ "$(cat "$STATE/.stale-surfaced-$key" 2>/dev/null || true)" != "$h" ]; then
+            fm_wake_append stale "$w" "stale: $w" || exit 1
+            printf '%s' "$h" > "$STATE/.stale-surfaced-$key"
+            wake "stale: $w"
+          fi
+        else
+          case "$(pause_state_class "$w" "$task")" in
+            paused)  handle_paused_stale "$w" "$task" "$h" ;;
+            working) clear_pause_state "$w" ;;
+            *)       surface_nonterminal_stale_once "$w" "$h" ;;
+          esac
+        fi
       fi
       continue
     fi
