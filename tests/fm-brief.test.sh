@@ -160,9 +160,11 @@ test_herdr_lab_contract_is_explicit_and_complete() {
     "Herdr lab brief missing the per-call trailing session contract"
   assert_grep "direct \`herdr server stop\`" "$brief" \
     "Herdr lab brief missing the forbidden server-global command list"
-  assert_grep "records the live default session before provisioning" "$brief" \
-    "Herdr lab brief missing the before tripwire"
-  assert_grep "verifies the identical fleet state after teardown" "$brief" \
+  assert_grep "identifies the live fleet session from the caller's explicit Herdr pane identity" "$brief" \
+    "Herdr lab brief missing the ambient fleet-identity contract"
+  assert_grep "compatibility fallback to a running \`default\` only outside Herdr" "$brief" \
+    "Herdr lab brief missing the safe default compatibility path"
+  assert_grep "verifies that exact session is unchanged after teardown" "$brief" \
     "Herdr lab brief missing the after tripwire"
   assert_no_grep "Herdr lifecycle declaration - NOT ENABLED" "$brief" \
     "Herdr lab brief retained the unguarded declaration"

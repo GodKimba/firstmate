@@ -12,7 +12,12 @@ FAKE_LOG="$TMP_ROOT/herdr.log"
 TRIPWIRES="$TMP_ROOT/tripwires"
 REAL_SLEEP=$(command -v sleep)
 mkdir -p "$FAKE_STATE"
-printf '%s\n' '/home/test/.config/herdr/herdr.sock' > "$FAKE_STATE/default-socket"
+printf '%s\n' default > "$FAKE_STATE/fleet-name"
+printf '%s\n' true > "$FAKE_STATE/fleet-default"
+printf '%s\n' true > "$FAKE_STATE/fleet-running"
+printf '%s\n' '/home/test/.config/herdr/herdr.sock' > "$FAKE_STATE/fleet-socket"
+printf '%s\n' '/home/test/.config/herdr' > "$FAKE_STATE/fleet-session-dir"
+printf '%s\n' 'w0:p0' > "$FAKE_STATE/fleet-pane"
 : > "$FAKE_LOG"
 
 cat > "$FAKEBIN/herdr" <<'SH'
@@ -27,19 +32,35 @@ for arg in "$@"; do
 done
 [ "${previous:-}" = --session ] || { echo "fake herdr: missing trailing --session" >&2; exit 90; }
 session=$last
-default_socket=$(cat "$state/default-socket")
+fleet_name=$(cat "$state/fleet-name")
+fleet_default=$(cat "$state/fleet-default")
+fleet_running=$(cat "$state/fleet-running")
+fleet_socket=$(cat "$state/fleet-socket")
+fleet_session_dir=$(cat "$state/fleet-session-dir")
+fleet_pane=$(cat "$state/fleet-pane")
 lab_state=absent
 [ ! -f "$state/$session" ] || lab_state=$(cat "$state/$session")
 
 case "$1 ${2:-}" in
   "session list")
-    if [ "$lab_state" = absent ] || [ "$lab_state" = deleted ]; then
-      jq -nc --arg socket "$default_socket" '{sessions:[{default:true,name:"default",running:true,socket_path:$socket}]}'
-    else
+    lab_json='[]'
+    if [ "$lab_state" != absent ] && [ "$lab_state" != deleted ]; then
       running=false
       [ "$lab_state" = running ] && running=true
-      jq -nc --arg socket "$default_socket" --arg name "$session" --argjson running "$running" \
-        '{sessions:[{default:true,name:"default",running:true,socket_path:$socket},{default:false,name:$name,running:$running,socket_path:("/tmp/" + $name + ".sock")}]}'
+      lab_json=$(jq -nc --arg name "$session" --argjson running "$running" \
+        '[{default:false,name:$name,running:$running,session_dir:("/tmp/" + $name),socket_path:("/tmp/" + $name + ".sock")}]')
+    fi
+    jq -nc --arg name "$fleet_name" --argjson default "$fleet_default" \
+      --argjson running "$fleet_running" --arg socket "$fleet_socket" \
+      --arg session_dir "$fleet_session_dir" --argjson labs "$lab_json" \
+      '{sessions:([{default:$default,name:$name,running:$running,session_dir:$session_dir,socket_path:$socket}] + $labs)}'
+    ;;
+  "pane get")
+    pane=${3:-}
+    if [ "$session" = "$fleet_name" ] && [ "$fleet_running" = true ] && [ "$pane" = "$fleet_pane" ]; then
+      jq -nc --arg pane "$pane" '{result:{pane:{pane_id:$pane}}}'
+    else
+      exit 94
     fi
     ;;
   "server --session")
@@ -83,6 +104,10 @@ run_with_fake() {
     FM_FAKE_HERDR_FAST_POLL="${FM_FAKE_HERDR_FAST_POLL:-}" \
     FM_FAKE_HERDR_DELETE_FAIL="${FM_FAKE_HERDR_DELETE_FAIL:-}" \
     FM_HERDR_LAB_STATE_DIR="$TRIPWIRES" \
+    HERDR_ENV="${FM_FAKE_AMBIENT_HERDR_ENV:-}" \
+    HERDR_SESSION="${FM_FAKE_AMBIENT_HERDR_SESSION:-}" \
+    HERDR_PANE_ID="${FM_FAKE_AMBIENT_HERDR_PANE_ID:-}" \
+    HERDR_SOCKET_PATH="${FM_FAKE_AMBIENT_HERDR_SOCKET_PATH:-}" \
     "$@"
 }
 
@@ -168,17 +193,111 @@ test_missing_tripwire_blocks_destruction() {
   pass "fm-herdr-lab: missing tripwire refuses teardown before any Herdr call"
 }
 
-test_changed_default_trips_after_teardown() {
+test_running_default_compatibility_tripwire() {
+  local name="fm-lab-default-compat-$$" snapshot
+  : > "$FAKE_LOG"
+  FM_FAKE_AMBIENT_HERDR_SESSION=untrusted-selection-only \
+    run_with_fake fm_herdr_lab_provision "$name" || fail "default compatibility provision failed"
+  snapshot=$(cat "$TRIPWIRES/$name.fleet-state.json")
+  [ "$(printf '%s' "$snapshot" | jq -r '.identity.source')" = default-compat ] \
+    || fail "outside-Herdr compatibility did not select the running default session"
+  [ "$(printf '%s' "$snapshot" | jq -r '.session.name')" = default ] \
+    || fail "default compatibility tripwire recorded the wrong fleet session"
+  run_with_fake fm_herdr_lab_teardown "$name" || fail "default compatibility teardown failed"
+  pass "fm-herdr-lab: outside Herdr, the historical running default session remains the fleet tripwire"
+}
+
+test_ambient_named_fleet_session_tripwire() {
+  local name="fm-lab-named-fleet-$$" snapshot
+  printf '%s\n' firstmate > "$FAKE_STATE/fleet-name"
+  printf '%s\n' false > "$FAKE_STATE/fleet-default"
+  printf '%s\n' true > "$FAKE_STATE/fleet-running"
+  printf '%s\n' '/home/test/.config/herdr/sessions/firstmate/herdr.sock' > "$FAKE_STATE/fleet-socket"
+  printf '%s\n' '/home/test/.config/herdr/sessions/firstmate' > "$FAKE_STATE/fleet-session-dir"
+  printf '%s\n' 'w2:p2P' > "$FAKE_STATE/fleet-pane"
+  : > "$FAKE_LOG"
+  FM_FAKE_AMBIENT_HERDR_ENV=1 FM_FAKE_AMBIENT_HERDR_SESSION=fm-lab-selection-only \
+    FM_FAKE_AMBIENT_HERDR_PANE_ID=w2:p2P \
+    FM_FAKE_AMBIENT_HERDR_SOCKET_PATH='/home/test/.config/herdr/sessions/firstmate/herdr.sock' \
+    run_with_fake fm_herdr_lab_provision "$name" || fail "ambient named-fleet provision failed"
+  snapshot=$(cat "$TRIPWIRES/$name.fleet-state.json")
+  [ "$(printf '%s' "$snapshot" | jq -r '.identity.source')" = ambient-pane ] \
+    || fail "ambient Herdr identity did not select the pane-proven path"
+  [ "$(printf '%s' "$snapshot" | jq -r '.identity.pane_id')" = w2:p2P ] \
+    || fail "ambient tripwire lost the proving pane identity"
+  [ "$(printf '%s' "$snapshot" | jq -r '.session.name')" = firstmate ] \
+    || fail "ambient tripwire did not preserve the named firstmate session"
+  FM_FAKE_AMBIENT_HERDR_ENV=1 FM_FAKE_AMBIENT_HERDR_SESSION=fm-lab-selection-only \
+    FM_FAKE_AMBIENT_HERDR_PANE_ID=w2:p2P \
+    FM_FAKE_AMBIENT_HERDR_SOCKET_PATH='/home/test/.config/herdr/sessions/firstmate/herdr.sock' \
+    run_with_fake fm_herdr_lab_teardown "$name" || fail "ambient named-fleet teardown failed"
+  printf '%s\n' default > "$FAKE_STATE/fleet-name"
+  printf '%s\n' true > "$FAKE_STATE/fleet-default"
+  printf '%s\n' '/home/test/.config/herdr/herdr.sock' > "$FAKE_STATE/fleet-socket"
+  printf '%s\n' '/home/test/.config/herdr' > "$FAKE_STATE/fleet-session-dir"
+  printf '%s\n' 'w0:p0' > "$FAKE_STATE/fleet-pane"
+  pass "fm-herdr-lab: a live named firstmate session is selected by explicit pane identity and preserved exactly"
+}
+
+test_ambient_tripwire_revalidates_pane_identity() {
+  local name="fm-lab-pane-revalidation-$$" snapshot status=0
+  printf '%s\n' firstmate > "$FAKE_STATE/fleet-name"
+  printf '%s\n' false > "$FAKE_STATE/fleet-default"
+  printf '%s\n' true > "$FAKE_STATE/fleet-running"
+  printf '%s\n' '/home/test/.config/herdr/sessions/firstmate/herdr.sock' > "$FAKE_STATE/fleet-socket"
+  printf '%s\n' '/home/test/.config/herdr/sessions/firstmate' > "$FAKE_STATE/fleet-session-dir"
+  printf '%s\n' 'w2:p2P' > "$FAKE_STATE/fleet-pane"
+  : > "$FAKE_LOG"
+  FM_FAKE_AMBIENT_HERDR_ENV=1 FM_FAKE_AMBIENT_HERDR_SESSION=fm-lab-selection-only \
+    FM_FAKE_AMBIENT_HERDR_PANE_ID=w2:p2P \
+    FM_FAKE_AMBIENT_HERDR_SOCKET_PATH='/home/test/.config/herdr/sessions/firstmate/herdr.sock' \
+    run_with_fake fm_herdr_lab_provision "$name" || fail "pane-revalidation provision failed"
+  snapshot=$(cat "$TRIPWIRES/$name.fleet-state.json")
+
+  printf '%s\n' 'w2:p3P' > "$FAKE_STATE/fleet-pane"
+  run_with_fake fm_herdr_lab_check_tripwire "$name" >/dev/null 2>&1 || status=$?
+  expect_code 1 "$status" "a replaced fleet pane must fail the tripwire"
+
+  printf '%s\n' 'w2:p2P' > "$FAKE_STATE/fleet-pane"
+  printf '%s' "$snapshot" | jq -c 'del(.identity.pane_id)' > "$TRIPWIRES/$name.fleet-state.json"
+  status=0
+  run_with_fake fm_herdr_lab_check_tripwire "$name" >/dev/null 2>&1 || status=$?
+  expect_code 1 "$status" "a missing recorded pane identity must fail the tripwire"
+
+  printf '%s' "$snapshot" > "$TRIPWIRES/$name.fleet-state.json"
+  run_with_fake fm_herdr_lab_teardown "$name" || fail "pane-revalidation teardown failed"
+  printf '%s\n' default > "$FAKE_STATE/fleet-name"
+  printf '%s\n' true > "$FAKE_STATE/fleet-default"
+  printf '%s\n' '/home/test/.config/herdr/herdr.sock' > "$FAKE_STATE/fleet-socket"
+  printf '%s\n' '/home/test/.config/herdr' > "$FAKE_STATE/fleet-session-dir"
+  printf '%s\n' 'w0:p0' > "$FAKE_STATE/fleet-pane"
+  pass "fm-herdr-lab: ambient tripwires revalidate the exact live pane and reject incomplete identity"
+}
+
+test_incomplete_ambient_identity_refuses_default_fallback() {
+  local name="fm-lab-incomplete-ambient-$$" status=0
+  : > "$FAKE_LOG"
+  FM_FAKE_AMBIENT_HERDR_ENV=1 FM_FAKE_AMBIENT_HERDR_SESSION=firstmate \
+    FM_FAKE_AMBIENT_HERDR_PANE_ID='' FM_FAKE_AMBIENT_HERDR_SOCKET_PATH='' \
+    run_with_fake fm_herdr_lab_provision "$name" >/dev/null 2>&1 || status=$?
+  expect_code 1 "$status" "incomplete ambient identity must not fall back to default"
+  assert_absent "$TRIPWIRES/$name.fleet-state.json" \
+    "incomplete ambient identity left a fleet ownership tripwire"
+  [ ! -e "$FAKE_STATE/$name" ] || fail "incomplete ambient identity started a lab server"
+  pass "fm-herdr-lab: incomplete ambient identity refuses rather than guessing or falling back"
+}
+
+test_changed_fleet_session_trips_after_teardown() {
   local name="fm-lab-tripwire-change-$$" status=0
   : > "$FAKE_LOG"
   run_with_fake fm_herdr_lab_provision "$name" || fail "tripwire fixture provision failed"
-  printf '%s\n' '/changed/default.sock' > "$FAKE_STATE/default-socket"
+  printf '%s\n' '/changed/default.sock' > "$FAKE_STATE/fleet-socket"
   run_with_fake fm_herdr_lab_teardown "$name" >/dev/null 2>&1 || status=$?
-  expect_code 1 "$status" "changed default fleet state must fail teardown"
+  expect_code 1 "$status" "changed fleet session must fail teardown"
   assert_present "$TRIPWIRES/$name.fleet-state.json" "failed tripwire should retain evidence"
-  printf '%s\n' '/home/test/.config/herdr/herdr.sock' > "$FAKE_STATE/default-socket"
+  printf '%s\n' '/home/test/.config/herdr/herdr.sock' > "$FAKE_STATE/fleet-socket"
   rm -f "$TRIPWIRES/$name.fleet-state.json"
-  pass "fm-herdr-lab: changed default fleet state is a hard failure"
+  pass "fm-herdr-lab: changed recorded fleet session is a hard failure"
 }
 
 test_stopped_owned_lab_can_reprovision() {
@@ -237,7 +356,11 @@ SH
 test_refuses_unsafe_names
 test_provision_run_and_guarded_teardown
 test_missing_tripwire_blocks_destruction
-test_changed_default_trips_after_teardown
+test_running_default_compatibility_tripwire
+test_ambient_named_fleet_session_tripwire
+test_ambient_tripwire_revalidates_pane_identity
+test_incomplete_ambient_identity_refuses_default_fallback
+test_changed_fleet_session_trips_after_teardown
 test_stopped_owned_lab_can_reprovision
 test_failed_delete_retains_tripwire
 test_timed_out_provision_cancels_late_launch

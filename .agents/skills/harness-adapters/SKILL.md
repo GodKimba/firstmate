@@ -169,8 +169,31 @@ The shared symptom is a healthy-looking pane with no work in progress, so each a
 |---|---|
 | Busy-pane signature | Current turns match the harness-scoped `…[[:space:]]+\([0-9]+[smh]` shape after a rotating glyph and word, for example `✢ Pollinating… (16s · ...)`; legacy `esc to interrupt` remains accepted, while `Worked for 31s` is idle. |
 | Exit command | `/exit` |
-| Interrupt | single Escape |
+| Interrupt | Use the Claude Vim recovery procedure below when Vim mode is possible; a raw single Escape is safe only when Vim mode is excluded. |
 | Skill invocation | `/<skill>` (e.g. `/no-mistakes`) |
+
+### Claude Vim interruption recovery
+
+A successful raw Escape send is not proof that Claude stopped.
+In Vim Insert mode, the first Escape only enters Normal mode, so sending a corrective line immediately afterward lets its first character become a Normal-mode command before the remainder enters the composer.
+The result can be a truncated instruction that the ordinary submit verifier correctly sees as accepted, because transport confirmation cannot prove that Vim interpreted every typed byte as text.
+
+Use `FM_HOME=<this-firstmate-home> bin/fm-send.sh <task-selector> --recover-claude-vim` instead of a raw `--key Escape` when interrupting a Claude worker that may use Vim mode.
+The command sends at most two targeted Escapes and succeeds only after a fresh `Interrupted · What should Claude do instead?` render while the composer retains its proven empty or pending state.
+When the composer is empty, the command requires a positive initial Insert-mode marker, proves interruption, restores and re-verifies Insert mode, then prints `interrupted`; send the corrective line normally only after that result.
+When text is already pending, the command preserves it without typing or deleting one byte, waits for interruption proof, and continues with Enter only; it prints `submitted-pending` only after the backend proves the new turn started.
+Any unreadable composer, missing fresh proof, unsupported integration, or inconclusive Enter-only submission is a refusal, not permission to retype or resend.
+
+The applicability review is explicit so this recovery contract cannot silently spread beyond its evidence.
+
+| Axis | Result |
+|---|---|
+| Claude on tmux | Supported through the shared tmux composer classifier and Enter-only submit core. |
+| Claude on Herdr | Supported through the shared Herdr composer locator, fresh pane capture, native post-Enter agent-state proof, and no `send-text` call on pending recovery. |
+| Claude on Zellij | Unaffected and refused before input because Zellij has no positive shared composer-state read. |
+| Claude on Orca | Unaffected and refused before input because Orca exposes no Escape primitive. |
+| Claude on cmux | Unaffected and refused before input because this bare Claude Vim composer and interruption proof have not been validated there. |
+| Codex, OpenCode, Pi, pi-signed, Grok, and Kimi | Unaffected and refused before backend input because the command requires recorded `harness=claude`; their existing interrupt keys and ordinary sends do not change. |
 
 First launch in a fresh worktree, or first ever on a machine, may show a trust or bypass-permissions confirmation.
 After every spawn, peek the pane within about 20 seconds.

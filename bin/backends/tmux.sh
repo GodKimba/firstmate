@@ -54,6 +54,15 @@ fm_backend_tmux_send_text_submit() {  # <target> <text> <retries> <enter-sleep> 
   fm_tmux_submit_core "$@"
 }
 
+# Submit text already present in the composer without typing one byte.
+# Used only after Claude Vim recovery has positively proved interruption and
+# re-verified that the pending composer survived every Escape unchanged in
+# semantic state. The shared tmux submit owner sends one Enter, polls without
+# further input, and accepts only a positively empty composer.
+fm_backend_tmux_submit_pending() {  # <target> <retries> <enter-sleep>
+  fm_tmux_submit_pending_strict "$@"
+}
+
 # fm_backend_tmux_container_ensure: reuse the current tmux session when
 # firstmate itself runs inside tmux, else ensure a dedicated detached
 # "firstmate" session exists. Mirrors fm-spawn.sh's container-ensure block;

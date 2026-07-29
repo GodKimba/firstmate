@@ -8,6 +8,17 @@
 #   tmux window search, because a "successful" send to the wrong endpoint is
 #   worse than a loud failure.
 # Special keys instead of text: fm-send.sh <target> --key Enter
+# Verified Claude Vim recovery: fm-send.sh <task-selector> --recover-claude-vim
+# The recovery command is intentionally separate from raw --key Escape. It
+# sends at most two targeted Escapes, requires a fresh rendered
+# `Interrupted · What should Claude do instead?` proof before succeeding, and
+# refuses if the composer becomes unreadable or changes empty/pending state.
+# If text was already pending, it preserves those bytes by never typing or
+# deleting anything and continues with Enter only after interruption proof.
+# If the composer was empty, it requires an initial Insert-mode marker and
+# restores proven Insert mode after interruption before a corrective line may be
+# sent normally. Only recorded Claude tasks on tmux or Herdr support this
+# stronger contract; every other harness/backend is refused before a key lands.
 #
 # --decision <key> answers one open keyed decision. It requires a task selector,
 # refuses unless that exact decision is open right now in the task's status
@@ -267,7 +278,174 @@ fi
 # send implementation. A failed backend send is still surfaced below as a hard
 # error with the attempted resolution attached.
 
-if [ "${1:-}" = "--key" ]; then
+fm_send_claude_interrupt_render_present() {  # <capture>
+  printf '%s\n' "$1" | awk '
+    function owned_interrupt(line, normalized) {
+      normalized = line
+      sub(/^[[:space:]]+/, "", normalized)
+      sub(/[[:space:]]+$/, "", normalized)
+      gsub(/[[:space:]]+/, " ", normalized)
+      return normalized == "⎿ Interrupted · What should Claude do instead?"
+    }
+    function composer(line) {
+      return line ~ /^[[:space:]]*([│┃║|][[:space:]]*)?❯([[:space:]]|$)/
+    }
+    function boundary_space(line, normalized) {
+      normalized = line
+      sub(/^[[:space:]]+/, "", normalized)
+      sub(/[[:space:]]+$/, "", normalized)
+      return normalized == "" || normalized ~ /^[-+─━═╭╮┌┐╔╗┏┓]+$/
+    }
+    {
+      if (owned_interrupt($0)) {
+        candidate = 1
+        gap = 0
+        next
+      }
+      if (composer($0)) {
+        proof = candidate && gap <= 3
+        candidate = 0
+        next
+      }
+      if (candidate) {
+        if (!boundary_space($0) || gap >= 3) candidate = 0
+        else gap++
+      }
+    }
+    END { exit(proof ? 0 : 1) }
+  '
+}
+
+fm_send_claude_insert_footer_present() {
+  printf '%s\n' "$1" | awk '
+    /[^[:space:]]/ { last = $0 }
+    END { exit(last ~ /^[[:space:]]*-- INSERT --[[:space:]]*$/ ? 0 : 1) }
+  '
+}
+
+fm_send_recover_claude_vim() {
+  local initial before after state latest_state verdict
+  local attempt=0 poll retries sleep_s proof=0
+  [ -n "$TARGET_SELECTOR" ] && [ -n "$TARGET_META" ] || {
+    echo "error: --recover-claude-vim requires a recorded task selector" >&2
+    return 1
+  }
+  [ "$TARGET_HARNESS" = claude ] || {
+    echo "error: --recover-claude-vim is only valid for a recorded Claude task (target harness=${TARGET_HARNESS:-unknown})" >&2
+    return 1
+  }
+  fm_backend_supports_claude_vim_recovery "$TARGET_BACKEND" || {
+    echo "error: --recover-claude-vim is unsupported on backend '$TARGET_BACKEND'; no key was sent" >&2
+    return 1
+  }
+  initial=$(fm_backend_composer_state "$TARGET_BACKEND" "$T" "$EXPECTED_LABEL" 2>/dev/null)
+  case "$initial" in
+    empty|pending) ;;
+    *)
+      echo "error: Claude Vim recovery refused because the composer is not positively empty or pending (state=${initial:-unknown}); no key was sent" >&2
+      return 1
+      ;;
+  esac
+  before=$(fm_backend_capture "$TARGET_BACKEND" "$T" 80 "$EXPECTED_LABEL" 2>/dev/null) || {
+    echo "error: Claude Vim recovery could not read the pre-interrupt pane; no key was sent" >&2
+    return 1
+  }
+  if fm_send_claude_interrupt_render_present "$before"; then
+    echo "error: Claude Vim recovery found a current Interrupted render before any Escape; refusing ambiguous proof" >&2
+    return 1
+  fi
+  if [ "$initial" = empty ] && ! fm_send_claude_insert_footer_present "$before"; then
+    echo "error: empty-composer Claude Vim recovery requires a positive Insert-mode marker before any key is sent" >&2
+    return 1
+  fi
+  sleep_s=${FM_SEND_INTERRUPT_SLEEP:-0.15}
+  while [ "$attempt" -lt 2 ]; do
+    if ! fm_backend_send_key "$TARGET_BACKEND" "$T" Escape "$EXPECTED_LABEL"; then
+      echo "error: Claude Vim recovery could not send targeted Escape $((attempt + 1))" >&2
+      return 1
+    fi
+    latest_state=unknown
+    poll=0
+    while [ "$poll" -lt 4 ]; do
+      sleep "$sleep_s"
+      after=$(fm_backend_capture "$TARGET_BACKEND" "$T" 80 "$EXPECTED_LABEL" 2>/dev/null) || {
+        echo "error: Claude Vim recovery lost pane readability after Escape $((attempt + 1)); refusing further keys" >&2
+        return 1
+      }
+      state=$(fm_backend_composer_state "$TARGET_BACKEND" "$T" "$EXPECTED_LABEL" 2>/dev/null)
+      latest_state=$state
+      case "$state" in
+        "$initial"|unknown) ;;
+        *)
+          echo "error: Claude Vim recovery observed the composer change from '$initial' to '${state:-unknown}'; refusing further keys" >&2
+          return 1
+          ;;
+      esac
+      if fm_send_claude_interrupt_render_present "$after"; then
+        [ "$state" = "$initial" ] || {
+          echo "error: Claude rendered Interrupted but the composer postcondition is ambiguous (state=${state:-unknown})" >&2
+          return 1
+        }
+        proof=1
+        break
+      fi
+      poll=$((poll + 1))
+    done
+    [ "$proof" -eq 1 ] && break
+    [ "$latest_state" = "$initial" ] || {
+      echo "error: Claude Vim recovery could not re-verify the '$initial' composer after Escape $((attempt + 1)); refusing further keys" >&2
+      return 1
+    }
+    attempt=$((attempt + 1))
+  done
+  [ "$proof" -eq 1 ] || {
+    echo "error: Claude Vim recovery sent two targeted Escapes without fresh Interrupted proof; composer remains '$initial' and no Enter was sent" >&2
+    return 1
+  }
+
+  if [ "$initial" = pending ]; then
+    retries=${FM_SEND_RETRIES:-3}
+    verdict=$(fm_backend_submit_pending "$TARGET_BACKEND" "$T" "$retries" "${FM_SEND_SLEEP:-0.4}" "$EXPECTED_LABEL") || verdict=send-failed
+    [ "$verdict" = empty ] || {
+      echo "error: Claude was interrupted, but Enter-only continuation of the preserved pending composer is unconfirmed (verdict=${verdict:-unknown}); text was not retyped" >&2
+      return 1
+    }
+    printf 'submitted-pending\n'
+  else
+    if ! fm_backend_send_key "$TARGET_BACKEND" "$T" i "$EXPECTED_LABEL"; then
+      echo "error: Claude was interrupted, but recovery could not restore Insert mode for safe redirection" >&2
+      return 1
+    fi
+    poll=0
+    while [ "$poll" -lt 4 ]; do
+      sleep "$sleep_s"
+      after=$(fm_backend_capture "$TARGET_BACKEND" "$T" 80 "$EXPECTED_LABEL" 2>/dev/null) || {
+        echo "error: Claude was interrupted, but Insert-mode restoration became unreadable" >&2
+        return 1
+      }
+      state=$(fm_backend_composer_state "$TARGET_BACKEND" "$T" "$EXPECTED_LABEL" 2>/dev/null)
+      if fm_send_claude_insert_footer_present "$after" && [ "$state" = empty ]; then
+        printf 'interrupted\n'
+        return 0
+      fi
+      case "$state" in
+        empty|unknown) ;;
+        *)
+          echo "error: Claude was interrupted, but Insert-mode restoration changed the empty composer to '$state'; refusing redirection" >&2
+          return 1
+          ;;
+      esac
+      poll=$((poll + 1))
+    done
+    echo "error: Claude was interrupted, but Insert mode was not positively restored; refusing redirection" >&2
+    return 1
+  fi
+}
+
+if [ "${1:-}" = "--recover-claude-vim" ]; then
+  [ "$#" -eq 1 ] || { echo "error: --recover-claude-vim accepts no text; it preserves any existing composer bytes" >&2; exit 1; }
+  fm_send_recover_claude_vim || exit 1
+elif [ "${1:-}" = "--key" ]; then
   if ! fm_backend_send_key "$TARGET_BACKEND" "$T" "$2" "$EXPECTED_LABEL"; then
     echo "error: key '$2' not sent to $T ($TARGET_BACKEND send failed; tried $RESOLUTION_TRIED)" >&2
     exit 1

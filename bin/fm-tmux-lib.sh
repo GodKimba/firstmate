@@ -312,8 +312,8 @@ EOF
 # requires positive proof: a genuinely empty composer, an all-empty unambiguous
 # box, an empty non-bordered fallback row, or the submit core's proven
 # busy-queued Enter conversion.
-fm_tmux_composer_state() {  # <target> -> empty|pending|pending-unproven|unknown
-  local target=$1 cy raw pane plain box box_status top bottom geometry_ambiguous
+fm_tmux_composer_state() {  # <target> [allow-busy] -> empty|pending|pending-unproven|unknown
+  local target=$1 allow_busy=${2:-1} cy raw pane plain box box_status top bottom geometry_ambiguous
   local row row_raw state unknown_seen=0
   cy=$(tmux display-message -p -t "$target" '#{cursor_y}' 2>/dev/null) || { printf 'unknown'; return 0; }
   case "$cy" in ''|*[!0-9]*) printf 'unknown'; return 0 ;; esac
@@ -360,7 +360,7 @@ fm_tmux_composer_state() {  # <target> -> empty|pending|pending-unproven|unknown
     printf 'unknown'
     return 0
   fi
-  fm_tmux_composer_row_state "$raw" 0
+  fm_tmux_composer_row_state "$raw" 0 "$allow_busy"
 }
 
 # fm_pane_input_pending: 0 when the composer is not proven empty, so pending
@@ -418,6 +418,25 @@ fm_tmux_submit_enter_core() {  # <target> <retries> <enter-sleep>
   else
     printf 'pending'
   fi
+}
+
+fm_tmux_submit_pending_strict() {  # <target> <polls> <poll-sleep>
+  local target=$1 polls=$2 sleep_s=$3 i=0 state
+  [ "$(fm_tmux_composer_state "$target" 0)" = pending ] \
+    || { printf 'unknown'; return 0; }
+  tmux send-keys -t "$target" Enter 2>/dev/null \
+    || { printf 'send-failed'; return 0; }
+  while [ "$i" -lt "$polls" ]; do
+    sleep "$sleep_s"
+    state=$(fm_tmux_composer_state "$target" 0)
+    case "$state" in
+      empty) printf 'empty'; return 0 ;;
+      pending) ;;
+      *) printf '%s' "$state"; return 0 ;;
+    esac
+    i=$((i + 1))
+  done
+  printf 'pending'
 }
 
 fm_tmux_submit_core() {  # <target> <text> <retries> <enter-sleep> <settle>

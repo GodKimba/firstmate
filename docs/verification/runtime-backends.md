@@ -92,7 +92,7 @@ Expected submit matrix: proven pending plus busy is accepted as queued; proven p
 ## Herdr
 
 The compatibility floor is protocol 14.
-The latest active verification uses Herdr 0.7.5 protocol 16 on macOS aarch64, with earlier 0.7.4, protocol-14, and 0.7.3 evidence retained where they define current behavior or fallbacks.
+The latest active verification uses Herdr 0.7.5 protocol 17 on macOS aarch64, with earlier 0.7.4, protocol-14, and 0.7.3 evidence retained where they define current behavior or fallbacks.
 
 Core read-only probes:
 
@@ -106,7 +106,7 @@ Observed current shapes:
 
 ```text
 herdr 0.7.5
-{"client":16,"server":16}
+{"client":17,"server":17}
 ["pane.output_matched","pane.agent_status_changed","pane.scroll_changed"]
 ```
 
@@ -122,7 +122,7 @@ The CLI matrix was checked directly:
 | Restart | guarded named-session stop then start | Workspace, tab, pane, and labels persisted; the agent process and registration did not. |
 | Close | `herdr pane close <pane> --session <name>` | The exact one-pane task tab closed; closing a final tab could remove the workspace. |
 
-All destructive verification used `bin/fm-herdr-lab.sh` with a non-default `fm-lab-` name and a byte-identical default-session tripwire.
+All destructive verification used `bin/fm-herdr-lab.sh` with a non-default `fm-lab-` name and a byte-identical recorded fleet-session tripwire.
 No ambient `herdr server stop` command is a supported test operation.
 
 ### Prune and respawn
@@ -213,6 +213,36 @@ Real captures verified these active distinctions:
 - A bare shell prompt has no safe agent-composer container and is unknown.
 
 `tests/fm-composer-ghost.test.sh`, `tests/fm-composer-lib.test.sh`, and the Herdr composer cases pin the exact captured ANSI bytes.
+
+### Fleet tripwire identity and Claude Vim recovery
+
+The named-session fleet tripwire and Claude Vim recovery were verified on 2026-07-29 against Herdr 0.7.5 protocol 17 and Claude Code 2.1.220.
+The live fleet session was `firstmate`, established by `HERDR_ENV=1`, exact `HERDR_SOCKET_PATH`, exact `HERDR_PANE_ID`, and an explicit pane round trip.
+`HERDR_SESSION` was deliberately excluded from identity because lab callers may override it to select the disposable backend.
+The compatibility path for a running `default` session and the refusal for incomplete ambient identity are deterministic regressions in `tests/fm-herdr-lab.test.sh`.
+
+Exact commands:
+
+```sh
+bash tests/fm-herdr-lab.test.sh
+bash tests/fm-send-claude-vim-recovery.test.sh
+FM_SEND_CLAUDE_VIM_E2E=1 \
+  HERDR_LAB_HELPER="$PWD/bin/fm-herdr-lab.sh" \
+  tests/fm-send-claude-vim-recovery-live-e2e.test.sh
+```
+
+Observed live output:
+
+```text
+ok - real Claude Vim/Herdr: insert-mode recovery proves interruption, preserves pending text, and submits with Enter only
+ok - real Claude Vim/Herdr: normal-mode recovery proves interruption, preserves pending text, and submits with Enter only
+evidence: claude=2.1.220 (Claude Code) herdr=0.7.5 protocol=17 fleet-session=firstmate
+```
+
+The real test provisions a disposable Firstmate home and git project in a guarded non-default lab.
+Recovery sends no text bytes when a composer is pending, uses two Escapes from Insert or one from Normal, requires a fresh rendered interruption proof, and sends one Enter only after that proof.
+Lab teardown verifies that the exact recorded `firstmate` fleet session remains unchanged.
+
 The U+2063 operational and routed-request separators were exercised through a real Pi-on-Herdr path; the byte-exact active regression is:
 
 ```sh
