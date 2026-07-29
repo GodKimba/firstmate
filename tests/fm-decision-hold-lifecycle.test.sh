@@ -707,7 +707,7 @@ path = "data/backlog.md"
 archive = "data/\u0064one-archive.md"
 done_keep = 10
 EOF
-  case_name=escaped-archive-config
+  case_name='escaped-archive-config'
   if run_decisions "$home" verify "$id" > "$home/$case_name.out" 2> "$home/$case_name.err"; then
     fail "an escaped archive path degraded the durable decision into absence"
   fi
