@@ -126,10 +126,10 @@ active_show() {  # <id> - the active backlog alone; every mutation requires this
 # .tasks.toml owns the backlog schema; this reads only the two keys needed to
 # locate the archive tasks-axi prunes into, using the same FM_HOME-relative
 # resolution tasks_axi() gets by running in FM_HOME.
-toml_value() {  # <section> <key>
+toml_value() {  # <section> <key> [reject-basic-escapes]
   local file="$FM_HOME/.tasks.toml"
   [ -f "$file" ] || return 0
-  awk -v want="$1" -v key="$2" '
+  awk -v want="$1" -v key="$2" -v reject_basic_escapes="${3:-0}" '
     /^[[:space:]]*\[/ {
       section = $0
       sub(/^[[:space:]]*\[[[:space:]]*/, "", section)
@@ -148,6 +148,9 @@ toml_value() {  # <section> <key>
         closing_quote = index(line, quote)
         if (closing_quote == 0) next
         line = substr(line, 1, closing_quote - 1)
+        if (reject_basic_escapes && quote == "\"" && index(line, sprintf("%c", 92))) {
+          exit 3
+        }
       } else {
         sub(/[[:space:]].*$/, "", line)
       }
@@ -161,7 +164,7 @@ archive_file() {  # prints the archive path, or nothing when this home has none
   local backend archive backlog dir
   backend=$(toml_value '' backend)
   [ -z "$backend" ] || [ "$backend" = markdown ] || return 0
-  archive=$(toml_value markdown archive)
+  archive=$(toml_value markdown archive 1) || return 3
   if [ -z "$archive" ]; then
     backlog=$(backlog_file)
     dir=$(dirname "$backlog")
@@ -213,19 +216,21 @@ record_rows() {  # <store-file> <id> <active|archive>
       }
       return 0
     }
-    function is_candidate(line,   rest, closing_bracket, separator) {
+    function is_candidate(line,   rest, closing_bracket, suffix, separator, prefix) {
       if (!is_top_row(line)) return 0
       rest = line
       sub(/^-[[:space:]]*/, "", rest)
+      prefix = rest
       if (substr(rest, 1, 1) == "[") {
         closing_bracket = index(rest, "]")
         if (closing_bracket == 0) return has_identity(rest)
-        rest = substr(rest, closing_bracket + 1)
-        sub(/^[[:space:]]*/, "", rest)
-        separator = index(rest, " - ")
-        if (separator > 0) rest = substr(rest, 1, separator - 1)
+        suffix = substr(rest, closing_bracket + 1)
+        separator = index(suffix, " - ")
+        if (separator > 0) {
+          prefix = substr(rest, 1, closing_bracket + separator - 1)
+        }
       }
-      return has_identity(rest)
+      return has_identity(prefix)
     }
     function refuse(message) {
       printf "refuse: %s\n", message
@@ -292,8 +297,12 @@ active_record() {  # <id> <raw-output>
 }
 
 archive_record() {  # <id> <raw-output>
-  local id=$1 raw=$2 archive
-  archive=$(archive_file)
+  local id=$1 raw=$2 archive rc=0
+  archive=$(archive_file) || rc=$?
+  if [ "$rc" -eq 3 ]; then
+    printf 'archived decision store configuration uses unsupported TOML escape syntax\n'
+    return 3
+  fi
   [ -n "$archive" ] || return 1
   if [ -L "$archive" ]; then
     printf 'archived decision store is a symlink: %s\n' "$archive"

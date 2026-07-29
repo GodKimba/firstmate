@@ -642,12 +642,15 @@ test_resolved_decision_survives_backlog_retention() {
 }
 
 test_retention_transition_and_conflicting_records_are_distinguished() {
-  local home id=sample-archive-review hold=sample-archive-review-decision-route archive backlog record
+  local home id=sample-archive-review hold=sample-archive-review-decision-route
+  local archive backlog record pristine_archive
   home=$(resolved_decision_home retention-transition)
   archive="$home/data/done-archive.md"
   backlog="$home/data/backlog.md"
   tasks_in "$home" prune --keep 0 --state "done" >/dev/null \
     || fail "could not apply retention for the transition fixture"
+  pristine_archive="$home/pristine-transition-archive.md"
+  cp "$archive" "$pristine_archive"
   record=$(sed -n "/^- \[x\] $hold -/,\$p" "$archive")
 
   # A prune writes the archive before rewriting the backlog. Identical copies in
@@ -666,6 +669,14 @@ test_retention_transition_and_conflicting_records_are_distinguished() {
   rm -f "$backlog.bak"
   run_decisions "$home" verify "$id" >/dev/null \
     || fail "restoring byte-identical records did not restore verification"
+
+  sed "s/^- \[x\] $hold -/- [x $hold] -/" "$pristine_archive" > "$archive"
+  if run_decisions "$home" verify "$id" > "$home/checkbox-content.out" 2> "$home/checkbox-content.err"; then
+    fail "a malformed archived checkbox hid the decision identity beside an active copy"
+  fi
+  assert_grep "not in canonical form" "$home/checkbox-content.err" \
+    "an identity inside malformed checkbox content must refuse the archived record"
+  cp "$pristine_archive" "$archive"
 
   # Divergent copies are a genuine conflict this script must not resolve.
   sed -i.bak "s/^- \[x\] $hold - Choose the retention route/- [x] $hold - Choose a different route/" "$backlog"
@@ -686,6 +697,26 @@ test_unusable_archived_records_refuse_and_preserve_cleanup_refusal() {
     || fail "could not apply retention for the integrity fixture"
   pristine="$home/pristine-archive.md"
   cp "$archive" "$pristine"
+
+  cp "$home/.tasks.toml" "$home/pristine-tasks.toml"
+  cat > "$home/.tasks.toml" <<'EOF'
+backend = "markdown"
+
+[markdown]
+path = "data/backlog.md"
+archive = "data/\u0064one-archive.md"
+done_keep = 10
+EOF
+  case_name=escaped-archive-config
+  if run_decisions "$home" verify "$id" > "$home/$case_name.out" 2> "$home/$case_name.err"; then
+    fail "an escaped archive path degraded the durable decision into absence"
+  fi
+  assert_grep "unsupported TOML escape syntax" "$home/$case_name.err" \
+    "an unsupported archive escape must refuse durable lookup"
+  if run_teardown "$home" "$id" > "$home/$case_name-teardown.out" 2> "$home/$case_name-teardown.err"; then
+    fail "cleanup proceeded with an unsupported archive escape"
+  fi
+  cp "$home/pristine-tasks.toml" "$home/.tasks.toml"
 
   cat > "$home/fakebin/tasks-axi" <<'EOF'
 #!/usr/bin/env bash
