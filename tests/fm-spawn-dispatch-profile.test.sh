@@ -118,7 +118,7 @@ test_no_profile_keeps_claude_profile_defaults() {
   assert_meta_profile "$HOME_DIR/state/$id.meta" claude default default
 
   launch=$(cat "$LAUNCH_LOG")
-  expected="FM_CREW_TASK='$id' CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions \"\$('${ROOT}/bin/fm-operational-input.sh' encode launch-brief < '$HOME_DIR/data/$id/brief.md')\""
+  expected="export FM_CREW_TASK='$id'; CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions \"\$('${ROOT}/bin/fm-operational-input.sh' encode launch-brief < '$HOME_DIR/data/$id/brief.md')\""
   [ "$launch" = "$expected" ] || fail "no-profile claude launch did not use the canonical launch kind"$'\n'"expected: $expected"$'\n'"actual:   $launch"
   pass "no --model/--effort records defaults and types the claude launch instructions"
 }
@@ -191,14 +191,20 @@ test_active_dispatch_profile_allows_positional_harness() {
 }
 
 test_active_dispatch_profile_allows_raw_launch_command() {
-  local rec id out status launch
+  local rec id out status launch identity_log identities expected_identities
   id=profile-raw-z15
   rec=$(make_spawn_case profile-raw claude "$id")
   read_case_record "$rec"
   enable_dispatch_profile "$HOME_DIR"
+  identity_log="$CASE_DIR/identity.log"
+  cat > "$FAKEBIN_DIR/custom-agent" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "${FM_CREW_TASK:-}" >> "$FM_FAKE_IDENTITY_LOG"
+SH
+  chmod +x "$FAKEBIN_DIR/custom-agent"
 
   out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
-    "$id" "$PROJ_DIR" "custom-agent --flag")
+    "$id" "$PROJ_DIR" "custom-agent first && custom-agent second")
   status=$?
   expect_code 0 "$status" "raw launch command should satisfy active dispatch-profile requirement"
   assert_contains "$out" "spawned $id harness=custom-agent" "spawn did not report raw command harness"
@@ -207,9 +213,16 @@ test_active_dispatch_profile_allows_raw_launch_command() {
   # The escape hatch keeps the operator's command body verbatim, but an unknown
   # harness is still an ordinary worker, so it carries the same launch identity
   # every other kind=ship launch does.
-  [ "$launch" = "FM_CREW_TASK='$id' custom-agent --flag" ] \
+  [ "$launch" = "export FM_CREW_TASK='$id'; custom-agent first && custom-agent second" ] \
     || fail "raw launch command changed"$'\n'"actual: $launch"
-  pass "active crew-dispatch profile allows the raw launch-command escape hatch"
+  FM_FAKE_IDENTITY_LOG="$identity_log" PATH="$FAKEBIN_DIR:$PATH" bash -c "$launch"
+  status=$?
+  expect_code 0 "$status" "compound raw launch command should execute"
+  identities=$(cat "$identity_log")
+  expected_identities="$id"$'\n'"$id"
+  [ "$identities" = "$expected_identities" ] \
+    || fail "compound raw launch did not carry the crewmate identity to every command"$'\n'"actual: $identities"
+  pass "active crew-dispatch profile carries identity through a compound raw launch"
 }
 
 test_claude_threads_model_and_effort() {
@@ -371,7 +384,7 @@ test_pi_signed_threads_shared_pi_profile_and_preserves_identity() {
   assert_contains "$launch" "FM_PI_HARNESS=pi-signed pi-signed --model 'openai-codex/gpt-5.6-sol' --thinking 'max' -e" \
     "pi-signed launch did not share Pi's model, thinking, and extension semantics"
   case "$launch" in
-    "FM_CREW_TASK='$id' "*) ;;
+    "export FM_CREW_TASK='$id'; "*) ;;
     *) fail "pi-signed ship launch did not lead with the crewmate identity"$'\n'"actual: $launch" ;;
   esac
   assert_contains "$launch" "fm-operational-input.sh' encode launch-brief" \
@@ -445,7 +458,7 @@ test_every_harness_stamps_the_crewmate_launch_identity() {
     expect_code 0 "$status" "$harness ship spawn should succeed"
     launch=$(cat "$LAUNCH_LOG")
     case "$launch" in
-      "FM_CREW_TASK='$id' "*) ;;
+      "export FM_CREW_TASK='$id'; "*) ;;
       *) fail "$harness ship launch did not lead with the crewmate identity"$'\n'"actual: $launch" ;;
     esac
   done
@@ -463,7 +476,7 @@ test_scout_stamps_the_crewmate_launch_identity() {
   expect_code 0 "$status" "scout spawn should succeed"
   launch=$(cat "$LAUNCH_LOG")
   case "$launch" in
-    "FM_CREW_TASK='$id' "*) ;;
+    "export FM_CREW_TASK='$id'; "*) ;;
     *) fail "scout launch did not lead with the crewmate identity"$'\n'"actual: $launch" ;;
   esac
   pass "a scout carries the same crewmate launch identity as a ship"
@@ -484,7 +497,7 @@ test_secondmate_launch_clears_the_crewmate_identity() {
   # A secondmate runs its own coordinator session, so it must shed the identity
   # rather than merely lack it: the pane that spawned it may already carry one.
   case "$launch" in
-    "FM_CREW_TASK= "*) ;;
+    "export FM_CREW_TASK=; "*) ;;
     *) fail "secondmate launch did not clear the crewmate identity"$'\n'"actual: $launch" ;;
   esac
   pass "a persistent secondmate launch explicitly clears the crewmate identity"

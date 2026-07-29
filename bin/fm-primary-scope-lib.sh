@@ -30,11 +30,11 @@
 # (kind=ship or kind=scout).
 #
 # A NON-EMPTY value is the identity; empty is deliberately NOT the identity. A
-# launch-line assignment can only clear a variable by setting it empty
-# (`FM_CREW_TASK= pi ...`), which is exactly how a secondmate coordinator sheds
-# an ambient identity inherited from the pane that spawned it. Keying on presence
-# alone would read that clear as a worker and silently strip every secondmate's
-# own startup nudge.
+# launch-line export can only clear a variable by setting it empty
+# (`export FM_CREW_TASK=; pi ...`), which is exactly how a secondmate coordinator
+# sheds an ambient identity inherited from the pane that spawned it. Keying on
+# presence alone would read that clear as a worker and silently strip every
+# secondmate's own startup nudge.
 fm_launched_as_crewmate() {
   [ -n "${FM_CREW_TASK:-}" ]
 }

@@ -207,9 +207,10 @@ test_kimi_launch_then_send_is_verified() {
   launch=$(cat "$CASE_DIR/launch.log")
   # The crewmate launch identity (bin/fm-primary-scope-lib.sh) prefixes every
   # kind=ship and kind=scout launch line, kimi included, so this exact-match
-  # assertion carries it. It is the only env prefix kimi's template takes; the
-  # rest of the line still proves the absolute binary, model, and --auto only.
-  [ "$launch" = "FM_CREW_TASK='$id' '$FAKEBIN_DIR/kimi' --model 'kimi-code/k3' --auto" ] \
+  # assertion carries it. It is the only additional environment setup around
+  # kimi's template; the rest of the line still proves the absolute binary,
+  # model, and --auto only.
+  [ "$launch" = "export FM_CREW_TASK='$id'; '$FAKEBIN_DIR/kimi' --model 'kimi-code/k3' --auto" ] \
     || fail "kimi launch did not use the crewmate identity, absolute binary, model, and --auto only: $launch"
   assert_not_contains "$launch" "--effort" "kimi launch emitted a nonexistent effort flag"
   assert_not_contains "$launch" "turn-ended" "kimi launch embedded a turn-end path"

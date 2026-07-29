@@ -97,12 +97,12 @@ test_secondmate_cleared_identity_still_nudges() {
   mkdir -p "$root/bin" "$root/state"
   : > "$root/AGENTS.md"
   printf 'sessionstart-sm-cleared\n' > "$root/.fm-secondmate-home"
-  # bin/fm-spawn.sh sheds an inherited identity with `FM_CREW_TASK= ...`, which
-  # leaves the variable SET AND EMPTY. A presence test would read that as a
-  # worker and strip every secondmate coordinator's own startup instruction.
-  # Written as '' here so the empty assignment is unambiguous to a reader and to
-  # the linter. The exact launch-line shape is pinned in
-  # tests/fm-spawn-dispatch-profile.test.sh.
+  # bin/fm-spawn.sh sheds an inherited identity with
+  # `export FM_CREW_TASK=; ...`, which leaves the variable SET AND EMPTY.
+  # A presence test would read that as a worker and strip every secondmate
+  # coordinator's own startup instruction. Written as '' here so the empty
+  # assignment is unambiguous to a reader and to the linter. The exact shape is
+  # pinned in tests/fm-spawn-dispatch-profile.test.sh.
   out=$(FM_CREW_TASK='' FM_GATE_REFUSE_BYPASS=0 FM_ROOT_OVERRIDE="$root" \
     FM_HOME="$root" "$NUDGE") || status=$?
   expect_code 0 "$status" "secondmate with a cleared identity"
@@ -257,7 +257,7 @@ test_pi_extension_treats_cleared_identity_as_coordinator() {
   local rec repo home out status=0
   rec=$(make_pi_extension_fixture pi-secondmate)
   IFS='|' read -r repo home <<< "$rec"
-  # Matches the secondmate launch line's `FM_CREW_TASK= ...`: set and empty.
+  # Matches the secondmate launch line's `export FM_CREW_TASK=; ...`: set and empty.
   out=$(drive_pi_session_start "$repo/.pi/extensions/fm-primary-turnend-guard.ts" \
     "$home" startup "") || status=$?
   expect_code 0 "$status" "Pi secondmate coordinator session_start"
