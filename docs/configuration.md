@@ -318,9 +318,10 @@ Account identity uses a stable masked label across runs, and a full address is n
 
 `bin/fm-pool-quota.sh --help` owns the exact flags, bounds, environment overrides, and output contract.
 
-Every `/poolquota` invocation regenerates the private local panel from its fresh read and opens it through the supported local path.
+Every `/poolquota` invocation regenerates the private local panel from its fresh read and opens it with the ordinary nonblocking browser opener, `open <path>`.
+The display-only dashboard does not enter `lavish-axi`'s interactive feedback flow, which remains available for genuine review surfaces.
 The panel artifact is private local operational detail about paid subscriptions.
-Open it only with `lavish-axi <path>`; it carries no credential and no full account address, but it must not be published, shared, or attached to an issue, a pull request, or a commit.
+Open it only from its local path; it carries no credential and no full account address, but it must not be published, shared, or attached to an issue, a pull request, or a commit.
 
 GitHub stays with `gh-axi`; this view is subscription quota only.
 

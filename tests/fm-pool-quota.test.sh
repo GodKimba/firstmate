@@ -516,6 +516,18 @@ test_the_reader_never_writes_to_the_pool() {
   pass "reading the pool leaves every account file untouched"
 }
 
+test_skill_opens_the_dashboard_without_a_feedback_poll() {
+  local skill="$ROOT/.agents/skills/poolquota/SKILL.md"
+
+  assert_grep "ordinary nonblocking browser opener, \`open <path>\`" "$skill" \
+    "the poolquota skill does not require the nonblocking browser opener"
+  assert_no_grep "Opens the returned \`panel\` path with \`lavish-axi" "$skill" \
+    "the poolquota skill still opens the dashboard through lavish-axi"
+  assert_grep "Do not use \`lavish-axi\` for this display-only dashboard" "$skill" \
+    "the poolquota skill does not distinguish dashboards from review surfaces"
+  pass "the poolquota dashboard opens without entering a foreground feedback poll"
+}
+
 test_multi_account_aggregation_is_per_provider
 test_identity_is_masked_everywhere
 test_hostile_credential_files_are_refused
@@ -529,3 +541,4 @@ test_panel_is_self_contained_local_and_private
 test_concise_view_hides_account_rows_but_discloses_the_omission
 test_missing_pool_and_bad_arguments_stop_safely
 test_the_reader_never_writes_to_the_pool
+test_skill_opens_the_dashboard_without_a_feedback_poll
