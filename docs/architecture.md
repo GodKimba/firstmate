@@ -24,6 +24,7 @@ Its initial normal-mode status signal still surfaces through the no-verb path, w
 Fresh stale panes use the same current-state read before trusting ordinary terminal or blocker lines, so an active run or busy pane outranks stale non-decision evidence left behind before validation.
 A folded open token-era `needs-decision` is the exception: later working or terminal lifecycle evidence never grants authority, so the watcher keeps it actionable until a correlated resolution or verified captain-held transfer closes it.
 `bin/fm-classify-lib.sh` owns that fold and its occurrence-deduplication mechanics.
+Streams whose files predate that protection stay on legacy authority, because the scaffold marks a stream only when it creates it; `bin/fm-decision-cutover-migrate.sh` is the explicitly invoked, one-home-at-a-time path that upgrades the eligible ones by appending the marker, and its header owns which histories it refuses and why.
 No-change heartbeats are also benign.
 Absorbed wakes advance their suppression markers, log to `state/.watch-triage.log`, and keep the watcher blocking without a queue record or LLM turn.
 After each drain, `fm-wake-drain.sh` runs the same liveness guard as the supervision scripts, so a lapsed watcher chain surfaces even on a turn that only drains and handles queued wakes.
