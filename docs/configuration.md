@@ -68,6 +68,8 @@ A cmux spawn additionally version-gates against the installed `cmux` binary's ve
 A backend spawn refusal from a missing dependency, version gate, or unauthenticated socket is terminal for that selected backend; firstmate surfaces it as a blocker instead of silently retrying another backend.
 Task meta records `backend=` only for a non-default backend; an absent `backend=` means `tmux`, preserving the default-path routing contract.
 Every new ordinary task records acquisition provenance as `acquisition_branch=fm/<id>` for a ship or `acquisition_branch=-` for a branchless scout.
+A Treehouse-provided scout is made branchless at acquisition, before its worker starts, so a managed pool that leases its slot attached to a structural branch matches the recorded provenance that guarded cleanup requires; the step moves no commit, deletes no branch, keeps every tracked and untracked file, and refuses the spawn rather than launching a scout whose provenance cleanup could never honor.
+A ship's acquisition branch is never detached or rewritten by that step, and cleanup keeps refusing an attached branchless scout on both provider routes.
 Scout promotion creates and records the exact ship branch before handing the prepared branch back to the worker.
 A new tmux task additionally records `tmux_window_id=` so teardown can close and confirm the stable exact window; legacy metadata without that field uses exact session and window-name targeting.
 A herdr task additionally records `herdr_session=`, `herdr_workspace_id=`, `herdr_tab_id=`, and `herdr_pane_id=`.

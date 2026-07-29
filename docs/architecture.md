@@ -127,6 +127,7 @@ Codex App support is recorded in `docs/codex-app-backend.md`; it is not selectab
 Crewmates never intentionally touch your project clone; [treehouse](https://github.com/kunchenguid/treehouse) pools clean worktrees for tmux, herdr, zellij, and cmux tasks, while Orca creates its own worktrees for `backend=orca`.
 For ship and scout work, `fm-spawn.sh` refuses to launch unless the resolved task path is a real git worktree root that is distinct from the project primary checkout.
 Treehouse return remains provider-routed: existing managed pools keep their provider recycling path, while generic pools use `fm-treehouse-generic-return.sh` only for the exact Firstmate-acquired task worktree.
+Because providers lease worktrees in different branch dispositions, `fm-spawn.sh` establishes a scout's branchless disposition at acquisition instead of leaving return to discover the difference, and [`configuration.md`](configuration.md) owns that provenance contract.
 Before either route returns an ordinary task worktree, `fm-teardown.sh` closes and confirms the exact recorded runtime endpoint; non-forced ships then repeat dirty and landed-work validation after quiescence.
 Generic return uses non-forced Git removal, verifies provider postconditions, and deletes only the recorded acquisition branch after provider success.
 An unresolved route, endpoint-close failure, final-validation refusal, provider refusal, or failed postcondition retains the task record and exact worktree or recovery journal for a safe retry.
