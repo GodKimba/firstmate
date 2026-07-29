@@ -404,13 +404,26 @@ fm_decision_marker_line_id() {  # <marker-line>
   printf '%s' "$id"
 }
 
-fm_decision_stream_id() {  # <status-file>
-  local f=$1 line
-  [ -f "$f" ] && [ ! -L "$f" ] || return 1
+_fm_decision_stream_id_stream() {
+  local line id stream='' count=0
   while IFS= read -r line || [ -n "$line" ]; do
-    fm_decision_marker_line_id "$line" && return 0
-  done < "$f"
-  return 1
+    case "$line" in
+      "$FM_CLASSIFY_DECISION_CUTOVER_MARK_PREFIX_DEFAULT"*) ;;
+      *) continue ;;
+    esac
+    id=$(fm_decision_marker_line_id "$line") || return 2
+    count=$((count + 1))
+    [ "$count" -eq 1 ] || return 2
+    stream=$id
+  done
+  [ "$count" -eq 1 ] || return 1
+  printf '%s' "$stream"
+}
+
+fm_decision_stream_id() {  # <status-file>
+  local f=$1
+  [ -f "$f" ] && [ ! -L "$f" ] || return 1
+  _fm_decision_stream_id_stream < "$f"
 }
 
 fm_decision_status_marker() {
@@ -426,6 +439,119 @@ fm_decision_status_marker() {
   raw=$(printf '%s' "$raw" | tr 'A-F' 'a-f' | tr -cd 'a-f0-9' | cut -c1-32)
   [ "${#raw}" -eq 32 ] || return 1
   printf '%s%s]\n' "$FM_CLASSIFY_DECISION_CUTOVER_MARK_PREFIX_DEFAULT" "$raw"
+}
+
+fm_decision_cutover_append_status() {  # <status-file> <marker-line> <state-device>
+  local f=$1 marker=$2 state_device=$3 marker_id
+  marker_id=$(fm_decision_marker_line_id "$marker") || return 1
+  # shellcheck disable=SC2016
+  perl -MFcntl=:DEFAULT,:flock,:mode -e '
+    my ($path, $marker, $expected_device, $lib, $bash, $marker_id) = @ARGV;
+    sysopen(my $file, $path, O_RDWR | O_APPEND | O_NOFOLLOW) or do {
+      print "identity-refused\n";
+      exit 0;
+    };
+    flock($file, LOCK_EX) or do {
+      print "identity-refused\n";
+      exit 0;
+    };
+
+    sub identity_ok {
+      my @descriptor = stat($file);
+      my @path = lstat($path);
+      return 0 unless @descriptor && @path;
+      return 0 unless S_ISREG($descriptor[2]) && S_ISREG($path[2]);
+      return 0 unless $descriptor[3] == 1 && $path[3] == 1;
+      return 0 unless "$descriptor[0]" eq "$expected_device";
+      return 0 unless $descriptor[0] == $path[0] && $descriptor[1] == $path[1];
+      return 1;
+    }
+
+    sub classifier {
+      my ($function) = @_;
+      sysseek($file, 0, 0) or die "seek";
+      pipe(my $reader, my $writer) or die "pipe";
+      my $pid = fork();
+      die "fork" unless defined $pid;
+      if ($pid == 0) {
+        close $reader;
+        open(STDIN, "<&", fileno($file)) or exit 125;
+        open(STDOUT, ">&", fileno($writer)) or exit 125;
+        close $writer;
+        exec $bash, "-c", q{. "$1"; "$2"}, "_", $lib, $function;
+        exit 125;
+      }
+      close $writer;
+      local $/;
+      my $output = <$reader>;
+      close $reader;
+      waitpid($pid, 0);
+      return ($? >> 8, defined($output) ? $output : "");
+    }
+
+    identity_ok() or do {
+      print "identity-refused\n";
+      exit 0;
+    };
+
+    for (1 .. 16) {
+      my @before = stat($file);
+      @before or die "stat";
+      my ($marker_status, $stream) = classifier("_fm_decision_stream_id_stream");
+      $stream =~ s/\n+\z//;
+      if ($marker_status == 0) {
+        print "current\t$stream\n";
+        exit 0;
+      }
+      if ($marker_status == 2) {
+        print "ambiguous\n";
+        exit 0;
+      }
+      $marker_status == 1 or die "marker classifier";
+
+      if ($before[7] > 0) {
+        sysseek($file, -1, 2) or die "tail seek";
+        sysread($file, my $last, 1) == 1 or die "tail read";
+        if ($last ne "\n") {
+          print "unterminated\n";
+          exit 0;
+        }
+      }
+
+      my ($decision_status) = classifier("_fm_status_stream_has_open_needs_decision");
+      if ($decision_status == 0) {
+        print "open-decision\n";
+        exit 0;
+      }
+      $decision_status == 1 or die "decision classifier";
+
+      my @after = stat($file);
+      @after or die "stat";
+      next unless $before[7] == $after[7];
+      identity_ok() or do {
+        print "identity-refused\n";
+        exit 0;
+      };
+
+      my $record = "$marker\n";
+      my $written = syswrite($file, $record);
+      unless (defined($written) && $written == length($record)) {
+        print "append-failed\n";
+        exit 1;
+      }
+      my ($confirm_status, $confirmed) = classifier("_fm_decision_stream_id_stream");
+      $confirmed =~ s/\n+\z//;
+      unless ($confirm_status == 0 && $confirmed eq $marker_id) {
+        print "append-unverified\n";
+        exit 1;
+      }
+      print "appended\t$confirmed\n";
+      exit 0;
+    }
+    print "busy\n";
+    exit 0;
+  ' "$f" "$marker" "$state_device" \
+    "$_FM_CLASSIFY_LIB_DIR/fm-classify-lib.sh" "${BASH:-bash}" "$marker_id" 2>/dev/null
 }
 
 fm_decision_cutover_ensure_status() {  # <status-file>
@@ -482,8 +608,9 @@ EOF
 # TAB-separated "<key>\t<verb>\t<summary>" line per still-open decision, in
 # most-recently-opened-last order; prints nothing when none are open.
 # "--with-instance" inserts the occurrence identifier before the summary for the
-# answer-issuance boundary. Pure read of the file and of the paired answer
-# records; no mutation.
+# answer-issuance boundary. The internal "--with-authority" view also exposes
+# whether the opening sits before or after the cutover marker. Pure read of the
+# file and of the paired answer records; no mutation.
 # This is the durable open-set the fleet snapshot and any point-in-time consumer must use
 # instead of trusting the last status line.
 #
@@ -492,19 +619,17 @@ EOF
 # uncorrelated resolution leaves it open. A blocked line still closes on a
 # plain keyed resolution: clearing a blocker is work, not an exercise of
 # authority.
-status_open_decisions() {  # <status-file> [--with-instance]
-  local f=$1 view=${2:-} line verb key note resolve held open='' stripped
-  local answers held_rec held_fields held_verb held_instance held_authority ans
+_fm_status_open_decisions_stream() {  # <answers-file> [--with-instance|--with-authority]
+  local answers=$1 view=${2:-} line verb key note resolve held open='' stripped
+  local held_rec held_fields held_verb held_instance held_authority ans
   local position=0 instance authority=legacy stream_id=''
   local out_key out_verb out_instance _out_authority out_note
   case "$view" in
-    ''|--with-instance) ;;
+    ''|--with-instance|--with-authority) ;;
     *) return 2 ;;
   esac
-  [ -f "$f" ] || return 0
   resolve=${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}
   held=${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}
-  answers=$(fm_decision_answers_file "$f")
   while IFS= read -r line || [ -n "$line" ]; do
     position=$((position + 1))
     if stream_id=$(fm_decision_marker_line_id "$line"); then
@@ -546,17 +671,26 @@ status_open_decisions() {  # <status-file> [--with-instance]
         [ -n "$open" ] && open="${open}"$'\n'
         ;;
     esac
-  done < "$f"
+  done
   while IFS=$'\t' read -r out_key out_verb out_instance _out_authority out_note || [ -n "$out_key" ]; do
     [ -n "$out_key" ] || continue
     if [ "$view" = --with-instance ]; then
       printf '%s\t%s\t%s\t%s\n' "$out_key" "$out_verb" "$out_instance" "$out_note"
+    elif [ "$view" = --with-authority ]; then
+      printf '%s\t%s\t%s\t%s\t%s\n' \
+        "$out_key" "$out_verb" "$out_instance" "$_out_authority" "$out_note"
     else
       printf '%s\t%s\t%s\n' "$out_key" "$out_verb" "$out_note"
     fi
   done <<EOF
 $open
 EOF
+}
+
+status_open_decisions() {  # <status-file> [--with-instance]
+  local f=$1 view=${2:-}
+  [ -f "$f" ] || return 0
+  _fm_status_open_decisions_stream "$(fm_decision_answers_file "$f")" "$view" < "$f"
 }
 
 status_open_needs_decisions() {  # <status-file>
@@ -570,13 +704,15 @@ EOF
 }
 
 status_open_token_needs_decisions() {  # <status-file>
-  local f=$1 stream key instance summary
+  local f=$1 stream key verb instance authority summary
   stream=$(fm_decision_stream_id "$f") || return 0
-  while IFS=$'\t' read -r key instance summary || [ -n "$key" ]; do
+  while IFS=$'\t' read -r key verb instance authority summary || [ -n "$key" ]; do
     [ -n "$key" ] || continue
+    [ "$verb" = needs-decision ] || continue
+    [ "$authority" = correlated ] || continue
     printf '%s\t%s.%s\t%s\n' "$key" "$stream" "$instance" "$summary"
   done <<EOF
-$(status_open_needs_decisions "$f")
+$(_fm_status_open_decisions_stream "$(fm_decision_answers_file "$f")" --with-authority < "$f")
 EOF
 }
 
@@ -607,6 +743,7 @@ status_latest_needs_decision_is_open_token_occurrence() {  # <status-file>
     latest_stream=$stream
   done < "$f"
   [ "$(status_line_verb "$latest")" = needs-decision ] || return 1
+  [ -n "$latest_stream" ] || return 1
   key=$(_fm_decision_key "$latest") || return 1
   instance=$(fm_decision_instance_id "$latest_position" "$latest_stream") || return 1
   while IFS=$'\t' read -r open_key open_instance _summary || [ -n "$open_key" ]; do
@@ -625,6 +762,18 @@ status_has_open_needs_decision() {  # <status-file>
     [ -n "$key" ] && return 0
   done <<EOF
 $(status_open_needs_decisions "$1")
+EOF
+  return 1
+}
+
+_fm_status_stream_has_open_needs_decision() {
+  local open key _verb _instance _summary
+  open=$(_fm_status_open_decisions_stream /dev/null --with-instance)
+  while IFS=$'\t' read -r key _verb _instance _summary || [ -n "$key" ]; do
+    [ "$_verb" = needs-decision ] || continue
+    [ -n "$key" ] && return 0
+  done <<EOF
+$open
 EOF
   return 1
 }

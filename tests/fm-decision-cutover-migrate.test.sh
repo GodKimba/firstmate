@@ -231,26 +231,34 @@ test_missing_instructions_are_refused_not_assumed_safe() {
 # --- malformed, duplicate, and interrupted markers --------------------------
 
 test_partial_or_duplicate_marker_is_refused_intact() {
-  local home out before
+  local home out partial_before duplicate_before first second
   home=$(new_home ambiguous-marker)
-  # An interrupted append leaves a truncated marker: it carries the prefix but
-  # is not a valid marker, so the fold ignores it while this migration must not
-  # write a second, conflicting one.
-  legacy_stream "$home" task \
+  legacy_stream "$home" partial \
     'working: started' \
     '[fm-decision-answer-cutover:v1 stream=deadbeef'
-  current_brief "$home" task
-  before=$(cat "$home/state/task.status")
+  first=$(fm_decision_status_marker) || fail "could not mint the first duplicate fixture marker"
+  second=$(fm_decision_status_marker) || fail "could not mint the second duplicate fixture marker"
+  legacy_stream "$home" duplicate \
+    'working: started' \
+    "$first" \
+    "$second"
+  current_brief "$home" partial
+  current_brief "$home" duplicate
+  partial_before=$(cat "$home/state/partial.status")
+  duplicate_before=$(cat "$home/state/duplicate.status")
 
   run_migrate "$home" --apply
 
   out=$OUT
   expect_code 0 "$RC" "an ambiguous marker is a definite refusal"
-  assert_contains "$out" 'task refused' "the ambiguous history must be refused by name"
-  assert_contains "$out" 'not a valid one' "the refusal must state why"
-  [ "$(cat "$home/state/task.status")" = "$before" ] \
-    || fail "the migration touched a history it refused"
-  pass "a partial or hand-edited marker is refused and left intact for recovery"
+  assert_contains "$out" 'partial refused' "the partial-marker history must be refused by name"
+  assert_contains "$out" 'duplicate refused' "the duplicate-marker history must be refused by name"
+  assert_contains "$out" 'partial or duplicate' "the refusal must state the ambiguous marker class"
+  [ "$(cat "$home/state/partial.status")" = "$partial_before" ] \
+    || fail "the migration touched the partial-marker history it refused"
+  [ "$(cat "$home/state/duplicate.status")" = "$duplicate_before" ] \
+    || fail "the migration touched the duplicate-marker history it refused"
+  pass "partial and duplicate valid markers are refused and left intact"
 }
 
 test_unterminated_last_line_is_refused() {
@@ -319,6 +327,87 @@ test_rerun_is_idempotent() {
   pass "reruns are idempotent and survive a lost operator record"
 }
 
+test_concurrent_apply_writes_exactly_one_marker() {
+  local home f first_out second_out first_rc second_rc count
+  home=$(new_home concurrent-apply)
+  legacy_stream "$home" task 'done: shipped'
+  current_brief "$home" task
+  f="$home/state/task.status"
+  first_out="$home/first.out"
+  second_out="$home/second.out"
+
+  (
+    FM_HOME="$home" "$MIGRATE" --apply > "$first_out" 2>&1
+  ) &
+  first_rc=$!
+  (
+    FM_HOME="$home" "$MIGRATE" --apply > "$second_out" 2>&1
+  ) &
+  second_rc=$!
+  wait "$first_rc"
+  first_rc=$?
+  wait "$second_rc"
+  second_rc=$?
+
+  expect_code 0 "$first_rc" "the first concurrent migration must be accounted"
+  expect_code 0 "$second_rc" "the second concurrent migration must be accounted"
+  count=$(grep -c '^\[fm-decision-answer-cutover:v1 stream=' "$f")
+  [ "$count" -eq 1 ] || fail "concurrent migrations wrote $count cutover markers"
+  assert_contains "$(cat "$first_out")$(cat "$second_out")" 'already-current' \
+    "one concurrent migration must observe the other's marker"
+  pass "concurrent apply runs serialize to exactly one valid marker"
+}
+
+test_open_decision_arriving_before_locked_append_is_refused() {
+  local home f out_file pid rc
+  home=$(new_home decision-race)
+  legacy_stream "$home" task 'working: started'
+  current_brief "$home" task
+  f="$home/state/task.status"
+  out_file="$home/migrate.out"
+
+  exec 9>>"$f"
+  perl -MFcntl=:flock -e 'flock(STDIN, LOCK_EX) or exit 1' <&9 \
+    || fail "could not hold the stream append lock"
+  (
+    exec 9>&-
+    FM_HOME="$home" "$MIGRATE" --apply > "$out_file" 2>&1
+  ) &
+  pid=$!
+  sleep 0.2
+  printf 'needs-decision [key=late]: choose a route\n' >> "$f"
+  exec 9>&-
+  wait "$pid"
+  rc=$?
+
+  expect_code 0 "$rc" "a raced open decision must be an accounted refusal"
+  assert_contains "$(cat "$out_file")" 'task refused' "the raced stream must be refused by name"
+  assert_contains "$(cat "$out_file")" 'open decision' "the raced refusal must state why"
+  fm_decision_stream_id "$f" >/dev/null \
+    && fail "the append operation marked a stream after a legacy decision arrived"
+  assert_contains "$(open_set "$f")" 'late|needs-decision' \
+    "the raced legacy decision did not retain its original visibility"
+  pass "the locked append rechecks and refuses a newly open legacy decision"
+}
+
+test_pre_marker_decision_never_becomes_a_token_notification() {
+  local home f marker
+  home=$(new_home positional-notification)
+  f="$home/state/task.status"
+  marker=$(fm_decision_status_marker) || fail "could not mint the positional marker"
+  legacy_stream "$home" task \
+    'needs-decision [key=legacy]: choose a route' \
+    "$marker"
+
+  [ -z "$(status_open_token_needs_decisions "$f")" ] \
+    || fail "a pre-marker legacy decision was exposed as a token occurrence"
+  status_latest_needs_decision_is_open_token_occurrence "$f" \
+    && fail "the latest-event classifier treated a pre-marker decision as token-era"
+  assert_contains "$(open_set "$f")" 'legacy|needs-decision' \
+    "the legacy decision disappeared from the ordinary open set"
+  pass "a pre-marker decision keeps legacy notification behavior"
+}
+
 # --- stream identity --------------------------------------------------------
 
 test_two_tasks_never_share_a_stream_identity() {
@@ -350,6 +439,70 @@ test_symlinked_stream_is_refused() {
   assert_no_grep 'fm-decision-answer-cutover' "$TMP_ROOT/outside.status" \
     "the migration wrote through a symlink into another file"
   pass "a symlinked stream is refused and nothing outside the home is written"
+}
+
+test_hardlinked_stream_and_wrong_device_descriptor_are_refused() {
+  local home source f marker result before
+  home=$(new_home identity-invariants)
+  source="$home/source.status"
+  f="$home/state/task.status"
+  printf 'done: shared\n' > "$source"
+  ln "$source" "$f"
+  current_brief "$home" task
+
+  run_migrate "$home" --apply
+
+  expect_code 0 "$RC" "a hard-linked stream must be an accounted refusal"
+  assert_contains "$OUT" 'task refused' "the hard-linked stream must be refused by name"
+  assert_no_grep 'fm-decision-answer-cutover' "$source" \
+    "the migration wrote through a multiply-linked inode"
+
+  rm "$f"
+  printf 'done: private\n' > "$f"
+  marker=$(fm_decision_status_marker) || fail "could not mint the device-check marker"
+  before=$(cksum < "$f")
+  result=$(fm_decision_cutover_append_status "$f" "$marker" not-this-device) \
+    || fail "a device mismatch must be an accounted descriptor refusal"
+  [ "$result" = identity-refused ] \
+    || fail "the descriptor helper did not refuse the wrong device"
+  [ "$(cksum < "$f")" = "$before" ] \
+    || fail "the wrong-device descriptor check changed the stream"
+  pass "hard-linked and wrong-device streams are refused unchanged"
+}
+
+test_stream_swap_before_append_is_refused_without_following_symlink() {
+  local home f original outside out_file pid rc
+  home=$(new_home stream-swap)
+  f="$home/state/task.status"
+  original="$home/original.status"
+  outside="$home/outside.status"
+  out_file="$home/migrate.out"
+  legacy_stream "$home" task 'done: shipped'
+  current_brief "$home" task
+  printf 'done: outside\n' > "$outside"
+
+  exec 9>>"$f"
+  perl -MFcntl=:flock -e 'flock(STDIN, LOCK_EX) or exit 1' <&9 \
+    || fail "could not hold the stream append lock"
+  (
+    exec 9>&-
+    FM_HOME="$home" "$MIGRATE" --apply > "$out_file" 2>&1
+  ) &
+  pid=$!
+  sleep 0.2
+  mv "$f" "$original"
+  ln -s "$outside" "$f"
+  exec 9>&-
+  wait "$pid"
+  rc=$?
+
+  expect_code 0 "$rc" "a swapped stream must be an accounted refusal"
+  assert_contains "$(cat "$out_file")" 'task refused' "the swapped stream must be refused by name"
+  assert_no_grep 'fm-decision-answer-cutover' "$outside" \
+    "the descriptor-bound append followed the replacement symlink"
+  assert_no_grep 'fm-decision-answer-cutover' "$original" \
+    "the descriptor-bound append changed an inode no longer owned by the task path"
+  pass "a path swap is refused without writing through the replacement symlink"
 }
 
 test_one_home_is_migrated_at_a_time() {
@@ -406,8 +559,6 @@ test_state_and_data_overrides_are_honored() {
   mkdir -p "$home/alt-state" "$home/alt-data/task"
   printf 'done: shipped\n' > "$home/alt-state/task.status"
   printf 'decision [key=<slug>] [ans=<token>]\n' > "$home/alt-data/task/brief.md"
-  # The override pair is how a caller points at a home whose state and data are
-  # not under FM_HOME, which is also what the tests and tooling rely on.
   OUT=$(FM_STATE_OVERRIDE="$home/alt-state" FM_DATA_OVERRIDE="$home/alt-data" \
     FM_HOME="$home" "$MIGRATE" --apply 2>&1)
   RC=$?
@@ -415,7 +566,29 @@ test_state_and_data_overrides_are_honored() {
   assert_contains "$OUT" 'task upgraded' "the overridden state directory must be swept"
   fm_decision_stream_id "$home/alt-state/task.status" >/dev/null \
     || fail "the overridden stream was not upgraded"
-  pass "explicit state and data overrides select the home that is migrated"
+  pass "same-home state and data overrides select the home that is migrated"
+}
+
+test_cross_home_overrides_are_refused_before_inspection() {
+  local home other out before
+  home=$(new_home override-home)
+  other=$(new_home override-other)
+  mkdir -p "$home/alt-state" "$other/alt-data/task"
+  printf 'done: shipped\n' > "$home/alt-state/task.status"
+  printf 'decision [key=<slug>] [ans=<token>]\n' > "$other/alt-data/task/brief.md"
+  before=$(cksum < "$home/alt-state/task.status")
+
+  OUT=$(FM_STATE_OVERRIDE="$home/alt-state" FM_DATA_OVERRIDE="$other/alt-data" \
+    FM_HOME="$home" "$MIGRATE" --apply 2>&1)
+  RC=$?
+  out=$OUT
+
+  expect_code 1 "$RC" "cross-home overrides must make the home unusable"
+  assert_contains "$out" 'one effective home' "the refusal must identify the authority boundary"
+  assert_contains "$out" 'no history was inspected' "the refusal must precede stream inspection"
+  [ "$(cksum < "$home/alt-state/task.status")" = "$before" ] \
+    || fail "cross-home overrides changed the selected state stream"
+  pass "state and data overrides cannot combine two effective homes"
 }
 
 # --- a single task can be targeted ------------------------------------------
@@ -545,12 +718,31 @@ test_home_without_histories_is_reported_not_failed() {
 test_unreadable_state_directory_stops_safely() {
   local home out
   home=$(new_home unreadable)
-  rm -rf "$home/state"
+  chmod 000 "$home/state"
   run_migrate "$home"
   out=$OUT
+  chmod 700 "$home/state"
   expect_code 1 "$RC" "an unusable home must stop with a failure"
   assert_contains "$out" 'no history was inspected' "the failure must say nothing was inspected"
-  pass "an unusable home stops safely before inspecting anything"
+  pass "an unreadable state directory stops safely before inspection"
+}
+
+test_nonregular_diagnostic_log_never_blocks_a_landed_marker() {
+  local home
+  home=$(new_home fifo-log)
+  legacy_stream "$home" task 'done: shipped'
+  current_brief "$home" task
+  mkfifo "$home/state/.decision-cutover-migration.log"
+
+  run_migrate "$home" --apply
+
+  expect_code 0 "$RC" "a nonregular best-effort log must not fail the upgrade"
+  assert_contains "$OUT" 'task upgraded' "the authoritative marker must still land"
+  fm_decision_stream_id "$home/state/task.status" >/dev/null \
+    || fail "the diagnostic FIFO prevented the authoritative marker"
+  [ -p "$home/state/.decision-cutover-migration.log" ] \
+    || fail "the diagnostic FIFO was replaced"
+  pass "a diagnostic FIFO is ignored without blocking the migration"
 }
 
 test_default_run_changes_nothing
@@ -564,11 +756,17 @@ test_partial_or_duplicate_marker_is_refused_intact
 test_unterminated_last_line_is_refused
 test_empty_stream_upgrades_and_marked_stream_is_already_current
 test_rerun_is_idempotent
+test_concurrent_apply_writes_exactly_one_marker
+test_open_decision_arriving_before_locked_append_is_refused
+test_pre_marker_decision_never_becomes_a_token_notification
 test_two_tasks_never_share_a_stream_identity
 test_symlinked_stream_is_refused
+test_hardlinked_stream_and_wrong_device_descriptor_are_refused
+test_stream_swap_before_append_is_refused_without_following_symlink
 test_one_home_is_migrated_at_a_time
 test_a_secondmate_home_is_migrated_by_pointing_at_it
 test_state_and_data_overrides_are_honored
+test_cross_home_overrides_are_refused_before_inspection
 test_task_selector_restricts_the_sweep
 test_invalid_usage_is_rejected
 test_decisions_opened_after_the_upgrade_require_a_correlated_answer
@@ -576,3 +774,4 @@ test_input_queued_before_the_upgrade_cannot_close_a_later_decision
 test_archived_history_with_no_worker_and_no_open_decision_upgrades
 test_home_without_histories_is_reported_not_failed
 test_unreadable_state_directory_stops_safely
+test_nonregular_diagnostic_log_never_blocks_a_landed_marker

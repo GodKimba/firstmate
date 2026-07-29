@@ -24,12 +24,12 @@
 # Authority is explicit and bounded, by construction:
 #   - It runs only when someone runs it. No session start, bootstrap, spawn, or
 #     watcher path calls it, and it is not a fleet rollout controller.
-#   - It acts on exactly ONE home, the one named by FM_HOME. It never reads the
-#     secondmate registry, never walks into another home, and never infers a
+#   - It acts on exactly ONE home, the one named by FM_HOME. Effective state and
+#     data overrides must both resolve as direct children of that same home. It
+#     never reads the secondmate registry, walks into another home, or infers a
 #     target. A secondmate home is migrated by invoking this script with that
-#     home's FM_HOME. That is also what keeps two homes from ever being
-#     conflated: identity is per stream, and each upgraded stream mints its own
-#     fresh random identity, so no two streams in any home share one.
+#     home's FM_HOME. Identity is per stream, and each upgraded stream mints its
+#     own fresh random identity, so no two streams in any home share one.
 #   - It reports by default and mutates only with --apply.
 #
 # It refuses rather than guesses. A stream is upgraded only when every one of
@@ -52,10 +52,11 @@
 # reports it as already current. The append is a single small O_APPEND write,
 # so a concurrent worker append can never be lost the way a copy-and-replace
 # would lose it; this migration therefore needs no watcher pause, unlike the
-# executable-file migration in bin/fm-pr-check-migrate.sh. An interrupted write
-# cannot be silently compounded either: a leftover partial marker fails marker
-# validation, is detected as an ambiguous marker line, and is refused instead of
-# being marked again or repaired by destroying bytes.
+# executable-file migration in bin/fm-pr-check-migrate.sh. The shared decision
+# owner rechecks marker state, open decisions, and file identity on the locked
+# append descriptor. An interrupted write cannot be silently compounded either:
+# a leftover partial marker fails marker validation, is detected as ambiguous,
+# and is refused instead of being marked again or repaired by destroying bytes.
 #
 # The only thing it writes besides the marker is a private best-effort record of
 # "<task><TAB><stream id>" per upgraded stream in
@@ -78,7 +79,6 @@ FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
-LOG="$STATE/.decision-cutover-migration.log"
 
 # shellcheck source=bin/fm-classify-lib.sh
 . "$SCRIPT_DIR/fm-classify-lib.sh"
@@ -120,7 +120,35 @@ done
 
 umask 077
 
-if [ ! -d "$STATE" ] || [ -L "$STATE" ]; then
+canonical_effective_dir() {  # <directory-or-absent-child>
+  local path=$1 parent base parent_real
+  if [ -d "$path" ]; then
+    (cd "$path" 2>/dev/null && pwd -P)
+    return
+  fi
+  [ ! -e "$path" ] && [ ! -L "$path" ] || return 1
+  parent=$(dirname "$path")
+  base=$(basename "$path")
+  parent_real=$(cd "$parent" 2>/dev/null && pwd -P) || return 1
+  printf '%s/%s\n' "${parent_real%/}" "$base"
+}
+
+HOME_REAL=$(canonical_effective_dir "$FM_HOME") || HOME_REAL=
+STATE_REAL=$(canonical_effective_dir "$STATE") || STATE_REAL=
+DATA_REAL=$(canonical_effective_dir "$DATA") || DATA_REAL=
+if [ -z "$HOME_REAL" ] || [ -z "$STATE_REAL" ] || [ -z "$DATA_REAL" ] \
+  || [ -L "$STATE" ] \
+  || [ "$(dirname "$STATE_REAL")" != "$HOME_REAL" ] \
+  || [ "$(dirname "$DATA_REAL")" != "$HOME_REAL" ] \
+  || [ "$STATE_REAL" = "$DATA_REAL" ]; then
+  echo "DECISION_CUTOVER: state and data must resolve as distinct direct children of the one effective home named by FM_HOME; no history was inspected" >&2
+  exit 1
+fi
+STATE=$STATE_REAL
+DATA=$DATA_REAL
+LOG="$STATE/.decision-cutover-migration.log"
+
+if [ ! -d "$STATE" ] || [ -L "$STATE" ] || [ ! -r "$STATE" ] || [ ! -x "$STATE" ]; then
   echo "DECISION_CUTOVER: '$STATE' is not an ordinary private state directory of this home; no history was inspected" >&2
   exit 1
 fi
@@ -155,25 +183,6 @@ stream_ends_cleanly() {  # <status-file>
   local f=$1
   [ -s "$f" ] || return 0
   [ -z "$(tail -c 1 "$f")" ]
-}
-
-# 0 when some line carries the cutover marker prefix but is NOT a valid marker:
-# a truncated marker from an interrupted append, a hand-edited one, or a status
-# note that happens to start with the prefix. Marking such a stream would leave
-# two conflicting claims about where its authority boundary sits, so it is
-# refused and left byte-for-byte intact for recovery.
-stream_has_ambiguous_marker() {  # <status-file>
-  local f=$1 line prefix
-  prefix=$FM_CLASSIFY_DECISION_CUTOVER_MARK_PREFIX_DEFAULT
-  while IFS= read -r line || [ -n "$line" ]; do
-    case "$line" in
-      "$prefix"*) ;;
-      *) continue ;;
-    esac
-    fm_decision_marker_line_id "$line" >/dev/null && continue
-    return 0
-  done < "$f"
-  return 1
 }
 
 # 0 when the owner's fold still holds an open needs-decision. Such a request is
@@ -224,8 +233,25 @@ report() {  # <task> <outcome> [<detail>]
 # the stream remains the authoritative migrated state, so a log that cannot be
 # written never blocks or reverses an upgrade that already succeeded.
 record_applied() {  # <task> <stream-id>
-  [ ! -L "$LOG" ] || return 0
-  printf '%s\t%s\n' "$1" "$2" >> "$LOG" 2>/dev/null || true
+  # shellcheck disable=SC2016
+  perl -MFcntl=:DEFAULT,:mode -e '
+    my ($path, $device, $record) = @ARGV;
+    my @before = lstat($path);
+    if (@before) {
+      exit 0 unless S_ISREG($before[2]);
+      exit 0 unless $before[3] == 1 && "$before[0]" eq "$device";
+    }
+    sysopen(my $file, $path,
+      O_WRONLY | O_APPEND | O_CREAT | O_NOFOLLOW | O_NONBLOCK, 0600) or exit 0;
+    my @descriptor = stat($file);
+    my @current = lstat($path);
+    exit 0 unless @descriptor && @current;
+    exit 0 unless S_ISREG($descriptor[2]) && S_ISREG($current[2]);
+    exit 0 unless $descriptor[3] == 1 && $current[3] == 1;
+    exit 0 unless "$descriptor[0]" eq "$device";
+    exit 0 unless $descriptor[0] == $current[0] && $descriptor[1] == $current[1];
+    syswrite($file, $record);
+  ' "$LOG" "$STATE_DEVICE" "$1"$'\t'"$2"$'\n' 2>/dev/null || true
 }
 
 # --- one stream -------------------------------------------------------------
@@ -234,7 +260,7 @@ record_applied() {  # <task> <stream-id>
 # returns 0.
 
 migrate_stream() {  # <status-file>
-  local f=$1 task marker stream
+  local f=$1 task marker stream marker_state append_result append_status
   task=$(basename "$f")
   task=${task%.status}
   TOTAL=$((TOTAL + 1))
@@ -248,11 +274,18 @@ migrate_stream() {  # <status-file>
     CURRENT=$((CURRENT + 1))
     report "$task" already-current "stream $stream"
     return 0
+  else
+    marker_state=$?
   fi
-  if stream_has_ambiguous_marker "$f"; then
+  if [ "$marker_state" -eq 2 ]; then
     REFUSED=$((REFUSED + 1))
-    report "$task" refused "an existing line claims the cutover marker but is not a valid one"
+    report "$task" refused "the cutover marker state is partial or duplicate"
     return 0
+  fi
+  if [ "$marker_state" -ne 1 ]; then
+    UNACCOUNTED=$((UNACCOUNTED + 1))
+    report "$task" refused "the cutover marker state could not be classified"
+    return 1
   fi
   if ! stream_ends_cleanly "$f"; then
     REFUSED=$((REFUSED + 1))
@@ -281,21 +314,63 @@ migrate_stream() {  # <status-file>
     report "$task" refused "no stream identity could be minted; nothing was changed"
     return 1
   }
-  if ! printf '%s\n' "$marker" >> "$f" 2>/dev/null; then
+  append_result=$(fm_decision_cutover_append_status "$f" "$marker" "$STATE_DEVICE")
+  append_status=$?
+  if [ "$append_status" -ne 0 ]; then
     UNACCOUNTED=$((UNACCOUNTED + 1))
-    report "$task" refused "the marker could not be appended"
+    report "$task" refused "the marker append could not be accounted for"
     return 1
   fi
-  # Confirm from the file itself, never from the value we meant to write.
-  if ! stream=$(fm_decision_stream_id "$f"); then
+  case "$append_result" in
+    appended$'\t'*)
+      stream=${append_result#*$'\t'}
+      UPGRADED=$((UPGRADED + 1))
+      record_applied "$task" "$stream"
+      report "$task" upgraded "stream $stream"
+      return 0
+      ;;
+    current$'\t'*)
+      stream=${append_result#*$'\t'}
+      CURRENT=$((CURRENT + 1))
+      report "$task" already-current "stream $stream"
+      return 0
+      ;;
+    ambiguous)
+      REFUSED=$((REFUSED + 1))
+      report "$task" refused "the cutover marker state became partial or duplicate"
+      return 0
+      ;;
+    open-decision)
+      REFUSED=$((REFUSED + 1))
+      report "$task" refused "an open decision is still tracked under the legacy protocol"
+      return 0
+      ;;
+    unterminated)
+      REFUSED=$((REFUSED + 1))
+      report "$task" refused "last event has no line terminator; appending would alter it"
+      return 0
+      ;;
+    identity-refused)
+      REFUSED=$((REFUSED + 1))
+      report "$task" refused "stream identity changed before the descriptor-bound append"
+      return 0
+      ;;
+    busy)
+      REFUSED=$((REFUSED + 1))
+      report "$task" refused "history changed continuously while the append was prepared"
+      return 0
+      ;;
+    *)
+      ;;
+  esac
+  if [ -z "$append_result" ]; then
     UNACCOUNTED=$((UNACCOUNTED + 1))
-    report "$task" refused "the appended marker did not validate; history is preserved for recovery"
+    report "$task" refused "the marker append returned no accountable outcome"
     return 1
   fi
-  UPGRADED=$((UPGRADED + 1))
-  record_applied "$task" "$stream"
-  report "$task" upgraded "stream $stream"
-  return 0
+  UNACCOUNTED=$((UNACCOUNTED + 1))
+  report "$task" refused "the marker append returned an unknown outcome"
+  return 1
 }
 
 # --- sweep ------------------------------------------------------------------

@@ -492,4 +492,5 @@ The three matches are the brief-protocol probe string and two comment lines, not
 The second command's `0` is the bounded-authority evidence: no backend adapter, harness resolver, spawn path, session start, bootstrap sweep, or watcher poll invokes the migration, so it runs only when an operator runs it and no runtime can trigger a fleet-wide rollout.
 
 Observed guarantee: the migration reads and appends to a plain status file and invokes no runtime, so a new harness or backend needs no migration change.
-It selects a single home from `FM_HOME` alone, so migrating a secondmate home is the same command pointed at that home, on every backend.
+It selects one effective home named by `FM_HOME`, requires effective state and data overrides to resolve as distinct direct children of that home, and migrates a secondmate by pointing the same command at that secondmate home on every backend.
+The shared classifier serializes its final eligibility check and descriptor-bound no-follow append per stream, so concurrent migration runs cannot duplicate a marker and a path replacement cannot redirect the write.
