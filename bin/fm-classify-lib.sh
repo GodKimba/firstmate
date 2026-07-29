@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Shared wake classifier: the common source of truth for captain-relevant status
-# tests, declared-external-wait vocabulary, and the working/paused absorb
-# classification that makes no-verb signal and stale-pane wakes safe to absorb.
+# Shared wake classifier: the common source of truth for the keyed status fold,
+# captain-relevant and declared-external-wait vocabulary, and supervision
+# precedence across structured events, current state, and endpoint liveness.
 # Sourced by BOTH the always-on watcher
 # (bin/fm-watch.sh) and the away-mode daemon (bin/fm-supervise-daemon.sh) so the
 # overlapping triage policy lives in one place instead of two copies that can
@@ -20,9 +20,9 @@
 # bin/fm-crew-state.sh, which may make bounded no-mistakes and GitHub check-run
 # calls, to decide
 # whether a crew that just stopped its turn or went stale is working, deliberately
-# paused, or neither. Callers run it ONLY on no-verb signal handling and first
-# sighting of a stale hash, never on every wake, so the per-wake triage stays
-# cheap.
+# paused, or neither. Callers run it only for no-verb signals, candidate pauses,
+# first-sighting stale hashes, and bounded pause rechecks, so routine transition
+# triage stays cheap.
 
 # Directory of this library, used to locate the sibling fm-crew-state.sh reader.
 # Resolved at source time from BASH_SOURCE so it works whether sourced by a
@@ -51,16 +51,19 @@ FM_CLASSIFY_CAPTAIN_RE_DEFAULT='done:|needs-decision:|blocked:|failed:|PR ready|
 #   paused: <reason>
 # to declare it is intentionally idling on a KNOWN external dependency - an
 # upstream release, a vendor rate-limit reset, a scheduled window. Unlike
-# `blocked:` (stuck, firstmate must help) an idle `paused:` pane is EXPECTED, so
-# the stale path absorbs it instead of escalating a possible wedge. It is
-# deliberately NOT in the captain-relevant set above: a pause is a "stop
-# wedge-nagging this idle pane" signal, not work to keep surfacing. This constant
-# is the ONE definition of the verb; both the watcher and the daemon read it here
-# (status_is_paused) rather than hardcoding the literal, so the vocabulary cannot
-# drift between the two consumers. FM_CLASSIFY_PAUSED_VERB overrides it.
+# `blocked:` (stuck, firstmate must help) an idle `paused:` pane is expected only
+# while authoritative current state confirms the pause on a live endpoint.
+# The verb is deliberately absent from the captain-relevant set above and becomes
+# a long-cadence candidate that shared precedence may accept or reject.
+# This constant is the one definition of the verb; both consumers read it through
+# status_is_paused so the vocabulary cannot drift.
+# FM_CLASSIFY_PAUSED_VERB overrides it.
 FM_CLASSIFY_PAUSED_VERB_DEFAULT='paused'
 
-# Bounded re-surface cadence for a declared pause or a dead-agent captain hold.
+capture_unreadable_stale_identity() { printf 'endpoint-unreadable'; }
+
+# Bounded re-surface cadence for a validated current pause on a live endpoint or
+# a dead-agent captain hold.
 # Far longer than the wedge threshold (FM_STALE_ESCALATE_SECS, default 240s), it
 # avoids nagging a deliberate wait while ensuring a forgotten hold cannot rot
 # invisibly - it re-surfaces once for a recheck every window. One hour by default;
@@ -145,11 +148,11 @@ status_is_paused() {  # <status-line>
   [ "$verb" = "${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}" ]
 }
 
-# 0 if a status line declares either an external-wait pause or a verified
-# captain-held transfer.
-# Both declarations can intentionally leave an exited crew's endpoint idle, so
-# the watcher applies its bounded pause cadence when agent death confirms that
-# no live decision gate is being silenced.
+# 0 if a status line syntactically declares either an external-wait pause or a
+# verified captain-held transfer.
+# The shared precedence accepts a pause only when current state confirms it on a
+# live endpoint, while a captain-held transfer may absorb a confidently dead
+# endpoint.
 status_is_paused_or_captain_held() {  # <status-line>
   local line=$1 verb
   status_is_paused "$line" && return 0
@@ -163,8 +166,9 @@ status_is_paused_or_captain_held() {  # <status-line>
 # The status stream is an append-only EVENT log. Reading it last-event-wins
 # (last_status_line above) cannot represent "an earlier decision is still open
 # after a later, unrelated event": a subsequent done/paused/working line silently
-# masks a still-open needs-decision. status_open_decisions is the ONE authoritative
-# statement of the status-fold contract that fixes this - a needs-decision/blocked
+# masks a still-open decision or blocker.
+# status_open_decisions is the one authoritative statement of the status-fold
+# contract that fixes this - a needs-decision/blocked
 # line OPENS a keyed decision, and only an explicit resolution or a verified
 # captain-held backlog transfer referencing that key CLOSES it; a later unrelated
 # terminal line never clears an open captain decision.
@@ -718,6 +722,23 @@ $(_fm_status_open_decisions_stream "$answers" --with-authority < "$f")
 EOF
 }
 
+status_open_supervision_decisions() {  # <status-file>
+  local f=$1 stream raw key verb instance summary
+  stream=$(fm_decision_stream_id "$f" 2>/dev/null || true)
+  if [ -z "$stream" ]; then
+    [ -f "$f" ] && [ ! -L "$f" ] || return 0
+    raw=$(printf 'legacy-status:%s' "$f" | fm_decision_hash_text) || return 0
+    stream=$(printf '%s' "$raw" | cut -c1-32)
+    [ "${#stream}" -eq 32 ] || return 0
+  fi
+  while IFS=$'\t' read -r key verb instance summary || [ -n "$key" ]; do
+    [ -n "$key" ] || continue
+    printf '%s\t%s\t%s.%s\t%s\n' "$key" "$verb" "$stream" "$instance" "$summary"
+  done <<EOF
+$(status_open_decisions "$f" --with-instance)
+EOF
+}
+
 status_has_open_token_needs_decision() {  # <status-file>
   local key _occurrence _summary
   while IFS=$'\t' read -r key _occurrence _summary || [ -n "$key" ]; do
@@ -728,10 +749,11 @@ EOF
   return 1
 }
 
-status_latest_needs_decision_is_open_token_occurrence() {  # <status-file>
+status_latest_decision_is_open_occurrence() {  # <status-file> [needs-decision|blocked]
   local f=$1 line marker stripped latest='' position=0 latest_position=0
-  local stream='' latest_stream='' key instance open_key open_instance _summary
-  fm_decision_stream_id "$f" >/dev/null || return 1
+  local expected=${2:-} stream='' latest_stream='' key verb instance
+  local open_key open_verb open_instance _summary
+  [ -f "$f" ] && [ ! -L "$f" ] || return 1
   while IFS= read -r line || [ -n "$line" ]; do
     position=$((position + 1))
     if marker=$(fm_decision_marker_line_id "$line"); then
@@ -744,18 +766,26 @@ status_latest_needs_decision_is_open_token_occurrence() {  # <status-file>
     latest_position=$position
     latest_stream=$stream
   done < "$f"
-  [ "$(status_line_verb "$latest")" = needs-decision ] || return 1
-  [ -n "$latest_stream" ] || return 1
+  verb=$(status_line_verb "$latest")
+  case "$verb" in needs-decision|blocked) ;; *) return 1 ;; esac
+  [ -z "$expected" ] || [ "$verb" = "$expected" ] || return 1
+  [ "$expected" != needs-decision ] || [ -n "$latest_stream" ] || return 1
   key=$(_fm_decision_key "$latest") || return 1
   instance=$(fm_decision_instance_id "$latest_position" "$latest_stream") || return 1
-  while IFS=$'\t' read -r open_key open_instance _summary || [ -n "$open_key" ]; do
+  while IFS=$'\t' read -r open_key open_verb open_instance _summary || [ -n "$open_key" ]; do
     [ "$open_key" = "$key" ] || continue
+    [ "$open_verb" = "$verb" ] || continue
     [ "$open_instance" = "$instance" ] || continue
     return 0
   done <<EOF
-$(status_open_needs_decisions "$f")
+$(status_open_decisions "$f" --with-instance)
 EOF
   return 1
+}
+
+status_latest_needs_decision_is_open_token_occurrence() {  # <status-file>
+  fm_decision_stream_id "$1" >/dev/null || return 1
+  status_latest_decision_is_open_occurrence "$1" needs-decision
 }
 
 status_has_open_needs_decision() {  # <status-file>
@@ -881,8 +911,8 @@ signal_reason_is_actionable() {  # <file> ...
 # authoritatively (not the status log) is what keeps run-step precedence: a crew
 # that appended paused: but then STARTED a run reports working, never paused.
 # NOT a pure read: fm-crew-state.sh may make bounded no-mistakes and GitHub
-# check-run calls, so callers run it only on no-verb signal and first-sighting
-# stale paths, never every wake.
+# check-run calls, so callers run it only on no-verb signals, candidate pauses,
+# first-sighting stale paths, and bounded pause rechecks.
 # FM_CREW_STATE_BIN lets tests stub the verdict.
 crew_absorb_class() {  # <id>
   local id=$1 line state src
@@ -894,6 +924,58 @@ crew_absorb_class() {  # <id>
   if [ "$state" = working ]; then
     src=${line#*source: }; src=${src%% *}
     case "$src" in run-step|pane|ci-withheld) printf 'working'; return ;; esac
+  fi
+  printf 'none'
+}
+
+# Fold structured status, authoritative current state, and endpoint liveness into
+# one idle-supervision precedence verdict. Callers supply crew_absorb_class's
+# current verdict and the backend-neutral fm_backend_agent_alive verdict so this
+# owner stays independent of runtime adapters. Prints exactly one token:
+#   actionable - an open needs-decision/blocked event or current terminal status;
+#   working    - authoritative run-step/pane work outranks an old pause line;
+#   paused     - a current declared pause on a live endpoint, or a verified
+#                captain-held transfer whose agent has exited;
+#   none       - no safe absorb proof, including dead/unknown ordinary endpoints.
+# Open structured decisions outrank every later unrelated pause event. A plain
+# paused: declaration outranks a visual human-block label only while current
+# state still confirms paused and the endpoint is live; it never hides a dead or
+# unreadable endpoint.
+crew_supervision_precedence() {  # <status-file> <crew-absorb-class> <alive|dead|unknown>
+  local f=$1 current=${2:-none} endpoint=${3:-unknown} last verb key _verb _instance _summary
+  while IFS=$'\t' read -r key _verb _instance _summary || [ -n "$key" ]; do
+    [ -n "$key" ] || continue
+    printf 'actionable'
+    return
+  done <<EOF
+$(status_open_decisions "$f" --with-instance)
+EOF
+  last=$(last_status_line "$f")
+  if [ -n "$last" ] && status_is_captain_relevant "$last"; then
+    printf 'actionable'
+    return
+  fi
+  if status_is_paused "$last"; then
+    if [ "$endpoint" != alive ]; then
+      printf 'none'
+    elif [ "$current" = working ]; then
+      printf 'working'
+    elif [ "$current" = paused ]; then
+      printf 'paused'
+    else
+      printf 'none'
+    fi
+    return
+  fi
+  if [ "$current" = working ]; then
+    printf 'working'
+    return
+  fi
+  verb=$(status_line_verb "$last")
+  if [ "$verb" = "${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}" ] \
+    && [ "$endpoint" = dead ]; then
+    printf 'paused'
+    return
   fi
   printf 'none'
 }
@@ -910,8 +992,8 @@ crew_is_provably_working() {  # <id>
 }
 
 # 0 if crew <id>'s authoritative current state is a declared external-wait pause.
-# The stale path absorbs such a crew (on a long re-surface cadence) instead of
-# escalating a possible wedge.
+# This current-state predicate alone does not establish the live-endpoint proof
+# required by crew_supervision_precedence.
 crew_is_paused() {  # <id>
   [ "$(crew_absorb_class "$1")" = paused ]
 }
@@ -945,11 +1027,9 @@ signal_crew_provably_working() {  # <file> ...
 # crew_is_provably_working, while the away-mode daemon applies its persistence
 # recheck.
 stale_is_terminal() {  # <window> <state>
-  local win=$1 state=$2 last f
+  local win=$1 state=$2 f
   f="$state/$(window_to_task "$win" "$state").status"
-  status_has_open_needs_decision "$f" && return 0
-  last=$(last_status_line "$f")
-  [ -n "$last" ] && status_is_captain_relevant "$last"
+  [ "$(crew_supervision_precedence "$f" none unknown)" = actionable ]
 }
 
 # Print "<file>\t<task>\t<last-line>" for every state/*.status whose last line is
@@ -981,6 +1061,23 @@ scan_open_needs_decisions() {  # <state>
       printf '%s\t%s\t%s\t%s\t%s\n' "$f" "$task" "$instance" "$key" "$summary"
     done <<EOF
 $(status_open_token_needs_decisions "$f")
+EOF
+  done
+  return 0
+}
+
+# Print one row per folded open decision or blocker supervision occurrence:
+# "<file>\t<task>\t<verb>\t<instance>\t<key>\t<summary>".
+scan_open_decisions() {  # <state>
+  local state=$1 f task key verb instance summary
+  for f in "$state"/*.status; do
+    [ -e "$f" ] || continue
+    task=$(basename "$f"); task="${task%.status}"
+    while IFS=$'\t' read -r key verb instance summary || [ -n "$key" ]; do
+      [ -n "$key" ] || continue
+      printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$f" "$task" "$verb" "$instance" "$key" "$summary"
+    done <<EOF
+$(status_open_supervision_decisions "$f")
 EOF
   done
   return 0

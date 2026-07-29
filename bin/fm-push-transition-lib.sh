@@ -66,6 +66,16 @@ mark_decision_occurrence_surfaced() {  # <stream-id>.<instance>
   printf '%s' "$occurrence" > "$path"
 }
 
+mark_open_decision_occurrences_surfaced() {  # <status-file>
+  local f=$1 _key _verb occurrence _summary
+  while IFS=$'\t' read -r _key _verb occurrence _summary || [ -n "$_key" ]; do
+    [ -n "$_key" ] || continue
+    mark_decision_occurrence_surfaced "$occurrence" || return 1
+  done <<EOF
+$(status_open_supervision_decisions "$f")
+EOF
+}
+
 pending_open_decisions() {  # <status-file>
   local f=$1 key occurrence summary
   while IFS=$'\t' read -r key occurrence summary || [ -n "$key" ]; do
@@ -91,9 +101,11 @@ EOF
   return "$found"
 }
 
-# Record a captain-relevant status after its durable wake has been enqueued.
+# Record folded open occurrences and the current captain-relevant status after
+# their durable wake has been enqueued.
 mark_surfaced() {  # <status-file>
   local f=$1 task last
+  mark_open_decision_occurrences_surfaced "$f" || return 1
   task=$(basename "$f"); task="${task%.status}"
   last=$(last_status_line "$f")
   [ -n "$last" ] || return 0
@@ -103,13 +115,21 @@ mark_surfaced() {  # <status-file>
 
 # Act on a fresh actionable transition from a push-capable backend.
 handle_push_transition() {  # <backend> <session> <record>
-  local backend=$1 session=$2 record=$3 pane_id to window task reason
+  local backend=$1 session=$2 record=$3 pane_id to window task reason statusf last current endpoint precedence
   pane_id=$(fm_transition_pane_id "$record")
   to=$(fm_transition_to_status "$record")
   [ -n "$pane_id" ] || { sleep 1; return; }
   window="$session:$pane_id"
   task=$(window_to_task "$window" "$STATE")
-  if status_is_paused "$(last_status_line "$STATE/$task.status")"; then
+  statusf="$STATE/$task.status"
+  precedence=$(crew_supervision_precedence "$statusf" none unknown)
+  last=$(last_status_line "$statusf")
+  if [ "$precedence" = none ] && status_is_paused "$last"; then
+    current=$(crew_absorb_class "$task")
+    endpoint=$(fm_backend_agent_alive "$backend" "$window" 2>/dev/null) || endpoint=unknown
+    precedence=$(crew_supervision_precedence "$statusf" "$current" "$endpoint")
+  fi
+  if [ "$precedence" = paused ]; then
     triage_log "absorbed push $to (declared pause, awaiting external): $window"
     fm_backend_commit_transition "$backend" "$STATE" "$session" "$record" || exit 1
     return

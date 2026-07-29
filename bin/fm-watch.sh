@@ -7,8 +7,9 @@
 # actively-running no-mistakes step, or a backend busy signal), and surfaced
 # otherwise, so a crew that finishes (or stops and waits) without a current
 # working signal is never silently swallowed. A declared external-wait pause is
-# the separate idle absorb case and re-surfaces only on its long bounded cadence,
-# although its initial no-verb status signal still surfaces in normal mode.
+# the separate idle absorb case only while authoritative current state confirms
+# it on a live endpoint, and then re-surfaces on its long bounded cadence.
+# Its initial no-verb status signal still surfaces in normal mode.
 # While state/.afk exists, the daemon owns triage and this watcher queues and exits
 # on every wake. Printed reason lines:
 #   signal: <file>...      status/turn-end signals, surfaced when a listed status
@@ -19,9 +20,9 @@
 #                          run-step or busy pane outranks even a captain-relevant log
 #                          line, since the crew's own log gets no new entry once
 #                          firstmate hands it to a no-mistakes validation. A declared
-#                          external-wait pause is absorbed instead with its own long
-#                          re-surface cadence, never as a wedge. Only when neither
-#                          absorb class applies does the log's last line decide:
+#                          external-wait pause that is current on a live endpoint is
+#                          absorbed on its own long re-surface cadence. Only when
+#                          neither absorb class applies does the log's last line decide:
 #                          terminal (captain-relevant) or non-terminal (no verb),
 #                          both surfaced at once. A provably-working stale past the
 #                          wedge threshold also surfaces, with an "escalation N"
@@ -38,7 +39,8 @@
 #                          invalid pending retirements were preserved without
 #                          running a check or removing poll artifacts
 #   heartbeat              fleet-scan backstop found an unsurfaced captain-relevant
-#                          status, unless afk is active
+#                          status or folded open decision or blocker, unless afk
+#                          is active
 # For normal supervision, resume the session-start primary-harness protocol
 # after each printed reason. Direct duplicate invocations of this script still
 # no-op through the watcher singleton lock.
@@ -120,17 +122,18 @@ BUSY_REGEX=${FM_BUSY_REGEX:-'esc (to )?interrupt|Working\.\.\.|Ctrl\+c:cancel'}
 # busy pane is SURFACED, so a finish reported only through interactive pane menus
 # (no done: status) is never swallowed. An ACTIONABLE wake (a captain-relevant
 # signal, a no-verb signal whose crew is not provably working, any check, a stale
-# pane whose crew is not provably working, a provably-working stale past the
-# threshold, or anything unknown) is written to the durable queue and exits, which
+# pane whose crew is not provably working and has no valid pause, a
+# provably-working stale past the threshold, or anything unknown) is written to
+# the durable queue and exits, which
 # is what wakes the LLM through the background-task completion. The same classifier
 # (fm-classify-lib.sh) backs the away-mode daemon; while state/.afk exists the
 # daemon owns triage, so this watcher reverts to one-shot (enqueue + exit on every
 # wake) and never double-triages - and never runs the costly provably-working read.
 STALE_ESCALATE_SECS=${FM_STALE_ESCALATE_SECS:-240}  # idle secs before a provably-working stale escalates as a possible wedge
-# A crew that declared a pause is idling on a known external wait, so its stale
-# pane is absorbed rather than wedge-escalated.
-# A captain-held or paused crew whose agent has confidently exited uses the same
-# bounded cadence, while a live or ambiguously read agent still surfaces once.
+# A declared pause uses the bounded wait cadence only while authoritative current
+# state still reports paused and the endpoint is alive.
+# A verified captain-held transfer may use the same cadence when its endpoint has
+# confidently exited, while a dead or ambiguously read paused endpoint surfaces.
 # These cases re-surface once for a recheck every PAUSE_RESURFACE_SECS - far
 # longer than the wedge threshold, but finite so a forgotten hold cannot rot invisibly.
 PAUSE_RESURFACE_SECS=${FM_PAUSE_RESURFACE_SECS:-$FM_PAUSE_RESURFACE_SECS_DEFAULT}
@@ -296,7 +299,8 @@ handle_paused_stale() {  # <window> <task> <hash>
   key=$(printf '%s' "$win" | tr ':/.' '___')
   printf '%s' "$h" > "$STATE/.stale-$key"
   : > "$STATE/.paused-$key"
-  rm -f "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key"
+  rm -f "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key" \
+    "$STATE/.stale-surfaced-$key"
   statusf="$STATE/$task.status"
   mtime=$(stat_mtime "$statusf")
   case "$mtime" in ''|*[!0-9]*) mtime=$(date +%s) ;; esac
@@ -326,74 +330,55 @@ clear_pause_tracking() {  # <window>
   key=${key//\//_}
   key=${key//./_}
   clear_pause_state "$win"
-  rm -f "$STATE/.stale-$key" "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key"
+  rm -f "$STATE/.stale-$key" "$STATE/.stale-since-$key" \
+    "$STATE/.stale-surfaced-$key" "$STATE/.wedge-escalations-$key"
 }
 
-# Reconcile a declared pause or captain-held status with authoritative crew state.
-# Only a confidently dead ordinary crew may recover paused classification after
-# fm-crew-state has fallen back to stopped or unknown.
+# Reconcile structured status, authoritative current state, and endpoint liveness
+# through crew_supervision_precedence, the single owner of their ordering.
 pause_state_class() {  # <window> <task>
-  local win=$1 task=$2 key last recheck_file class agent_alive
+  local win=$1 task=$2 key recheck_file current endpoint verdict
   key=${win//:/_}
   key=${key//\//_}
   key=${key//./_}
-  last=$(last_status_line "$STATE/$task.status")
   recheck_file="$STATE/.paused-rechecked-$key"
-  if ! status_is_paused_or_captain_held "$last"; then
-    rm -f "$recheck_file"
-    crew_absorb_class "$task"
-    return
-  fi
-  if [ -e "$STATE/.paused-$key" ] && [ "$(age_of "$recheck_file")" -lt "$STALE_ESCALATE_SECS" ]; then
-    if [ "$(window_kind "$win")" != secondmate ]; then
-      agent_alive=$(fm_backend_agent_alive "$(window_backend "$win")" "$win" 2>/dev/null) || agent_alive=unknown
-      if [ "$agent_alive" != dead ]; then
-        rm -f "$recheck_file"
-        printf 'none'
-        return
-      fi
-    fi
-    printf 'paused'
-    return
-  fi
-  class=$(crew_absorb_class "$task")
-  if [ "$class" = working ]; then
-    rm -f "$recheck_file"
-    printf 'working'
-    return
-  fi
-  if [ "$(window_kind "$win")" != secondmate ]; then
-    agent_alive=$(fm_backend_agent_alive "$(window_backend "$win")" "$win" 2>/dev/null) || agent_alive=unknown
-    if [ "$agent_alive" != dead ]; then
+  endpoint=$(fm_backend_agent_alive "$(window_backend "$win")" "$win" 2>/dev/null) || endpoint=unknown
+  current=$(crew_absorb_class "$task")
+  verdict=$(crew_supervision_precedence "$STATE/$task.status" "$current" "$endpoint")
+  case "$verdict" in
+    paused)
+      date +%s > "$recheck_file"
+      printf 'paused'
+      ;;
+    working)
+      rm -f "$recheck_file"
+      printf 'working'
+      ;;
+    *)
       rm -f "$recheck_file"
       printf 'none'
-      return
-    fi
-  fi
-  [ "$class" = none ] && [ "${agent_alive:-unknown}" = dead ] && class=paused
-  case "$class" in
-    paused) date +%s > "$recheck_file" ;;
-    *) rm -f "$recheck_file" ;;
+      ;;
   esac
-  printf '%s' "$class"
 }
 
 surface_nonterminal_stale() {  # <window> <hash>
-  local win=$1 h=$2 key task last
+  local win=$1 h=$2 key
   key=$(printf '%s' "$win" | tr ':/.' '___')
   fm_wake_append stale "$win" "stale: $win" || exit 1
   printf '%s' "$h" > "$STATE/.stale-$key"
+  printf '%s' "$h" > "$STATE/.stale-surfaced-$key"
   rm -f "$STATE/.stale-since-$key"
-  task=$(window_to_task "$win" "$STATE")
-  last=$(last_status_line "$STATE/$task.status")
-  if status_is_paused_or_captain_held "$last"; then
-    : > "$STATE/.paused-$key"
-    date +%s > "$STATE/.paused-rechecked-$key"
-    date +%s > "$STATE/.paused-resurfaced-$key"
-  else
-    rm -f "$STATE/.paused-$key" "$STATE/.paused-rechecked-$key" "$STATE/.paused-resurfaced-$key"
-  fi
+  clear_pause_state "$win"
   wake "stale: $win"
+}
+
+surface_nonterminal_stale_once() {  # <window> <hash>
+  local win=$1 h=$2 key
+  key=$(printf '%s' "$win" | tr ':/.' '___')
+  if [ "$(cat "$STATE/.stale-surfaced-$key" 2>/dev/null || true)" != "$h" ]; then
+    surface_nonterminal_stale "$win" "$h"
+  fi
+  clear_pause_state "$win"
 }
 
 # Check and heartbeat cadence must survive actionable exits and restarts: the
@@ -509,27 +494,34 @@ run_check_capture() {
 
 # Surfaced-marker bookkeeping for the heartbeat backstop is owned by
 # fm-push-transition-lib.sh because push and poll paths must write one format.
-# Mark every current captain-relevant status as surfaced. Called after the
-# heartbeat backstop enqueues its wake, so the same statuses are not re-surfaced
-# by the next heartbeat.
+# Mark every current captain-relevant status and folded open occurrence as
+# surfaced. Called after the heartbeat backstop enqueues its wake, so the same
+# material is not re-surfaced by the next heartbeat.
 mark_all_captain_relevant_surfaced() {
-  local f task last
-  while IFS=$(printf '\t') read -r f task last; do
+  local f _task _last
+  while IFS=$(printf '\t') read -r f _task _last; do
     [ -n "$f" ] || continue
-    printf '%s' "$last" > "$(_hb_surfaced_path "$task")"
+    mark_surfaced "$f" || return 1
   done < <(scan_captain_relevant_statuses "$STATE")
+  for f in "$STATE"/*.status; do
+    [ -e "$f" ] || continue
+    mark_open_decision_occurrences_surfaced "$f" || return 1
+  done
 }
 
-# Cheap heartbeat fleet-scan (the always-on twin of the daemon's catch-all). 0 if
-# any captain-relevant status has NOT already been surfaced to firstmate (its
-# content differs from the .hb-surfaced-<task> marker). Pure detect, no side
-# effects: the caller enqueues first, then marks surfaced. Because every
-# captain-relevant signal/stale already marks itself surfaced when it wakes
-# firstmate, this normally finds nothing and the heartbeat is absorbed; it
-# surfaces only a captain-relevant status the per-wake path absorbed by mistake -
-# the fail-safe backstop.
+# Cheap heartbeat fleet-scan (the always-on twin of the daemon's catch-all).
+# It finds any unsurfaced folded open occurrence first, then any captain-relevant
+# last status whose content differs from the task marker.
+# Detection is pure: the caller enqueues first, then marks everything surfaced.
+# This normally finds nothing and the heartbeat is absorbed; it is the fail-safe
+# backstop for material the per-wake path absorbed by mistake.
 heartbeat_scan_finds_actionable() {
-  local f task last surfaced
+  local f _task _verb occurrence _key _summary task last surfaced
+  while IFS=$(printf '\t') read -r f _task _verb occurrence _key _summary; do
+    [ -n "$f" ] || continue
+    decision_occurrence_is_surfaced "$occurrence" && continue
+    return 0
+  done < <(scan_open_decisions "$STATE")
   while IFS=$(printf '\t') read -r f task last; do
     [ -n "$f" ] || continue
     if [ "$(status_line_verb "$last")" = needs-decision ] \
@@ -880,7 +872,24 @@ EOF
     if [ "$kind" = secondmate ] && ! status_is_paused "$last"; then
       continue
     fi
-    tail40=$(fm_backend_capture "$(window_backend "$w")" "$w" 40 "$(window_label "$w")" 2>/dev/null) || continue
+    if ! tail40=$(fm_backend_capture "$(window_backend "$w")" "$w" 40 "$(window_label "$w")" 2>/dev/null); then
+      h=$(capture_unreadable_stale_identity)
+      if afk_present; then
+        if [ "$(cat "$STATE/.stale-surfaced-$key" 2>/dev/null || true)" != "$h" ]; then
+          fm_wake_append stale "$w" "stale: $w" || exit 1
+          printf '%s' "$h" > "$STATE/.stale-surfaced-$key"
+          wake "stale: $w"
+        fi
+      else
+        surface_nonterminal_stale_once "$w" "$h"
+      fi
+      continue
+    fi
+    h=$(capture_unreadable_stale_identity)
+    if [ "$(cat "$STATE/.stale-surfaced-$key" 2>/dev/null || true)" = "$h" ]; then
+      rm -f "$STATE/.stale-surfaced-$key"
+      [ "$(cat "$STATE/.stale-$key" 2>/dev/null || true)" != "$h" ] || rm -f "$STATE/.stale-$key"
+    fi
     h=$(printf '%s' "$tail40" | hash_pane)
     key=$(printf '%s' "$w" | tr ':/.' '___')
     hf="$STATE/.hash-$key"
@@ -903,7 +912,8 @@ EOF
         if [ "$kind" = secondmate ]; then
           case "$(pause_state_class "$w" "$task")" in
             paused) handle_paused_stale "$w" "$task" "$h" ;;
-            *)      clear_pause_tracking "$w" ;;
+            working) clear_pause_tracking "$w" ;;
+            *)      surface_nonterminal_stale_once "$w" "$h" ;;
           esac
         elif afk_present; then
           # Daemon owns triage: one-shot per distinct stale hash, as before.
@@ -956,11 +966,12 @@ EOF
           #   - working: an actively-running pipeline legitimately sits on a static
           #     pane (e.g. waiting on CI), so absorb and start the wedge timer so a
           #     genuinely frozen run still escalates past STALE_ESCALATE_SECS;
-          #   - paused: the crew declared an external wait, or a declared pause or
-          #     captain hold is paired with a confidently dead agent, so absorb on
-          #     the long PAUSE_RESURFACE_SECS cadence instead of wedge-escalating;
-          #   - none: no running pipeline, idle pane, no busy signature, no declared
-          #     pause - the crew has STOPPED. Surface immediately so firstmate peeks
+          #   - paused: authoritative current state confirms a declared pause on a
+          #     live endpoint, or a captain hold has a confidently dead endpoint,
+          #     so absorb on the long PAUSE_RESURFACE_SECS cadence;
+          #   - none: no safe working or pause proof, including dead or unknown
+          #     endpoints behind a pause declaration. Surface immediately so
+          #     firstmate peeks
           #     (it may be done via an interactive menu that wrote no done: status,
           #     waiting on a decision, or wedged) instead of leaving the finish to
           #     wait out the timer.
@@ -989,7 +1000,12 @@ EOF
                          printf '%s' "$h" > "$sf"
                          wedge_timer_check "$w" "$ssf" "non-terminal stale (provably working after a declared pause)" "$ewf"
                          triage_log "absorbed non-terminal stale (provably working): $w" ;;
-                *)       handle_paused_stale "$w" "$task" "$h" ;;
+                *)       clear_pause_state "$w"
+                         if [ "$(cat "$STATE/.stale-surfaced-$key" 2>/dev/null || true)" != "$h" ]; then
+                           surface_nonterminal_stale "$w" "$h"
+                         else
+                           wedge_timer_check "$w" "$ssf" "non-terminal stale after invalid pause" "$ewf"
+                         fi ;;
               esac
             else
               wedge_timer_check "$w" "$ssf" "non-terminal stale" "$ewf"
@@ -1029,7 +1045,8 @@ EOF
   [ "$hb" -gt "$HEARTBEAT_MAX" ] && hb=$HEARTBEAT_MAX
   if [ "$(age_of "$STATE/.last-heartbeat")" -ge "$hb" ]; then
     # Triage: in always-on mode a heartbeat is benign unless the cheap fleet-scan
-    # turns up a captain-relevant status the per-wake path missed. Absorb the
+    # turns up an open decision, blocker, or captain-relevant status the per-wake
+    # path missed. Absorb the
     # no-change case (advance the schedule and back off exactly as wake() would,
     # without exiting); the away-mode daemon, when present, owns triage and wants
     # every heartbeat.
@@ -1043,9 +1060,9 @@ EOF
     elif [ "$?" -gt 1 ]; then
       exit 1
     elif heartbeat_scan_finds_actionable; then
-      # Backstop: a captain-relevant status the per-wake path absorbed by mistake.
-      # Enqueue first, then mark every captain-relevant status surfaced so the next
-      # heartbeat does not re-fire them (enqueue-before-suppress preserved).
+      # Backstop: material the per-wake path absorbed by mistake.
+      # Enqueue first, then mark every open occurrence and captain-relevant status
+      # surfaced so the next heartbeat does not re-fire it.
       fm_wake_append heartbeat heartbeat heartbeat || exit 1
       touch "$STATE/.last-heartbeat"
       mark_all_captain_relevant_surfaced

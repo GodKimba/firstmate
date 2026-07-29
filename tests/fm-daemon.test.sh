@@ -23,6 +23,30 @@ fi
 
 TMP_ROOT=$(fm_test_tmproot fm-daemon-tests)
 
+classify_stale_with_supervision_state() (
+  # shellcheck disable=SC2329
+  crew_absorb_class() { printf '%s' "${FM_TEST_CREW_CLASS:-paused}"; }
+  # shellcheck disable=SC2329
+  fm_backend_agent_alive() { printf '%s' "${FM_TEST_ENDPOINT:-alive}"; }
+  classify_stale "$@"
+)
+
+handle_wake_with_supervision_state() (
+  # shellcheck disable=SC2329
+  crew_absorb_class() { printf '%s' "${FM_TEST_CREW_CLASS:-paused}"; }
+  # shellcheck disable=SC2329
+  fm_backend_agent_alive() { printf '%s' "${FM_TEST_ENDPOINT:-alive}"; }
+  handle_wake "$@"
+)
+
+housekeeping_with_supervision_state() (
+  # shellcheck disable=SC2329
+  crew_absorb_class() { printf '%s' "${FM_TEST_CREW_CLASS:-paused}"; }
+  # shellcheck disable=SC2329
+  fm_backend_agent_alive() { printf '%s' "${FM_TEST_ENDPOINT:-alive}"; }
+  housekeeping "$@"
+)
+
 test_afk_start_refuses_when_flag_cannot_be_written() {
   local dir state out status
   dir=$(make_supercase afk-start-flag-unwritable)
@@ -162,9 +186,48 @@ test_stale_paused_classifies_pause() {
   pause_reason='paused: waiting for upstream checks green, merged, and blocked state to clear'
   status_is_captain_relevant "$pause_reason" && fail "pause reason phrases made the status captain-relevant"
   printf '%s\n' "$pause_reason" > "$state/held-w9.status"
-  out=$(FM_STATE_OVERRIDE="$state" classify_stale "sess:fm-held-w9" "$state")
+  out=$(FM_STATE_OVERRIDE="$state" classify_stale_with_supervision_state "sess:fm-held-w9" "$state")
   case "$out" in pause\|*) ;; *) fail "declared pause did not classify as pause: $out" ;; esac
-  pass "paused reasons with captain phrases remain pause-classified"
+  printf 'blocked [key=database]: maintenance failed\npaused [key=external]: waiting for maintenance completion\n' > "$state/held-w9.status"
+  out=$(FM_STATE_OVERRIDE="$state" classify_stale_with_supervision_state "sess:fm-held-w9" "$state")
+  case "$out" in escalate\|*) ;; *) fail "open blocker was hidden by a later pause: $out" ;; esac
+  pass "paused reasons stay bounded while open blockers retain precedence"
+}
+
+test_stale_pause_requires_current_state_and_live_endpoint() {
+  local dir state out current endpoint scenario
+  dir=$(make_supercase stale-pause-validity)
+  state="$dir/state"
+  printf 'paused: waiting for the maintenance window\n' > "$state/held-validity.status"
+  for scenario in "none alive" "paused dead" "paused unknown"; do
+    read -r current endpoint <<<"$scenario"
+    out=$(FM_TEST_CREW_CLASS="$current" FM_TEST_ENDPOINT="$endpoint" FM_STATE_OVERRIDE="$state" \
+      classify_stale_with_supervision_state "sess:fm-held-validity" "$state")
+    case "$out" in
+      escalate\|*) ;;
+      *) fail "pause with current=$current endpoint=$endpoint did not escalate: $out" ;;
+    esac
+    rm -f "$state/.subsuper-seen-status-held-validity"
+  done
+  pass "away stale classification requires an authoritative pause on a live endpoint"
+}
+
+test_stale_unreadable_capture_escalates_despite_working_state() {
+  local dir state out win watcher_key
+  dir=$(make_supercase stale-unreadable-working)
+  state="$dir/state"
+  win="sess:fm-held-unreadable"
+  printf 'window=%s\nkind=ship\n' "$win" > "$state/held-unreadable.meta"
+  printf 'paused: waiting for the maintenance window\n' > "$state/held-unreadable.status"
+  watcher_key=$(printf '%s' "$win" | tr ':/.' '___')
+  printf '%s' "$(capture_unreadable_stale_identity)" > "$state/.stale-surfaced-$watcher_key"
+  out=$(FM_TEST_CREW_CLASS=working FM_TEST_ENDPOINT=alive FM_STATE_OVERRIDE="$state" \
+    classify_stale_with_supervision_state "$win" "$state")
+  case "$out" in
+    escalate\|*endpoint\ unreadable*) ;;
+    *) fail "unreadable capture was masked by live active-run state: $out" ;;
+  esac
+  pass "away stale classification escalates unreadable capture evidence despite active work"
 }
 
 # handle_wake on a paused stale records a pause marker, drops any pre-existing wedge
@@ -178,7 +241,7 @@ test_handle_wake_paused_records_pause_marker() {
   printf 'paused: awaiting the vendor rate-limit reset\n' > "$state/held-w10.status"
   key=$(printf '%s' "held-w10" | tr ':/.' '___')
   date +%s > "$state/.subsuper-stale-$key"
-  FM_STATE_OVERRIDE="$state" handle_wake "stale: $win" "$state"
+  FM_STATE_OVERRIDE="$state" handle_wake_with_supervision_state "stale: $win" "$state"
   [ -e "$state/.subsuper-paused-$key" ] || fail "pause marker not recorded by handle_wake"
   [ ! -e "$state/.subsuper-stale-$key" ] || fail "wedge marker not cleared when the crew declared a pause"
   [ ! -s "$state/.subsuper-escalations" ] || fail "a declared pause escalated on the wake itself (should defer to the long recheck)"
@@ -194,7 +257,7 @@ test_handle_wake_paused_signal_records_pause_marker() {
   printf 'paused: awaiting the vendor rate-limit reset\n' > "$state/held-w10-signal.status"
   key=$(printf '%s' "held-w10-signal" | tr ':/.' '___')
   date +%s > "$state/.subsuper-stale-$key"
-  FM_STATE_OVERRIDE="$state" handle_wake "signal: $state/held-w10-signal.status" "$state"
+  FM_STATE_OVERRIDE="$state" handle_wake_with_supervision_state "signal: $state/held-w10-signal.status" "$state"
   [ -e "$state/.subsuper-paused-$key" ] || fail "pause signal did not record a pause marker"
   [ ! -e "$state/.subsuper-stale-$key" ] || fail "pause signal did not clear the wedge marker"
   [ ! -s "$state/.subsuper-escalations" ] || fail "a declared pause signal escalated instead of self-handling"
@@ -235,7 +298,7 @@ test_housekeeping_migrates_watcher_pause_marker() {
   printf 'paused: awaiting the upstream release\n' > "$state/held-w10-migrate.status"
   key=$(printf '%s' "$win" | tr '.:/' '___')
   : > "$state/.paused-$key"
-  FM_STATE_OVERRIDE="$state" housekeeping "$state"
+  FM_STATE_OVERRIDE="$state" housekeeping_with_supervision_state "$state"
   key=$(printf '%s' "held-w10-migrate" | tr '.:/' '___')
   [ -e "$state/.subsuper-paused-$key" ] || fail "watcher pause marker was not migrated into daemon tracking"
   [ ! -e "$state/.subsuper-stale-$key" ] || fail "watcher pause migration left a wedge marker behind"
@@ -251,7 +314,7 @@ test_housekeeping_migrates_watcher_unpaused_marker_to_clear() {
   printf 'working: upstream landed, resuming\n' > "$state/held-w10-migrate-unpaused.status"
   watcher_key=$(printf '%s' "$win" | tr '.:/' '___')
   : > "$state/.paused-$watcher_key"
-  FM_STATE_OVERRIDE="$state" housekeeping "$state"
+  FM_STATE_OVERRIDE="$state" housekeeping_with_supervision_state "$state"
   key=$(printf '%s' "held-w10-migrate-unpaused" | tr '.:/' '___')
   [ ! -e "$state/.paused-$watcher_key" ] || fail "stale watcher pause marker was not cleared after resume"
   [ ! -e "$state/.subsuper-paused-$key" ] || fail "unpaused watcher handoff created a daemon pause marker"
@@ -268,10 +331,72 @@ test_housekeeping_seeds_pause_marker_from_status() {
   printf 'window=%s\nkind=ship\n' "$win" > "$state/held-w10-seed.meta"
   printf 'paused: awaiting the upstream release\n' > "$state/held-w10-seed.status"
   key=$(printf '%s' "held-w10-seed" | tr '.:/' '___')
-  FM_STATE_OVERRIDE="$state" housekeeping "$state"
+  FM_STATE_OVERRIDE="$state" housekeeping_with_supervision_state "$state"
   [ -e "$state/.subsuper-paused-$key" ] || fail "paused status did not seed daemon pause tracking"
   [ ! -e "$state/.subsuper-stale-$key" ] || fail "paused status seeded wedge tracking"
   pass "housekeeping seeds pause tracking from status without a watcher marker"
+}
+
+test_housekeeping_pause_endpoint_loss_escalates_immediately() {
+  local dir state win key
+  dir=$(make_supercase paused-endpoint-loss)
+  state="$dir/state"
+  win="sess:fm-held-endpoint-loss"
+  printf 'window=%s\nkind=ship\n' "$win" > "$state/held-endpoint-loss.meta"
+  printf 'paused: awaiting the upstream release\n' > "$state/held-endpoint-loss.status"
+  key=$(printf '%s' "held-endpoint-loss" | tr '.:/' '___')
+  date +%s > "$state/.subsuper-paused-$key"
+  date +%s > "$state/.subsuper-pause-rechecked-$key"
+  FM_TEST_ENDPOINT=dead FM_STATE_OVERRIDE="$state" FM_PAUSE_RESURFACE_SECS=999999 \
+    housekeeping_with_supervision_state "$state"
+  grep -F "not current on a live endpoint" "$state/.subsuper-escalations" >/dev/null \
+    || fail "endpoint loss stayed hidden behind the pause cadence"
+  [ ! -e "$state/.subsuper-paused-$key" ] || fail "endpoint loss retained pause tracking"
+  [ -e "$state/.subsuper-stale-$key" ] || fail "endpoint loss did not resume normal stale tracking"
+  pass "away housekeeping surfaces endpoint loss before the long pause cadence"
+}
+
+test_housekeeping_authoritative_working_pause_keeps_wedge_aging() {
+  local dir state fakebin win pane key
+  dir=$(make_supercase paused-working-wedge)
+  state="$dir/state"; fakebin="$dir/fakebin"
+  win="sess:fm-held-working"; pane="$dir/pane.txt"
+  printf 'paused: awaiting the upstream release\n' > "$state/held-working.status"
+  printf 'idle prompt $\n' > "$pane"
+  key=$(printf '%s' "held-working" | tr '.:/' '___')
+  echo $(( $(date +%s) - 500 )) > "$state/.subsuper-stale-$key"
+  date +%s > "$state/.subsuper-paused-$key"
+  date +%s > "$state/.subsuper-pause-rechecked-$key"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
+    FM_TEST_CREW_CLASS=working FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=240 \
+    housekeeping_with_supervision_state "$state"
+  grep -F "possible wedge" "$state/.subsuper-escalations" >/dev/null \
+    || fail "authoritative working state behind an old pause stopped wedge aging"
+  [ ! -e "$state/.subsuper-paused-$key" ] || fail "authoritative working state retained pause tracking"
+  pass "away housekeeping keeps wedge aging when current work outranks an old pause"
+}
+
+test_housekeeping_invalid_pause_preserves_wedge_aging() {
+  local dir state fakebin win pane key
+  dir=$(make_supercase invalid-pause-wedge)
+  state="$dir/state"; fakebin="$dir/fakebin"
+  win="sess:fm-held-invalid"; pane="$dir/pane.txt"
+  printf 'paused: awaiting the upstream release\n' > "$state/held-invalid.status"
+  printf 'idle prompt $\n' > "$pane"
+  key=$(printf '%s' "held-invalid" | tr '.:/' '___')
+  echo $(( $(date +%s) - 500 )) > "$state/.subsuper-stale-$key"
+  date +%s > "$state/.subsuper-paused-$key"
+  date +%s > "$state/.subsuper-pause-rechecked-$key"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
+    FM_TEST_CREW_CLASS=none FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=240 \
+    housekeeping_with_supervision_state "$state"
+  grep -F "declared pause is not current" "$state/.subsuper-escalations" >/dev/null \
+    || fail "invalid pause did not surface"
+  grep -F "possible wedge" "$state/.subsuper-escalations" >/dev/null \
+    || fail "invalid pause reset or bypassed existing wedge aging"
+  [ ! -e "$state/.subsuper-paused-$key" ] || fail "invalid pause retained pause tracking"
+  [ ! -e "$state/.subsuper-stale-$key" ] || fail "escalated invalid-pause wedge retained stale tracking"
+  pass "away housekeeping preserves wedge aging after a pause becomes invalid"
 }
 
 # housekeeping re-surfaces a stale declared pause only past PAUSE_RESURFACE_SECS,
@@ -287,7 +412,7 @@ test_housekeeping_paused_resurfaces_and_resets() {
   key=$(printf '%s' "held-w11" | tr ':/.' '___')
   echo $(( $(date +%s) - 5000 )) > "$state/.subsuper-paused-$key"
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
-    FM_STATE_OVERRIDE="$state" FM_PAUSE_RESURFACE_SECS=240 housekeeping "$state"
+    FM_STATE_OVERRIDE="$state" FM_PAUSE_RESURFACE_SECS=240 housekeeping_with_supervision_state "$state"
   grep -F "awaiting external" "$state/.subsuper-escalations" >/dev/null 2>&1 || fail "declared pause was not re-surfaced as an awaiting-external recheck"
   grep -F "possible wedge" "$state/.subsuper-escalations" >/dev/null 2>&1 && fail "declared pause was mislabeled a possible wedge"
   [ -e "$state/.subsuper-paused-$key" ] || fail "pause marker cleared instead of reset for the next window"
@@ -308,7 +433,7 @@ test_housekeeping_paused_resumed_cleared() {
   key=$(printf '%s' "held-w12" | tr ':/.' '___')
   echo $(( $(date +%s) - 5000 )) > "$state/.subsuper-paused-$key"
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
-    FM_STATE_OVERRIDE="$state" FM_PAUSE_RESURFACE_SECS=240 housekeeping "$state"
+    FM_STATE_OVERRIDE="$state" FM_PAUSE_RESURFACE_SECS=240 housekeeping_with_supervision_state "$state"
   [ -e "$state/.subsuper-paused-$key" ] && fail "resumed (busy) pause marker was not cleared"
   [ ! -s "$state/.subsuper-escalations" ] || fail "a resumed pause was escalated"
   pass "housekeeping clears a paused marker whose pane became busy again, without escalating"
@@ -342,7 +467,7 @@ test_housekeeping_stale_marker_transitions_to_pause() {
   key=$(printf '%s' "held-w14" | tr ':/.' '___')
   echo $(( $(date +%s) - 5000 )) > "$state/.subsuper-stale-$key"
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
-    FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=240 housekeeping "$state"
+    FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=240 housekeeping_with_supervision_state "$state"
   [ -e "$state/.subsuper-paused-$key" ] || fail "existing stale marker did not move to paused state"
   [ ! -e "$state/.subsuper-stale-$key" ] || fail "existing stale marker remained wedge-aged after pause"
   [ ! -s "$state/.subsuper-escalations" ] || fail "a newly declared pause was escalated as a possible wedge"
@@ -610,6 +735,36 @@ test_retained_decision_signal_and_scan_dedup() {
   [ ! -s "$state/.subsuper-escalations" ] \
     || fail "daemon catch-all re-fired the same retained decision occurrence"
   pass "daemon signal and catch-all surface retained decisions once per occurrence"
+}
+
+test_retained_blocker_signal_and_scan_dedup() {
+  local dir state status_file out instance marker
+  dir=$(make_supercase retained-blocker-dedup)
+  state="$dir/state"
+  status_file="$state/retained-blocker.status"
+  printf '%s\n' \
+    'blocked [key=database]: maintenance failed' \
+    'paused [key=external]: waiting for maintenance completion' >> "$status_file"
+  instance=$(status_open_supervision_decisions "$status_file" | awk -F '\t' '$2 == "blocked" { print $3; exit }')
+  out=$(FM_STATE_OVERRIDE="$state" classify_signal "$status_file" "$state")
+  case "$out" in
+    escalate\|*open\ blocked*occurrence="$instance"*) ;;
+    *) fail "daemon signal classifier hid the retained blocker behind pause: $out" ;;
+  esac
+  FM_STATE_OVERRIDE="$state" handle_wake "signal: $status_file" "$state"
+  marker="$state/.subsuper-seen-decision-$instance"
+  [ "$(cat "$marker" 2>/dev/null || true)" = "$instance" ] \
+    || fail "daemon signal path did not mark the retained blocker occurrence seen"
+  : > "$state/.subsuper-escalations"
+  rm -f "$state/.subsuper-last-scan"
+  FM_STATE_OVERRIDE="$state" housekeeping "$state"
+  [ ! -s "$state/.subsuper-escalations" ] \
+    || fail "daemon catch-all re-fired a retained blocker already surfaced by signal"
+  rm -f "$marker" "$state/.subsuper-last-scan"
+  FM_STATE_OVERRIDE="$state" housekeeping "$state"
+  grep -F "open blocked" "$state/.subsuper-escalations" | grep -F "occurrence=$instance" >/dev/null \
+    || fail "daemon catch-all omitted an unsurfaced retained blocker occurrence"
+  pass "daemon signal and catch-all surface retained blockers once per occurrence"
 }
 
 test_handle_wake_routes_self_and_escalate() {
@@ -1812,12 +1967,17 @@ test_classify_check_and_unknown_escalate
 test_stale_transient_self_records_marker
 test_stale_terminal_escalates
 test_stale_paused_classifies_pause
+test_stale_pause_requires_current_state_and_live_endpoint
+test_stale_unreadable_capture_escalates_despite_working_state
 test_handle_wake_paused_records_pause_marker
 test_handle_wake_paused_signal_records_pause_marker
 test_handle_wake_terminal_signal_clears_pause_tracking
 test_housekeeping_migrates_watcher_pause_marker
 test_housekeeping_migrates_watcher_unpaused_marker_to_clear
 test_housekeeping_seeds_pause_marker_from_status
+test_housekeeping_pause_endpoint_loss_escalates_immediately
+test_housekeeping_authoritative_working_pause_keeps_wedge_aging
+test_housekeeping_invalid_pause_preserves_wedge_aging
 test_housekeeping_persistent_stale_escalates
 test_housekeeping_resumed_stale_cleared
 test_housekeeping_paused_resurfaces_and_resets
@@ -1833,6 +1993,7 @@ test_escalate_batches_into_one_digest
 test_escalate_batch_age_uses_first_append
 test_heartbeat_scan_dedup
 test_retained_decision_signal_and_scan_dedup
+test_retained_blocker_signal_and_scan_dedup
 test_handle_wake_routes_self_and_escalate
 test_inject_skip_forces_self
 test_is_wake_reason_distinguishes_status_stdout
