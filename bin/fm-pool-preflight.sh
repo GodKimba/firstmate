@@ -32,11 +32,11 @@
 # `--pool` reports the pool's best known all-models reading. That is an optimistic
 # snapshot of observed capacity, not a bound on the account the proxy will route.
 #
-# WHICH MODE MATCHES A no-mistakes VALIDATION: `--pool`, because the machine-wide
-# Codex agent now runs through the CLIProxyAPI pool profile rather than one
-# ambient direct account. `--direct` still measures that ambient login, which
-# serves whatever has not been pool-routed.
-# docs/verification/pool-account-routing.md records that cutover and its proof.
+# WHICH MODE MATCHES A no-mistakes VALIDATION depends on that machine's agent
+# configuration. Use `--pool` when its Codex agent runs through the CLIProxyAPI
+# pool profile, and `--direct` when it still uses the ambient login.
+# docs/verification/pool-account-routing.md records the captain's machine-wide
+# pool cutover and its proof.
 #
 # DECISION
 #
@@ -48,10 +48,11 @@
 # decision instead of being optimistically waved through.
 # It is also not `hold`: the caller may still choose to proceed knowingly.
 #
-# ALL-TIGHT BEHAVIOUR: when every candidate is below the floor this reports
-# `hold` with the best observed headroom attached. It never silently downgrades a
-# requested strongest-reasoning model to a weaker one to conserve quota; that
-# trade belongs to the captain, so the tight state is reported instead.
+# ALL-TIGHT BEHAVIOUR: when every measured candidate is below the floor this
+# reports `hold` with the best observed headroom attached. It never silently
+# downgrades a requested strongest-reasoning model to a weaker one to conserve
+# quota; that trade belongs to the captain, so the tight state is reported
+# instead.
 #
 # QUOTA SEMANTICS stay owned by quota-axi. This script compares an already
 # normalized effective-percent-remaining against a floor and performs no quota

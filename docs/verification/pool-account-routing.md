@@ -2,13 +2,13 @@
 
 Audience: maintainer verification.
 This record holds the empirical facts that decide where account selection for the local CLIProxyAPI pool can and cannot live.
-It is the disconfirming-evidence owner for the pool-routing design; `docs/configuration.md` owns the resulting operator-facing configuration.
+It is the disconfirming-evidence owner for the pool-routing design and the captain's machine-specific cutover.
+`docs/configuration.md` remains the operator owner for the repository's `/poolquota` feature.
 
 Verified 2026-07-29 on macOS (Darwin 25.5.0) with cliproxyapi from Homebrew, `codex-cli 0.145.0`, `no-mistakes v1.41.2`, and `quota-axi 0.1.13`.
 
 The machine-global routing cutover recorded here changes no repository behavior because its configuration lives in `~/.no-mistakes/config.yaml` outside this repository.
-This branch as a whole is not documentation-only: it also introduces `bin/fm-pool-preflight.sh` and its behavior tests.
-That command is separate advisory behavior and does not enact or configure the routing cutover.
+`bin/fm-pool-preflight.sh` is separate advisory repository behavior with behavior tests; it does not enact or configure the routing cutover.
 
 ## Why this record exists
 
@@ -60,7 +60,7 @@ The one interface that can enumerate and manipulate pooled accounts is the Manag
 Its `secret-key` is empty in the local configuration, and the proxy's own comment states that empty means "disable the Management API entirely (404 for all /v0/management routes)".
 Confirmed empty by parsing the `remote-management` block.
 
-The task brief forbids enabling it.
+The local security boundary requires it to remain disabled.
 It is therefore not an available interface, and this record does not treat it as a latent option: enabling a management control plane to pick an account would add a privileged mutation surface to solve a routing problem the proxy already solves.
 
 ## Codex can reach the pool, but not a chosen account
@@ -82,7 +82,7 @@ env_key = "CLIPROXY_API_KEY"
 So routing a Codex run through the pool is supported and needs no new mechanism.
 
 What that buys is pool access, not account choice: once the request reaches the proxy, account selection is the proxy's, per the section above.
-`~/.codex/config.toml` sets `model` and `model_reasoning_effort` with no `model_provider`, so the default Codex path is direct authentication - which is the ambient-account behavior the brief set out to remove.
+`~/.codex/config.toml` sets `model` and `model_reasoning_effort` with no `model_provider`, so the default Codex path is direct authentication - the ambient-account dependency the cutover removes.
 The cutover recorded below removes it for no-mistakes validations by selecting the profile per invocation, leaving this base config untouched for everything else.
 
 ## no-mistakes cannot bind a per-run Codex profile
@@ -102,10 +102,10 @@ Extra agent flags come from `agent_args_override`, whose own comment states it i
 There is no per-run, per-repo, or per-branch agent-argument surface.
 
 Consequence: any change that routes the no-mistakes Codex agent through the pool is **global to every repository and every concurrent lane on this machine**, not scoped to one validation run.
-Confirmed the hazard is live rather than theoretical: `no-mistakes status` showed an active run on another branch (`fm/fm-decision-hold-colon-title-idempotency`) while this task was being investigated.
+No-mistakes can run concurrent lanes under that one global configuration, so the concurrency hazard is operational rather than hypothetical.
 
 A task-bound pool reservation for one Codex validation run is therefore unimplementable with the installed no-mistakes contract.
-Attempting it by writing global config at run start and reverting at run end would corrupt any concurrently running lane's agent configuration, and would violate the shared-daemon rule that firstmate briefs already enforce.
+Attempting it by writing global config at run start and reverting at run end would corrupt any concurrently running lane's agent configuration and violate the shared-daemon concurrency boundary.
 
 ## Quota data is per-account and normalized, and is not the blocker
 
@@ -160,7 +160,10 @@ What the probes established, each read-only and printing no credential:
   It does not fall back to the ambient direct login, so a broken pool route is loud rather than a silent return to the account this work set out to stop depending on.
 - `--profile` applies only to codex runtime commands, so `codex doctor` rejects it and cannot be used to verify profile resolution.
 - `no-mistakes doctor` does not validate `agent_args_override`; an isolated `NM_HOME` probe accepted an argument the binary's own error text calls managed.
-  Validation happens when a run starts, so whether `--profile` survives it is proven only by a real run.
+  Validation happens when a run starts, so doctor alone cannot prove whether `--profile` survives it.
+
+No-mistakes v1.41.2 accepted this exact `--profile` override in a real controlled run on 2026-07-29.
+That establishes validator acceptance without making `no-mistakes doctor` a valid check.
 
 Two operational cautions this record exists to preserve:
 
