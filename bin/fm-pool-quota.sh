@@ -43,8 +43,9 @@
 # Output: TOON by default, `--json` for the identical model as JSON. The default
 # projection is the concise provider-level view; `--accounts` reveals the masked
 # per-account and per-window rows, and `omitted` always discloses what was
-# dropped. Every run also regenerates a self-contained local HTML panel with the
-# complete detail from that same fresh read.
+# dropped. By default, every run also regenerates a self-contained local HTML
+# panel with the complete detail from that same fresh read. Programmatic callers
+# can pass `--no-panel` to skip that durable artifact.
 #
 # The panel is deliberately self-contained with inline CSS and zero external
 # requests: this artifact renders subscription health next to credential-derived
@@ -58,6 +59,7 @@
 #   fm-pool-quota.sh --json               the same model as JSON
 #   fm-pool-quota.sh --accounts           also reveal masked account/window rows
 #   fm-pool-quota.sh --panel              explicitly request the default panel
+#   fm-pool-quota.sh --no-panel           do not create or replace the panel
 #   fm-pool-quota.sh --help               print this usage
 #
 # Environment:
@@ -67,7 +69,7 @@
 #   FM_POOL_QUOTA_NOW        pin "now" to an epoch for deterministic output
 #   FM_POOL_QUOTA_BIN        quota-axi command name (default quota-axi)
 #
-# Output contract: `fm-pool-quota.v1`. Read-only; no locks, no mutation.
+# Output contract: `fm-pool-quota.v1`. Pool and routing read-only; no locks.
 set -u
 export LC_ALL=C
 
@@ -106,6 +108,7 @@ while [ $# -gt 0 ]; do
     --json) FORMAT=json ;;
     --accounts) SHOW_ACCOUNTS=1 ;;
     --panel) WRITE_PANEL=1 ;;
+    --no-panel) WRITE_PANEL=0 ;;
     -h|--help) usage; exit 0 ;;
     *) die "unknown argument '$1' (see --help)" ;;
   esac
@@ -113,7 +116,7 @@ while [ $# -gt 0 ]; do
 done
 
 command -v jq >/dev/null 2>&1 || die "jq is required"
-command -v node >/dev/null 2>&1 || die "node is required"
+[ "$WRITE_PANEL" -eq 0 ] || command -v node >/dev/null 2>&1 || die "node is required"
 command -v "$QUOTA_BIN" >/dev/null 2>&1 || die "$QUOTA_BIN is required (it owns provider quota semantics)"
 
 NOW=${FM_POOL_QUOTA_NOW:-$(date -u +%s)}
