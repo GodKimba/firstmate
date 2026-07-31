@@ -97,6 +97,7 @@ AGY_FAKE_ARGS="$FIXTURE/args.log" \
 AGY_FAKE_COUNTS="$FIXTURE/counts.json" \
 node --input-type=module <<'JS'
 import assert from "node:assert/strict";
+import { EventEmitter } from "node:events";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -239,6 +240,33 @@ function toolsWithSearchDependencies(dependencies) {
   return registered;
 }
 
+async function settlesWithin(promise, label) {
+  let timer;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`${label} did not settle`)), 250);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function fakeChild({ stdout, error, code = 0 }) {
+  const child = new EventEmitter();
+  child.stdout = new EventEmitter();
+  child.stderr = new EventEmitter();
+  child.kill = () => true;
+  queueMicrotask(() => {
+    if (stdout) child.stdout.emit("data", Buffer.from(stdout));
+    if (error) child.emit("error", error);
+    else child.emit("close", code, null);
+  });
+  return child;
+}
+
 const cachedFixtureKey = extension.cacheKey({
   query: "RETRY_TEST official docs",
   limit: 3,
@@ -307,6 +335,75 @@ await assert.rejects(temporaryDirectoryRaceResult, /cancelled during agy tempora
 assert.deepEqual(removedTemporaryDirectories, ["/virtual/pi-agy-search-cancelled"]);
 assert.equal(temporaryDirectoryRaceSpawns, 0);
 
+const cleanupOutput = JSON.stringify({
+  status: "SUCCESS",
+  response: "cleanup success",
+  structured_output: {
+    summary: "cleanup success",
+    queries: [],
+    results: [{ title: "Cleanup source", url: "https://example.com/cleanup", snippet: "source" }],
+    notes: [],
+  },
+});
+const cleanupAttempts = [];
+const cleanupCloseSearch = toolsWithSearchDependencies({
+  async createTemporaryDirectory() { return "/virtual/pi-agy-search-cleanup-close"; },
+  async removeTemporaryDirectory(path) {
+    cleanupAttempts.push(path);
+    throw new Error("cleanup close rejection");
+  },
+  async writeCache() {},
+  spawnProcess() { return fakeChild({ stdout: cleanupOutput }); },
+}).get("gemini_search");
+const cleanupCloseResult = await settlesWithin(cleanupCloseSearch.execute(
+  "cleanup-close",
+  { query: "CLEANUP_CLOSE", validateUrls: false, forceRefresh: true },
+  undefined,
+  undefined,
+), "agy close after cleanup rejection");
+assert.equal(cleanupCloseResult.details.summary, "cleanup success");
+
+const cleanupErrorSearch = toolsWithSearchDependencies({
+  async createTemporaryDirectory() { return "/virtual/pi-agy-search-cleanup-error"; },
+  async removeTemporaryDirectory(path) {
+    cleanupAttempts.push(path);
+    throw new Error("cleanup error rejection");
+  },
+  spawnProcess() { return fakeChild({ error: new Error("primary child error") }); },
+}).get("gemini_search");
+await assert.rejects(
+  settlesWithin(cleanupErrorSearch.execute(
+    "cleanup-error",
+    { query: "CLEANUP_ERROR", validateUrls: false, forceRefresh: true },
+    undefined,
+    undefined,
+  ), "agy error after cleanup rejection"),
+  /primary child error/,
+);
+
+const cleanupSpawnSearch = toolsWithSearchDependencies({
+  async createTemporaryDirectory() { return "/virtual/pi-agy-search-cleanup-spawn"; },
+  async removeTemporaryDirectory(path) {
+    cleanupAttempts.push(path);
+    throw new Error("cleanup spawn rejection");
+  },
+  spawnProcess() { throw new Error("primary spawn error"); },
+}).get("gemini_search");
+await assert.rejects(
+  settlesWithin(cleanupSpawnSearch.execute(
+    "cleanup-spawn",
+    { query: "CLEANUP_SPAWN", validateUrls: false, forceRefresh: true },
+    undefined,
+    undefined,
+  ), "agy spawn throw after cleanup rejection"),
+  /primary spawn error/,
+);
+assert.deepEqual(cleanupAttempts, [
+  "/virtual/pi-agy-search-cleanup-close",
+  "/virtual/pi-agy-search-cleanup-error",
+  "/virtual/pi-agy-search-cleanup-spawn",
+]);
+
 await search.execute("call-3", {
   query: "RETRY_TEST official docs",
   limit: 3,
@@ -347,6 +444,79 @@ setTimeout(() => controller.abort(), 100);
 await assert.rejects(cancellation, /cancelled while agy was running/);
 assert(Date.now() - cancellationStarted < 3000);
 
+const hostileTerminalText = "visible\x1b]52;c;clipboard\x07\x1b[2J\x9b31m\rhidden";
+const trustedThemePrefix = "\x1b[32m";
+const testTheme = {
+  fg(_color, value) { return `${trustedThemePrefix}${value}\x1b[39m`; },
+  bold(value) { return `\x1b[1m${value}\x1b[22m`; },
+};
+function renderText(component) {
+  return component.render(320).join("\n");
+}
+function assertNoHostileTerminalSequences(value) {
+  assert.doesNotMatch(value, /\x1b\]52|\x1b\[2J|\x9b|\x07/);
+}
+const hostileCall = renderText(search.renderCall({ query: hostileTerminalText }, testTheme));
+const hostileDetails = {
+  query: hostileTerminalText,
+  limit: 1,
+  mode: "search",
+  cached: true,
+  validateUrls: true,
+  status: "done",
+  cacheWritten: true,
+  cacheExpiresAt: hostileTerminalText,
+  confidence: "high",
+  source: "agy-cli-search-web",
+  binary: hostileTerminalText,
+  model: hostileTerminalText,
+  stderr: hostileTerminalText,
+  durationMs: 10,
+  retryAttempts: 1,
+  summary: hostileTerminalText,
+  queries: [hostileTerminalText],
+  results: [{
+    title: hostileTerminalText,
+    url: `https://source.example/${hostileTerminalText}`,
+    snippet: hostileTerminalText,
+    source: "agy-search-web",
+    warning: hostileTerminalText,
+    confidence: "high",
+    validation: {
+      ok: true,
+      status: 200,
+      finalUrl: `https://final.example/${hostileTerminalText}`,
+      contentType: hostileTerminalText,
+      method: "GET",
+      quality: "high",
+      error: hostileTerminalText,
+    },
+  }],
+  notes: [hostileTerminalText],
+  rawResponseText: hostileTerminalText,
+};
+const hostileCollapsed = renderText(search.renderResult(
+  { content: [{ type: "text", text: hostileTerminalText }], details: hostileDetails },
+  { expanded: false },
+  testTheme,
+));
+const hostileExpanded = renderText(search.renderResult(
+  { content: [{ type: "text", text: hostileTerminalText }], details: hostileDetails },
+  { expanded: true },
+  testTheme,
+));
+const hostileFallback = renderText(search.renderResult(
+  { content: [{ type: "text", text: hostileTerminalText }] },
+  {},
+  testTheme,
+));
+for (const rendered of [hostileCall, hostileCollapsed, hostileExpanded, hostileFallback]) {
+  assertNoHostileTerminalSequences(rendered);
+  assert.match(rendered, /visible/);
+}
+assert.match(hostileCall, /\x1b\[32m/);
+assert.match(hostileExpanded, /\x1b\[32m/);
+
 function toolsWithNetwork(network) {
   const registered = new Map();
   extension.default({ registerTool(tool) { registered.set(tool.name, tool); } }, network);
@@ -373,6 +543,40 @@ const reboundResult = await reboundFetch.execute("fetch-bound", { urls: ["https:
 assert.equal(reboundResult.details.pages[0].text, "bound body");
 assert.equal(rebindLookups, 1);
 assert.equal(boundRequests, 1);
+
+const fallbackAttempts = [];
+const timedOutAddresses = [];
+const fallbackNetwork = {
+  addressAttemptTimeoutMs: 5,
+  async lookupHost(hostname) {
+    assert.equal(hostname, "fallback.example");
+    return [
+      { address: "93.184.216.34", family: 4 },
+      { address: "1.1.1.1", family: 4 },
+      { address: "8.8.8.8", family: 4 },
+    ];
+  },
+  async requestAddress(_url, address, _init, signal) {
+    fallbackAttempts.push(address.address);
+    if (address.address === "93.184.216.34") throw new Error("first address unreachable");
+    if (address.address === "1.1.1.1") {
+      return new Promise((_resolve, reject) => {
+        const rejectTimedOut = () => {
+          timedOutAddresses.push(address.address);
+          reject(new Error("second address cancelled"));
+        };
+        signal.addEventListener("abort", rejectTimedOut, { once: true });
+        if (signal.aborted) rejectTimedOut();
+      });
+    }
+    return new Response("fallback body", { status: 200, headers: { "content-type": "text/plain" } });
+  },
+};
+const fallbackFetch = toolsWithNetwork(fallbackNetwork).get("web_fetch");
+const fallbackResult = await fallbackFetch.execute("fetch-fallback", { urls: ["https://fallback.example/start"] }, undefined, undefined);
+assert.deepEqual(fallbackAttempts, ["93.184.216.34", "1.1.1.1", "8.8.8.8"]);
+assert.deepEqual(timedOutAddresses, ["1.1.1.1"]);
+assert.equal(fallbackResult.details.pages[0].text, "fallback body");
 
 const redirectRequests = [];
 const redirectNetwork = {
@@ -403,6 +607,20 @@ const sizeNetwork = {
 const sizeFetch = toolsWithNetwork(sizeNetwork).get("web_fetch");
 const sizeBlocked = await sizeFetch.execute("fetch-size", { urls: ["https://large.example/file"] }, undefined, undefined);
 assert.match(sizeBlocked.details.pages[0].error, /exceeds 1500000 byte safety limit/);
+
+const hostilePageNetwork = {
+  async lookupHost() { return [{ address: "93.184.216.34", family: 4 }]; },
+  async requestAddress() {
+    return new Response(`<html><title>${hostileTerminalText}</title><body>${hostileTerminalText}</body></html>`, {
+      status: 200,
+      headers: { "content-type": "text/html" },
+    });
+  },
+};
+const hostilePageFetch = toolsWithNetwork(hostilePageNetwork).get("web_fetch");
+const hostilePageResult = await hostilePageFetch.execute("fetch-hostile-page", { urls: ["https://page.example/content"] }, undefined, undefined);
+assertNoHostileTerminalSequences(hostilePageResult.content[0].text);
+assert.match(hostilePageResult.content[0].text, /visible/);
 
 const requestStarted = Promise.withResolvers();
 const cancellationRequests = [];
@@ -453,7 +671,8 @@ assert.equal(retryArgs[retryArgs.indexOf("--mode") + 1], "plan");
 assert.equal(retryArgs[retryArgs.indexOf("--output-format") + 1], "json");
 assert.match(retryArgs.at(-1), /Use the search_web tool/);
 
-console.log("ok - agy command construction, structured parsing, retries, cancellation boundaries, strict cache admission, cache separation, and failure output are deterministic");
+console.log("ok - agy command construction, structured parsing, retries, cancellation boundaries, best-effort cleanup, strict cache admission, cache separation, and failure output are deterministic");
 console.log("ok - tracked project settings load the authoritative extension before the configured legacy source without duplicate auto-discovery");
-console.log("ok - web_fetch binds public DNS answers, blocks non-global ranges and redirect rebinding, propagates cancellation, and retains response-size protections");
+console.log("ok - TUI rendering strips untrusted terminal controls while preserving trusted theme styling");
+console.log("ok - web_fetch binds and falls back across public DNS answers, blocks non-global ranges and redirect rebinding, propagates cancellation, and retains response-size protections");
 JS

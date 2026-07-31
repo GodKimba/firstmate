@@ -67,6 +67,7 @@ const MAX_FETCH_CHARS_PER_URL = 30_000;
 const MAX_FETCH_BYTES = 1_500_000;
 const WEB_FETCH_TIMEOUT_MS = 20_000;
 const URL_VALIDATION_TIMEOUT_MS = 8_000;
+const PUBLIC_ADDRESS_ATTEMPT_TIMEOUT_MS = 4_000;
 const MAX_REDIRECTS = 5;
 const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
 
@@ -222,6 +223,10 @@ function cleanText(value: unknown): string {
   return String(value ?? "").replace(/\s+/g, " ").trim();
 }
 
+export function sanitizeTuiText(value: unknown): string {
+  return String(value ?? "").replace(/[\u0000-\u0008\u000B-\u001F\u007F-\u009F]/g, "");
+}
+
 function truncateCapture(value: string): string {
   if (Buffer.byteLength(value, "utf8") <= MAX_CAPTURE_BYTES) return value;
   return value.slice(0, MAX_CAPTURE_BYTES) + "\n[truncated by gemini_search agy capture limit]";
@@ -229,8 +234,8 @@ function truncateCapture(value: string): string {
 
 export function parseAgyCliOutput(stdout: string): { parsed: ParsedAgyResult; rawResponseText: string } {
   const outer = JSON.parse(stdout) as AgyCliJsonOutput;
-  const status = cleanText(outer.status).toUpperCase();
-  const errorText = cleanText(outer.error);
+  const status = sanitizeTuiText(cleanText(outer.status)).toUpperCase();
+  const errorText = sanitizeTuiText(cleanText(outer.error));
   if (status !== "SUCCESS") {
     throw new Error(errorText || `agy returned status ${status || "unknown"}.`);
   }
@@ -433,6 +438,13 @@ const AGY_SEARCH_DEPENDENCIES: AgySearchDependencies = {
   spawnProcess: spawn,
 };
 
+function removeTemporaryDirectoryBestEffort(dependencies: AgySearchDependencies, path: string): void {
+  try {
+    void dependencies.removeTemporaryDirectory(path).catch(() => undefined);
+  } catch {
+  }
+}
+
 function buildPrompt(params: GeminiSearchInput, limit: number): string {
   const mode = params.mode ?? "search";
   const modeInstruction: Record<SearchMode, string> = {
@@ -536,69 +548,76 @@ async function runAgy(
   throwIfAborted(signal, "gemini_search cancelled before agy temporary-directory setup.");
   const cwd = await dependencies.createTemporaryDirectory(join(tmpdir(), "pi-agy-search-"));
   if (signal?.aborted) {
-    await dependencies.removeTemporaryDirectory(cwd);
+    removeTemporaryDirectoryBestEffort(dependencies, cwd);
     throw new Error("gemini_search cancelled during agy temporary-directory setup.");
   }
   throwIfAborted(signal, "gemini_search cancelled before agy spawn.");
   const startedAt = Date.now();
 
-  return new Promise((resolve, reject) => {
-    const args = buildAgyArgs(prompt, model);
-    let stdout = "";
-    let stderr = "";
-    let settled = false;
-    let timedOut = false;
-    let forceKillTimer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await new Promise((resolve, reject) => {
+      const args = buildAgyArgs(prompt, model);
+      let stdout = "";
+      let stderr = "";
+      let settled = false;
+      let timedOut = false;
+      let terminating = false;
+      let forceKillTimer: ReturnType<typeof setTimeout> | undefined;
 
-    const cleanup = async () => {
-      await dependencies.removeTemporaryDirectory(cwd);
-    };
+      const child = dependencies.spawnProcess(AGY_BINARY, args, {
+        cwd,
+        env: { ...process.env, NO_COLOR: "1" },
+        stdio: ["ignore", "pipe", "pipe"],
+      });
 
-    const child = dependencies.spawnProcess(AGY_BINARY, args, {
-      cwd,
-      env: { ...process.env, NO_COLOR: "1" },
-      stdio: ["ignore", "pipe", "pipe"],
-    });
+      const terminate = () => {
+        if (settled || terminating) return;
+        terminating = true;
+        try {
+          child.kill("SIGTERM");
+        } catch {
+        }
+        forceKillTimer = setTimeout(() => {
+          try {
+            child.kill("SIGKILL");
+          } catch {
+          }
+        }, 2_000);
+        forceKillTimer.unref();
+      };
+      const timeout = setTimeout(() => {
+        timedOut = true;
+        terminate();
+      }, TIMEOUT_MS + 2_000);
+      timeout.unref();
 
-    const terminate = () => {
-      child.kill("SIGTERM");
-      forceKillTimer = setTimeout(() => child.kill("SIGKILL"), 2_000);
-      forceKillTimer.unref();
-    };
-    const timeout = setTimeout(() => {
-      timedOut = true;
-      terminate();
-    }, TIMEOUT_MS + 2_000);
-    timeout.unref();
-
-    const abortHandler = () => terminate();
-    signal?.addEventListener("abort", abortHandler, { once: true });
-
-    child.stdout.on("data", (chunk: Buffer) => {
-      stdout = truncateCapture(stdout + chunk.toString("utf8"));
+      const abortHandler = () => terminate();
+      const settle = (complete: () => void) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timeout);
+        if (forceKillTimer) clearTimeout(forceKillTimer);
+        signal?.removeEventListener("abort", abortHandler);
+        complete();
+      };
+      child.stdout.on("data", (chunk: Buffer) => {
+        stdout = truncateCapture(stdout + chunk.toString("utf8"));
+      });
+      child.stderr.on("data", (chunk: Buffer) => {
+        stderr = truncateCapture(stderr + chunk.toString("utf8"));
+      });
+      child.on("error", (error) => {
+        settle(() => reject(error));
+      });
+      child.on("close", (code, childSignal) => {
+        settle(() => resolve({ code, signal: childSignal, stdout, stderr, timedOut, durationMs: Date.now() - startedAt }));
+      });
+      signal?.addEventListener("abort", abortHandler, { once: true });
+      if (signal?.aborted) abortHandler();
     });
-    child.stderr.on("data", (chunk: Buffer) => {
-      stderr = truncateCapture(stderr + chunk.toString("utf8"));
-    });
-    child.on("error", async (error) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timeout);
-      if (forceKillTimer) clearTimeout(forceKillTimer);
-      signal?.removeEventListener("abort", abortHandler);
-      await cleanup();
-      reject(error);
-    });
-    child.on("close", async (code, childSignal) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timeout);
-      if (forceKillTimer) clearTimeout(forceKillTimer);
-      signal?.removeEventListener("abort", abortHandler);
-      await cleanup();
-      resolve({ code, signal: childSignal, stdout, stderr, timedOut, durationMs: Date.now() - startedAt });
-    });
-  });
+  } finally {
+    removeTemporaryDirectoryBestEffort(dependencies, cwd);
+  }
 }
 
 async function runAgyWithRetry(
@@ -768,21 +787,21 @@ function buildGeminiDetails(
 }
 
 function formatResults(query: string, search: NormalizedSearch, cached: boolean, mode: SearchMode): string {
-  const lines = [`agy grounded search results for: ${query}${cached ? " (cached)" : ""}`];
+  const lines = [`agy grounded search results for: ${sanitizeTuiText(query)}${cached ? " (cached)" : ""}`];
   const acceptedResults = search.results.filter((result) => acceptsResultInContent(result, mode));
   const omittedCount = search.results.length - acceptedResults.length;
   const strictMode = mode === "docs" || mode === "source-finder";
   const allAcceptedAreVerified = acceptedResults.every((result) => result.confidence === "high");
 
-  if (search.summary) lines.push("", `Summary: ${truncateDisplayText(search.summary, MAX_DISPLAY_SUMMARY_CHARS)}`);
+  if (search.summary) lines.push("", `Summary: ${sanitizeTuiText(truncateDisplayText(search.summary, MAX_DISPLAY_SUMMARY_CHARS))}`);
 
   if (acceptedResults.length === 0) {
     lines.push("", strictMode ? "No validated citeable results found." : "No usable source candidates found.");
   } else {
     lines.push("", allAcceptedAreVerified ? "Validated citeable results:" : "Source candidates (validate or fetch before citing):");
     acceptedResults.forEach((result, index) => {
-      lines.push(`${index + 1}. ${result.title}`, `   ${result.url}`);
-      if (result.snippet) lines.push(`   ${truncateDisplayText(result.snippet, MAX_DISPLAY_SNIPPET_CHARS)}`);
+      lines.push(`${index + 1}. ${sanitizeTuiText(result.title)}`, `   ${sanitizeTuiText(result.url)}`);
+      if (result.snippet) lines.push(`   ${sanitizeTuiText(truncateDisplayText(result.snippet, MAX_DISPLAY_SNIPPET_CHARS))}`);
       if (result.confidence === "medium") lines.push("   Confidence: medium - URL not fully validated; verify before citing.");
     });
   }
@@ -793,7 +812,7 @@ function formatResults(query: string, search: NormalizedSearch, cached: boolean,
   if (search.notes.length > 0) {
     const compactNotes = search.notes
       .slice(0, MAX_DISPLAY_NOTES)
-      .map((note) => truncateDisplayText(note, MAX_DISPLAY_NOTE_CHARS));
+      .map((note) => sanitizeTuiText(truncateDisplayText(note, MAX_DISPLAY_NOTE_CHARS)));
     lines.push("", `Notes: ${compactNotes.join(" | ")}`);
   }
 
@@ -830,7 +849,7 @@ function formatValidation(validation: UrlValidation | undefined): string | undef
 }
 
 function renderGeminiSearchCall(args: GeminiSearchInput, theme: PiTheme) {
-  const query = typeof args.query === "string" && args.query.trim() ? args.query.trim() : "…";
+  const query = typeof args.query === "string" && args.query.trim() ? sanitizeTuiText(args.query.trim()) : "…";
   const mode = SEARCH_MODES.includes(args.mode as SearchMode) ? args.mode as SearchMode : "search";
   const limit = clampLimit(args.limit);
   const validateUrls = typeof args.validateUrls === "boolean" ? `validation ${args.validateUrls ? "on" : "off"}` : "validation auto";
@@ -851,7 +870,7 @@ function renderGeminiSearchResult(
   const details = result.details as GeminiSearchDetails | undefined;
   if (!details?.query) {
     const first = result.content[0];
-    return new Text(first?.type === "text" ? first.text ?? "" : "(no output)", 0, 0);
+    return new Text(first?.type === "text" ? sanitizeTuiText(first.text ?? "") : "(no output)", 0, 0);
   }
 
   const running = state.isPartial || details.status === "running" || details.status === "validating";
@@ -860,71 +879,71 @@ function renderGeminiSearchResult(
   const cacheLabel = details.cached ? "cached" : details.cacheWritten ? "fresh, cached" : "fresh";
   const validationLabel = details.validateUrls ? "validation on" : "validation off";
   const sourceLabel = `${details.results.length} source${details.results.length === 1 ? "" : "s"}`;
-  const confidence = details.confidence ? ` · confidence ${details.confidence}` : "";
+  const confidence = details.confidence ? ` · confidence ${sanitizeTuiText(details.confidence)}` : "";
   const status = details.status && details.status !== "done" ? ` · ${details.status}` : "";
 
   if (!state.expanded) {
-    let text = `${icon} ${theme.fg("toolTitle", theme.bold(`gemini_search ${details.mode}`))}${theme.fg("muted", status)}\n`;
-    text += `${theme.fg("dim", truncateDisplayText(details.query, 140))}\n`;
-    text += theme.fg("muted", `${sourceLabel} · ${formatSourceDomains(details.results)} · ${cacheLabel} · ${validationLabel}${confidence}${duration ? ` · ${duration}` : ""}`);
-    if (details.queries.length > 0) text += `\n${theme.fg("muted", `reported query: ${truncateDisplayText(details.queries[0], 110)}${details.queries.length > 1 ? ` (+${details.queries.length - 1})` : ""}`)}`;
+    let text = `${icon} ${theme.fg("toolTitle", theme.bold(`gemini_search ${sanitizeTuiText(details.mode)}`))}${theme.fg("muted", sanitizeTuiText(status))}\n`;
+    text += `${theme.fg("dim", sanitizeTuiText(truncateDisplayText(details.query, 140)))}\n`;
+    text += theme.fg("muted", `${sourceLabel} · ${sanitizeTuiText(formatSourceDomains(details.results))} · ${cacheLabel} · ${validationLabel}${confidence}${duration ? ` · ${duration}` : ""}`);
+    if (details.queries.length > 0) text += `\n${theme.fg("muted", `reported query: ${sanitizeTuiText(truncateDisplayText(details.queries[0], 110))}${details.queries.length > 1 ? ` (+${details.queries.length - 1})` : ""}`)}`;
     if (details.results.length > 0 || details.queries.length > 0 || details.notes.length > 0) text += `\n${theme.fg("muted", "(Ctrl+O to expand details)")}`;
     return new Text(text, 0, 0);
   }
 
   const container = new Container();
-  container.addChild(new Text(`${icon} ${theme.fg("toolTitle", theme.bold(`gemini_search ${details.mode}`))} ${theme.fg("accent", sourceLabel)}`, 0, 0));
-  container.addChild(new Text(theme.fg("dim", `Query sent: ${details.query}`), 0, 0));
+  container.addChild(new Text(`${icon} ${theme.fg("toolTitle", theme.bold(`gemini_search ${sanitizeTuiText(details.mode)}`))} ${theme.fg("accent", sourceLabel)}`, 0, 0));
+  container.addChild(new Text(theme.fg("dim", `Query sent: ${sanitizeTuiText(details.query)}`), 0, 0));
   container.addChild(new Text(theme.fg("muted", [
     `limit ${details.limit}`,
     validationLabel,
     cacheLabel,
-    details.confidence ? `confidence ${details.confidence}` : undefined,
+    details.confidence ? `confidence ${sanitizeTuiText(details.confidence)}` : undefined,
     duration,
     details.retryAttempts ? `${details.retryAttempts} attempt(s)` : undefined,
-    details.model,
+    sanitizeTuiText(details.model),
   ].filter(Boolean).join(" · ")), 0, 0));
-  if (details.cacheExpiresAt) container.addChild(new Text(theme.fg("muted", `Cache expires: ${details.cacheExpiresAt}`), 0, 0));
+  if (details.cacheExpiresAt) container.addChild(new Text(theme.fg("muted", `Cache expires: ${sanitizeTuiText(details.cacheExpiresAt)}`), 0, 0));
 
   if (details.queries.length > 0) {
     container.addChild(new Spacer(1));
     container.addChild(new Text(theme.fg("toolTitle", theme.bold("agy-reported queries")), 0, 0));
-    container.addChild(new Text(details.queries.map((query) => `- ${query}`).join("\n"), 0, 0));
+    container.addChild(new Text(details.queries.map((query) => `- ${sanitizeTuiText(query)}`).join("\n"), 0, 0));
   }
 
   if (details.summary) {
     container.addChild(new Spacer(1));
     container.addChild(new Text(theme.fg("toolTitle", theme.bold("Summary")), 0, 0));
-    container.addChild(new Text(details.summary, 0, 0));
+    container.addChild(new Text(sanitizeTuiText(details.summary), 0, 0));
   }
 
   if (details.results.length > 0) {
     container.addChild(new Spacer(1));
     container.addChild(new Text(theme.fg("toolTitle", theme.bold("Sources returned")), 0, 0));
     for (const [index, source] of details.results.entries()) {
-      const confidenceText = source.confidence ? ` · ${source.confidence}` : "";
-      container.addChild(new Text(`${theme.fg("accent", `${index + 1}. ${source.title}`)}${theme.fg("muted", confidenceText)}\n${source.url}`, 0, 0));
+      const confidenceText = source.confidence ? ` · ${sanitizeTuiText(source.confidence)}` : "";
+      container.addChild(new Text(`${theme.fg("accent", `${index + 1}. ${sanitizeTuiText(source.title)}`)}${theme.fg("muted", confidenceText)}\n${sanitizeTuiText(source.url)}`, 0, 0));
       const validation = formatValidation(source.validation);
-      if (validation) container.addChild(new Text(theme.fg("muted", validation), 0, 0));
-      if (source.snippet) container.addChild(new Text(theme.fg("dim", source.snippet), 0, 0));
-      if (source.warning) container.addChild(new Text(theme.fg("warning", source.warning), 0, 0));
+      if (validation) container.addChild(new Text(theme.fg("muted", sanitizeTuiText(validation)), 0, 0));
+      if (source.snippet) container.addChild(new Text(theme.fg("dim", sanitizeTuiText(source.snippet)), 0, 0));
+      if (source.warning) container.addChild(new Text(theme.fg("warning", sanitizeTuiText(source.warning)), 0, 0));
     }
   }
 
   if (details.notes.length > 0) {
     container.addChild(new Spacer(1));
     container.addChild(new Text(theme.fg("toolTitle", theme.bold("Notes")), 0, 0));
-    container.addChild(new Text(details.notes.map((note) => `- ${note}`).join("\n"), 0, 0));
+    container.addChild(new Text(details.notes.map((note) => `- ${sanitizeTuiText(note)}`).join("\n"), 0, 0));
   }
 
   if (details.stderr?.trim()) {
     container.addChild(new Spacer(1));
     container.addChild(new Text(theme.fg("toolTitle", theme.bold("agy stderr")), 0, 0));
-    container.addChild(new Text(theme.fg("error", details.stderr.trim()), 0, 0));
+    container.addChild(new Text(theme.fg("error", sanitizeTuiText(details.stderr.trim())), 0, 0));
   }
 
   container.addChild(new Spacer(1));
-  container.addChild(new Text(theme.fg("muted", `Binary: ${details.binary} · Source: ${details.source}. agy search_web internals may be unavailable; shown queries are agent-reported.`), 0, 0));
+  container.addChild(new Text(theme.fg("muted", `Binary: ${sanitizeTuiText(details.binary)} · Source: ${sanitizeTuiText(details.source)}. agy search_web internals may be unavailable; shown queries are agent-reported.`), 0, 0));
   return container;
 }
 
@@ -937,6 +956,7 @@ type CanonicalIpAddress = {
 type PublicFetchDependencies = {
   lookupHost: (hostname: string) => Promise<Array<{ address: string; family: number }>>;
   requestAddress: (url: URL, address: CanonicalIpAddress, init: RequestInit, signal?: AbortSignal) => Promise<Response>;
+  addressAttemptTimeoutMs?: number;
 };
 
 const NON_GLOBAL_IPV4_CIDRS: Array<[number[], number]> = [
@@ -1164,15 +1184,15 @@ function assertFetchableUrl(urlText: string): URL {
   return url;
 }
 
-async function resolvePublicAddress(
+async function resolvePublicAddresses(
   urlText: string,
   signal: AbortSignal | undefined,
   dependencies: PublicFetchDependencies,
-): Promise<{ url: URL; address: CanonicalIpAddress }> {
+): Promise<{ url: URL; addresses: CanonicalIpAddress[] }> {
   const url = assertFetchableUrl(urlText);
   const host = originalHostname(url).toLowerCase();
   const literalAddress = canonicalizeIpAddress(host);
-  if (literalAddress) return { url, address: literalAddress };
+  if (literalAddress) return { url, addresses: [literalAddress] };
 
   throwIfAborted(signal, `Public fetch cancelled while resolving ${host}`);
   const records = await withAbort(
@@ -1182,12 +1202,58 @@ async function resolvePublicAddress(
   );
   throwIfAborted(signal, `Public fetch cancelled while resolving ${host}`);
   if (records.length === 0) throw new Error(`Host did not resolve to an IP address: ${host}`);
-  const addresses = records.map((record) => canonicalizeIpAddress(record.address));
-  const rejected = addresses.find((address) => !address || !isGlobalIpAddress(address));
-  if (rejected !== undefined || addresses.some((address) => address === undefined)) {
-    throw new Error(`Refusing to fetch host that resolves to a private or non-global IP address: ${host}`);
+  const addresses: CanonicalIpAddress[] = [];
+  const seenAddresses = new Set<string>();
+  for (const record of records) {
+    const address = canonicalizeIpAddress(record.address);
+    if (!address || !isGlobalIpAddress(address)) {
+      throw new Error(`Refusing to fetch host that resolves to a private or non-global IP address: ${host}`);
+    }
+    const key = `${address.family}:${address.address}`;
+    if (!seenAddresses.has(key)) {
+      seenAddresses.add(key);
+      addresses.push(address);
+    }
   }
-  return { url, address: addresses[0]! };
+  return { url, addresses };
+}
+
+async function requestPublicAddresses(
+  target: { url: URL; addresses: CanonicalIpAddress[] },
+  init: RequestInit,
+  signal: AbortSignal | undefined,
+  dependencies: PublicFetchDependencies,
+): Promise<Response> {
+  let lastError: unknown;
+  const configuredTimeout = dependencies.addressAttemptTimeoutMs;
+  const attemptTimeoutMs = Number.isFinite(configuredTimeout) && (configuredTimeout ?? 0) > 0
+    ? Math.floor(configuredTimeout!)
+    : PUBLIC_ADDRESS_ATTEMPT_TIMEOUT_MS;
+
+  for (const address of target.addresses) {
+    const cancellationMessage = `Public fetch cancelled while fetching ${target.url.toString()}`;
+    throwIfAborted(signal, cancellationMessage);
+    const timeoutController = new AbortController();
+    const timeout = setTimeout(() => timeoutController.abort(), attemptTimeoutMs);
+    const attemptSignal = signal
+      ? AbortSignal.any([signal, timeoutController.signal])
+      : timeoutController.signal;
+    try {
+      return await withAbort(
+        dependencies.requestAddress(target.url, address, init, attemptSignal),
+        attemptSignal,
+        `Public fetch timed out while requesting ${target.url.toString()} via ${address.address}`,
+      );
+    } catch (error) {
+      throwIfAborted(signal, cancellationMessage);
+      lastError = error;
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+
+  if (lastError instanceof Error) throw lastError;
+  throw new Error(String(lastError ?? `No validated public address was reachable for ${target.url.toString()}`));
 }
 
 function redirectTarget(currentUrl: string, location: string | null): string | undefined {
@@ -1205,13 +1271,9 @@ export async function fetchPublic(
 
   for (let redirectCount = 0; redirectCount <= MAX_REDIRECTS; redirectCount += 1) {
     throwIfAborted(signal, `Public fetch cancelled while fetching ${currentUrl}`);
-    const target = await resolvePublicAddress(currentUrl, signal, dependencies);
+    const target = await resolvePublicAddresses(currentUrl, signal, dependencies);
     throwIfAborted(signal, `Public fetch cancelled while fetching ${currentUrl}`);
-    const response = await withAbort(
-      dependencies.requestAddress(target.url, target.address, init, signal),
-      signal,
-      `Public fetch cancelled while fetching ${currentUrl}`,
-    );
+    const response = await requestPublicAddresses(target, init, signal, dependencies);
     if (!REDIRECT_STATUSES.has(response.status)) return response;
 
     const nextUrl = redirectTarget(currentUrl, response.headers.get("location"));
@@ -1356,13 +1418,13 @@ async function fetchOne(
 function formatFetchedPages(pages: FetchedPage[]): string {
   const lines = [`Fetched ${pages.length} URL(s).`];
   pages.forEach((page, index) => {
-    lines.push("", `--- ${index + 1}. ${page.title || page.originalUrl} ---`, `URL: ${page.originalUrl}`);
-    if (page.finalUrl && page.finalUrl !== page.originalUrl) lines.push(`Final URL: ${page.finalUrl}`);
+    lines.push("", `--- ${index + 1}. ${sanitizeTuiText(page.title || page.originalUrl)} ---`, `URL: ${sanitizeTuiText(page.originalUrl)}`);
+    if (page.finalUrl && page.finalUrl !== page.originalUrl) lines.push(`Final URL: ${sanitizeTuiText(page.finalUrl)}`);
     if (page.status) lines.push(`Status: ${page.status}`);
-    if (page.contentType) lines.push(`Content-Type: ${page.contentType}`);
-    if (page.error) lines.push(`Error: ${page.error}`);
+    if (page.contentType) lines.push(`Content-Type: ${sanitizeTuiText(page.contentType)}`);
+    if (page.error) lines.push(`Error: ${sanitizeTuiText(page.error)}`);
     if (page.text) {
-      lines.push("", page.text);
+      lines.push("", sanitizeTuiText(page.text));
       if (page.byteTruncated) lines.push("", `[Byte safety limit reached at ${MAX_FETCH_BYTES} bytes.]`);
       if (page.truncated) lines.push("", `[Truncated at ${page.text.length} characters.]`);
     }
@@ -1438,14 +1500,14 @@ export default function geminiSearch(
       if (processResult.code !== 0) {
         let agyError = "";
         try {
-          agyError = cleanText((JSON.parse(processResult.stdout) as AgyCliJsonOutput).error);
+          agyError = sanitizeTuiText(cleanText((JSON.parse(processResult.stdout) as AgyCliJsonOutput).error));
         } catch {
         }
         throw new Error(
           `gemini_search agy process failed with exit code ${processResult.code}${processResult.signal ? ` (${processResult.signal})` : ""} after ${processResult.attempts ?? 1} attempt(s).\n` +
             `agy error: ${agyError || "not reported"}\n` +
-            `stderr: ${cleanText(processResult.stderr).slice(0, 1200)}\n` +
-            `stdout: ${cleanText(processResult.stdout).slice(0, 1200)}`,
+            `stderr: ${sanitizeTuiText(cleanText(processResult.stderr)).slice(0, 1200)}\n` +
+            `stdout: ${sanitizeTuiText(cleanText(processResult.stdout)).slice(0, 1200)}`,
         );
       }
 
@@ -1454,11 +1516,11 @@ export default function geminiSearch(
       try {
         ({ parsed, rawResponseText } = parseAgyCliOutput(processResult.stdout));
       } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
+        const message = sanitizeTuiText(error instanceof Error ? error.message : String(error));
         throw new Error(
           `gemini_search could not parse agy JSON output: ${message}.\n` +
-            `agy output: ${cleanText(processResult.stdout).slice(0, 2000)}\n` +
-            `stderr: ${cleanText(processResult.stderr).slice(0, 800)}`,
+            `agy output: ${sanitizeTuiText(cleanText(processResult.stdout)).slice(0, 2000)}\n` +
+            `stderr: ${sanitizeTuiText(cleanText(processResult.stderr)).slice(0, 800)}`,
         );
       }
 
@@ -1533,7 +1595,7 @@ export default function geminiSearch(
       const pages: FetchedPage[] = [];
       for (const [index, url] of urls.entries()) {
         throwIfAborted(signal, "web_fetch cancelled.");
-        onUpdate?.({ content: [{ type: "text", text: `Fetching URL ${index + 1}/${urls.length}: ${url}` }], details: {} });
+        onUpdate?.({ content: [{ type: "text", text: `Fetching URL ${index + 1}/${urls.length}: ${sanitizeTuiText(url)}` }], details: {} });
         pages.push(await fetchOne(url, maxCharsPerUrl, signal, publicFetchDependencies));
       }
 
