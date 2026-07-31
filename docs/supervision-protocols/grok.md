@@ -11,12 +11,13 @@ When this session owns supervision and away mode is not active:
 4. Trust only the arm's one-line status.
 5. `watcher: started ...` or `watcher: attached ...` means a live cycle exists.
    On attach, the background task follows verified identity-matched successors instead of exiting when the first cycle ends.
-6. Failure or missing cycle only: `watcher: FAILED ...` means supervision is down; fix and re-arm.
-7. After a successful start or attach status, end the turn.
+6. If the arm reports an away-mode stand-down, stop this continuity path and load `/afk`; [`watcher-continuity.md`](../watcher-continuity.md) owns the full stand-down contract.
+7. Failure or missing cycle only: `watcher: FAILED ...` means supervision is down; fix and re-arm.
+8. After a successful start or attach status, end the turn.
    The background arm remains the live wait until it returns an actionable wake or failure.
-8. Waiting is silent.
-9. Never use shell `&` for firstmate supervision.
-10. Never bundle the arm onto another command.
+9. Waiting is silent.
+10. Never use shell `&` for firstmate supervision.
+11. Never bundle the arm onto another command.
     A shell `&`, a truncating pipe, or bundling is denied automatically by the PreToolUse seatbelt (`bin/fm-arm-pretool-check.sh`) whenever this project's Grok hooks are trusted.
 
 Grok injects a synthetic user message with `synthetic_reason: task_completed` when the background arm completes.

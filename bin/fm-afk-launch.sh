@@ -32,7 +32,12 @@
 #   fm-afk-launch.sh stop      Correct-ordered exit: SIGTERM the daemon so its
 #                              cleanup flushes WHILE state/.afk is still present,
 #                              wait for it, close the recorded terminal by exact
-#                              id, then clear state/.afk last.
+#                              id, then clear state/.afk last. The wait is bounded
+#                              by FM_AFK_STOP_TIMEOUT seconds (default 45,
+#                              derived from the daemon's measured shutdown floor).
+#                              Expiry is not a verdict: it then rechecks the
+#                              daemon's exact process identity once, and anything
+#                              short of proof of exit preserves lifecycle state.
 #   fm-afk-launch.sh reconcile Close a recorded-but-dead daemon terminal by exact
 #                              id and drop the record (recovery after a crash).
 #
@@ -550,8 +555,24 @@ fm_afk_launch_start_native() {
   return "$result"
 }
 
+# How long to wait for the away-mode daemon to finish shutting down, expressed as
+# 0.25s ticks. The default is derived from the daemon's measured shutdown floor
+# rather than an arbitrary round number: its idle branch defers the TERM trap for
+# the whole housekeeping tick, the escalation flush then retries submit
+# confirmation, and the watcher child it reaps is itself blocked in its own poll
+# sleep. Summing those bounds puts the floor near 30 seconds on a busy home, so
+# 45 seconds leaves real margin. Expiry is not a verdict: the caller reconciles
+# afterwards. FM_AFK_STOP_TIMEOUT overrides it in seconds, mainly for tests.
+fm_afk_launch_stop_ticks() {
+  local seconds=${FM_AFK_STOP_TIMEOUT:-45}
+  case "$seconds" in
+    ''|*[!0-9]*|0) seconds=45 ;;
+  esac
+  printf '%s\n' $((seconds * 4))
+}
+
 fm_afk_launch_stop() {
-  local pid pid_identity current_identity result=0 read_result
+  local pid pid_identity current_identity result=0 read_result ticks
   fm_afk_launch_record_read
   read_result=$?
   if [ "$read_result" -eq 2 ]; then
@@ -572,12 +593,20 @@ fm_afk_launch_stop() {
       fm_afk_launch_log "failed to signal away-mode daemon pid=$pid"
       result=1
     fi
-    for _ in $(seq 1 40); do
+    ticks=$(fm_afk_launch_stop_ticks)
+    for _ in $(seq 1 "$ticks"); do
       fm_pid_alive "$pid" || break
       sleep 0.25
     done
   fi
   if [ -n "$pid" ] && fm_pid_alive "$pid"; then
+    # The wait expiring is ordinary on a busy home, not a verdict, so reconcile
+    # once by exact identity before reporting anything. A live PID whose identity
+    # no longer matches is a recycled PID, which proves the daemon this stop
+    # signalled has exited. Everything else preserves lifecycle state: an
+    # unreadable identity is ambiguous, and a matching identity is the same
+    # daemon still running, which must keep .afk and the catch-up evidence even
+    # though its lock may already be gone.
     current_identity=$(fm_pid_identity "$pid" 2>/dev/null) || {
       fm_afk_launch_log "could not confirm away-mode daemon exit; preserving lifecycle state"
       return 1

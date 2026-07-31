@@ -1,7 +1,7 @@
 // Firstmate primary watcher bridge for Pi.
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ExtensionAPI, Theme } from "@earendil-works/pi-coding-agent";
@@ -17,13 +17,23 @@ import { encodeFirstmateOperationalInput } from "./lib/fm-operational-input.ts";
 type ArmResult = {
   ok: boolean;
   message: string;
+  // Away mode owns supervision, so this arm intentionally started nothing. It is
+  // a terminal non-failure: no successor, no retry, no alarm, no wake delivery.
+  stoodDown?: boolean;
 };
 
 type LockOwnership = "owned" | "missing" | "other";
 
+type ArmReadiness = "ready" | "stood-down" | "unready";
+
 type CloseClassification = {
-  kind: "actionable" | "failure";
+  kind: "actionable" | "failure" | "stood-down";
   message: string;
+};
+
+type RestoreResult = {
+  standDown: boolean;
+  failure: string;
 };
 
 type WatchToolShellState = {
@@ -80,7 +90,7 @@ let retryFailures = 0;
 let stopping = false;
 let seq = 0;
 let restoring = false;
-const armReadiness = new WeakMap<ChildProcess, Promise<boolean>>();
+const armReadiness = new WeakMap<ChildProcess, Promise<ArmReadiness>>();
 const armExit = new WeakMap<ChildProcess, Promise<void>>();
 const restorationRetiredArms = new WeakSet<ChildProcess>();
 
@@ -88,6 +98,12 @@ function positiveInteger(name: string, fallback: number): number {
   const value = Number(process.env[name]);
   if (!Number.isFinite(value) || value <= 0) return fallback;
   return Math.floor(value);
+}
+
+function resetRetryState(): void {
+  if (retryTimer) clearTimeout(retryTimer);
+  retryTimer = null;
+  retryFailures = 0;
 }
 
 function parentPid(pid: string): string {
@@ -134,6 +150,12 @@ function markLoaded(): void {
   writeFileSync(marker, `${extensionVersion}\n${process.pid}\n`);
 }
 
+// While the away-mode flag exists the away supervisor owns the single watcher
+// cycle as its own child, so this extension owes no continuity at all.
+function awayModeActive(): boolean {
+  return existsSync(`${state}/.afk`);
+}
+
 function actionableLine(output: string): string {
   const lines = output.split(/\r?\n/);
   return lines.find((line) => /^(signal:|stale:|check:|heartbeat($|:))/.test(line)) || "";
@@ -143,6 +165,11 @@ function classifyClose(stdout: string, stderr: string, code: number | null, sign
   const combined = `${stdout}\n${stderr}`.trim();
   const reason = actionableLine(combined);
   if (reason) return { kind: "actionable", message: reason };
+  // A stand-down is checked before every failure shape so an arm that hands
+  // supervision to the away supervisor can never be reclassified as an
+  // unexplained empty cycle and alarmed on.
+  const stoodDown = combined.split(/\r?\n/).find((line) => /^watcher: stood-down\b/.test(line));
+  if (stoodDown) return { kind: "stood-down", message: stoodDown };
   const healthy = combined.split(/\r?\n/).find((line) => /^watcher: healthy\b/.test(line));
   if (healthy) {
     return {
@@ -189,8 +216,7 @@ export default function (pi: ExtensionAPI) {
 
   function stopArm(): void {
     stopping = true;
-    if (retryTimer) clearTimeout(retryTimer);
-    retryTimer = null;
+    resetRetryState();
     if (child) child.kill("SIGTERM");
     child = null;
   }
@@ -205,6 +231,10 @@ export default function (pi: ExtensionAPI) {
       "watcher",
       `FIRSTMATE WATCHER WAKE: ${message}\n\nRun bin/fm-wake-drain.sh first and handle the queued wake. Watcher continuity is extension-owned.`,
     );
+    if (awayModeActive()) {
+      resetRetryState();
+      return;
+    }
     await pi.sendUserMessage(content, { deliverAs: "followUp" });
   }
 
@@ -225,15 +255,15 @@ export default function (pi: ExtensionAPI) {
     });
   }
 
-  function waitForReadiness(armChild: ChildProcess): Promise<boolean> {
+  function waitForReadiness(armChild: ChildProcess): Promise<ArmReadiness> {
     const readiness = armReadiness.get(armChild);
-    if (!readiness) return Promise.resolve(false);
+    if (!readiness) return Promise.resolve("unready");
     return new Promise((resolveReady) => {
-      const timer = setTimeout(() => resolveReady(false), armReadyTimeoutMs);
+      const timer = setTimeout(() => resolveReady("unready"), armReadyTimeoutMs);
       timer.unref();
-      void readiness.then((ready) => {
+      void readiness.then((status) => {
         clearTimeout(timer);
-        resolveReady(ready);
+        resolveReady(status);
       });
     });
   }
@@ -260,17 +290,40 @@ export default function (pi: ExtensionAPI) {
     });
   }
 
-  async function restoreAfterActionableClose(predecessorArmPid: string): Promise<string> {
+  async function restoreAfterActionableClose(predecessorArmPid: string): Promise<RestoreResult> {
     let failure = "";
     for (let attempt = 0; attempt <= retryLimit; attempt += 1) {
-      if (stopping) return "";
+      if (stopping) return { standDown: false, failure: "" };
       const replacement = startArm(predecessorArmPid);
       const successorChild = child;
-      if (replacement.ok && successorChild && await waitForReadiness(successorChild)) return "";
+      if (replacement.stoodDown) {
+        resetRetryState();
+        return { standDown: true, failure: "" };
+      }
+      const readiness = replacement.ok && successorChild
+        ? await waitForReadiness(successorChild)
+        : "unready";
+      if (readiness === "ready") return { standDown: false, failure: "" };
+      if (readiness === "stood-down") {
+        resetRetryState();
+        return { standDown: true, failure: "" };
+      }
       if (replacement.ok) {
+        // Away mode can start between the check above and the successor's own
+        // check, in which case the successor stands down instead of reporting
+        // readiness. Recognize that as the same terminal non-failure rather than
+        // burning the retry ladder on it.
+        if (awayModeActive()) {
+          resetRetryState();
+          await retireArm(successorChild);
+          return { standDown: true, failure: "" };
+        }
         failure = "watcher: FAILED - Pi extension could not verify a ready successor watcher";
         if (!(await retireArm(successorChild))) {
-          return `${failure}\nwatcher: FAILED - Pi extension could not restore watcher continuity because the unready successor arm did not exit within ${armRetireTimeoutMs}ms`;
+          return {
+            standDown: false,
+            failure: `${failure}\nwatcher: FAILED - Pi extension could not restore watcher continuity because the unready successor arm did not exit within ${armRetireTimeoutMs}ms`,
+          };
         }
       } else {
         failure = /(?:read-only|no live session)/.test(replacement.message)
@@ -281,11 +334,21 @@ export default function (pi: ExtensionAPI) {
       if (attempt === retryLimit) break;
       await waitForRetry(attempt + 1);
     }
-    return `${failure}\nwatcher: FAILED - Pi extension could not restore watcher continuity after ${retryLimit} retries`;
+    return {
+      standDown: false,
+      failure: `${failure}\nwatcher: FAILED - Pi extension could not restore watcher continuity after ${retryLimit} retries`,
+    };
   }
 
   function scheduleRetry(message: string, predecessorArmPid: string): void {
-    if (stopping || child || retryTimer) return;
+    if (stopping) return;
+    // A stand-down ends this extension's continuity obligation, so never open a
+    // retry ladder against the away supervisor's own watcher.
+    if (awayModeActive()) {
+      resetRetryState();
+      return;
+    }
+    if (child || retryTimer) return;
     const ownership = lockOwnership();
     if (ownership !== "owned") {
       surfaceFailure(`watcher: FAILED - Pi extension cannot restore continuity because this session no longer owns the lock\n${message}`);
@@ -309,6 +372,14 @@ export default function (pi: ExtensionAPI) {
 
   function startArm(predecessorArmPid = ""): ArmResult {
     if (stopping) return { ok: false, message: "watcher: not armed - Pi session is shutting down" };
+    if (awayModeActive()) {
+      resetRetryState();
+      return {
+        ok: true,
+        stoodDown: true,
+        message: "watcher: stood-down - away mode is active; the away supervisor owns the watcher",
+      };
+    }
     const ownership = lockOwnership();
     if (ownership === "other") return { ok: false, message: "watcher: read-only - session lock is held by another firstmate session" };
     if (ownership === "missing") {
@@ -351,9 +422,9 @@ export default function (pi: ExtensionAPI) {
     let settled = false;
     let exitDrainTimer: ReturnType<typeof setTimeout> | null = null;
     let readinessSettled = false;
-    let resolveReadiness: (ready: boolean) => void = () => {};
+    let resolveReadiness: (status: ArmReadiness) => void = () => {};
     let resolveExited: () => void = () => {};
-    const readiness = new Promise<boolean>((resolveReady) => {
+    const readiness = new Promise<ArmReadiness>((resolveReady) => {
       resolveReadiness = resolveReady;
     });
     armReadiness.set(armChild, readiness);
@@ -361,14 +432,14 @@ export default function (pi: ExtensionAPI) {
       resolveExited = resolveExitedChild;
     });
     armExit.set(armChild, exited);
-    const settleReadiness = (ready: boolean): void => {
+    const settleReadiness = (status: ArmReadiness): void => {
       if (readinessSettled) return;
       readinessSettled = true;
-      resolveReadiness(ready);
+      resolveReadiness(status);
     };
     const observeEstablishedArm = (): void => {
       if (/^watcher: (?:started|attached)\b/m.test(`${stdout}\n${stderr}`)) {
-        settleReadiness(true);
+        settleReadiness("ready");
       }
     };
     const releaseChild = (): void => {
@@ -379,19 +450,33 @@ export default function (pi: ExtensionAPI) {
       settled = true;
       if (exitDrainTimer) clearTimeout(exitDrainTimer);
       exitDrainTimer = null;
-      settleReadiness(false);
+      const classification = classifyClose(stdout, stderr, code, signal);
+      settleReadiness(classification.kind === "stood-down" ? "stood-down" : "unready");
       releaseChild();
       if (stopping) return;
-      const classification = classifyClose(stdout, stderr, code, signal);
       const predecessor = String(armChild.pid ?? "");
+      if (classification.kind === "stood-down") {
+        // Terminal non-failure: away mode owns the cycle. Start no successor,
+        // schedule no retry, raise no alarm, and deliver no wake. The watcher
+        // still enqueues every wake durably, and the away supervisor triages it.
+        resetRetryState();
+        return;
+      }
       if (classification.kind === "actionable") {
         retryFailures = 0;
         restoring = true;
         void (async () => {
-          const failure = await restoreAfterActionableClose(predecessor);
+          const restored = await restoreAfterActionableClose(predecessor);
           restoring = false;
           if (stopping) return;
-          const message = failure ? `${classification.message}\n\n${failure}` : classification.message;
+          // Delivery is suppressed on a stand-down for the same reason the arm
+          // is: the away supervisor owns wake handling while away mode is on,
+          // and the wake itself is already durable in the queue.
+          if (restored.standDown) {
+            resetRetryState();
+            return;
+          }
+          const message = restored.failure ? `${classification.message}\n\n${restored.failure}` : classification.message;
           await sendWake(message);
         })().catch(() => {
         });
@@ -423,7 +508,7 @@ export default function (pi: ExtensionAPI) {
       settled = true;
       if (exitDrainTimer) clearTimeout(exitDrainTimer);
       exitDrainTimer = null;
-      settleReadiness(false);
+      settleReadiness("unready");
       releaseChild();
       if (stopping) return;
       if (restoring) return;

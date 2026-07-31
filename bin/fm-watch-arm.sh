@@ -32,6 +32,8 @@
 #   watcher: FAILED - cycle ended without an actionable reason
 #                                                        - a clean cycle ended with no wake and no
 #                                                          verified healthy successor
+#   watcher: stood-down - <why>                          - away mode owns supervision; this arm
+#                                                          started nothing and exits 0
 # It NEVER reports started/attached/healthy off a stale beacon or a dead/reused pid: a
 # stale-beacon or dead-pid holder either self-heals (the fresh child steals the
 # dead lock per the singleton self-eviction/steal path and is confirmed) or this
@@ -41,6 +43,15 @@
 # never a clean empty completion. On FAILED it exits non-zero so the failure is
 # loud. A live cycle already present means re-arm attaches - do not start a second
 # watcher.
+#
+# The one clean empty completion is the away-mode stand-down. While state/.afk
+# exists the away supervisor owns the single cycle as its own child, so this
+# script starts nothing, prints the stood-down line and exits 0. A stand-down is
+# a terminal non-failure: the caller must not arm a successor, must not retry,
+# must not raise a failure alarm, and must not deliver a wake off it. Every
+# harness continuity adapter that runs this script enforces the same rule in its
+# own arm and deliver path, because an arm-layer gate alone would still be
+# reclassified as an unexplained empty cycle by the caller.
 #
 # Every observed watcher cycle appends one tab-separated lifecycle record to
 # state/.watch-cycle-exits.log. The arm layer owns that bounded ledger; it records
@@ -53,7 +64,9 @@
 # state/.watch.lock) and own a fresh cycle, or attach if a verified live peer
 # wins the singleton while the duplicate child stands down. It
 # resolves and signals exactly that pid, so it can never touch another home's
-# watcher. NEVER `pkill -f
+# watcher. It refuses to signal a watcher the away supervisor owns, because that
+# daemon reaps its own child and evicting it would leave the home with no cycle
+# at all. NEVER `pkill -f
 # bin/fm-watch.sh`: that pattern matches every firstmate home's watcher
 # (secondmate homes run the same script) and would kill siblings.
 set -u
@@ -325,9 +338,31 @@ case "${1:-}" in
   *) echo "usage: $(basename "$0") [--restart]" >&2; exit 2 ;;
 esac
 
+# Away mode is a terminal, non-failure stand-down for every arm caller. While
+# state/.afk exists the away supervisor already owns the one required cycle as
+# its own child, so arming here would either race that owner or surface the
+# singleton refusal as a bogus failure. Report the stand-down and exit clean: no
+# watcher is started, no successor is claimed, and no wake is delivered. The
+# caller that started this arm must treat the line as the end of its own
+# continuity obligation, not as a cycle to retry.
+if [ -e "$STATE/.afk" ]; then
+  echo "watcher: stood-down - away mode is active; the away supervisor owns the watcher"
+  exit 0
+fi
+
 if [ "$mode" = restart ]; then
   # Home-scoped stop: only the watcher pid recorded in THIS home's lock.
   lock_pid=$(cat "$WATCH_LOCK/pid" 2>/dev/null || true)
+  if fm_pid_alive "$lock_pid" \
+    && fm_watcher_lock_away_supervised "$STATE" "$WATCH" "$lock_pid" "$FM_HOME"; then
+    # The away supervisor reaps this watcher itself during shutdown. Evicting it
+    # here would leave the home with no supervision cycle at all, so refuse
+    # rather than restart. The .afk stand-down above already covers the ordinary
+    # case; this also holds during the window where the flag is gone but the
+    # daemon has not finished reaping its child.
+    echo "watcher: stood-down - the away supervisor owns pid $lock_pid; not restarting it"
+    exit 0
+  fi
   if fm_pid_alive "$lock_pid"; then
     if fm_watcher_lock_matches_pid "$STATE" "$WATCH" "$lock_pid" "$FM_HOME"; then
       kill -TERM "$lock_pid" 2>/dev/null || true

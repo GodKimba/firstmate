@@ -1,9 +1,23 @@
 #!/usr/bin/env bash
 # Run one bounded foreground watcher checkpoint for harnesses that should not
 # rely on background-task completion to wake the model.
+#
+# Exit codes:
+#   0   an actionable wake was passed through
+#   124 the checkpoint stayed quiet for its whole bound
+#   3   away mode is active; the away supervisor owns supervision and this
+#       checkpoint stood down without running a watcher. It is a terminal
+#       non-failure: the caller must STOP checkpointing rather than start the
+#       next one, because a stand-down returns immediately and looping on it
+#       would spin. Distinct from 124 for exactly that reason.
+#   1   any other watcher failure
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Sourced only to resolve this home's STATE the same way fm-watch.sh does, so
+# the away-mode gate below reads the one authoritative flag path.
+# shellcheck source=bin/fm-wake-lib.sh
+. "$SCRIPT_DIR/fm-wake-lib.sh"
 SECONDS_ARG=${FM_CODEX_WATCH_CHECKPOINT:-180}
 
 usage() {
@@ -13,6 +27,8 @@ Usage: fm-watch-checkpoint.sh [--seconds <n>]
 Run bin/fm-watch.sh in the foreground for a bounded checkpoint.
 On an actionable watcher wake, pass through the watcher output and exit 0.
 On a quiet checkpoint, print "checkpoint: no actionable wake within <n>s" and exit 124.
+While away mode is active, print "checkpoint: stood-down - ..." and exit 3 without
+running a watcher at all.
 EOF
 }
 
@@ -43,6 +59,17 @@ case "$SECONDS_ARG" in
   ''|*[!0-9]*) echo "error: --seconds must be a positive integer" >&2; exit 2 ;;
   0) echo "error: --seconds must be greater than zero" >&2; exit 2 ;;
 esac
+
+# Away mode is a terminal, non-failure stand-down. The away supervisor already
+# holds the singleton and owns triage, so a checkpoint here would only race it
+# and surface the singleton refusal as a collision failure. Refuse before
+# starting a watcher, and use a code the protocol reads as "stop checkpointing"
+# rather than 124's "run the next one": a stand-down returns immediately, so
+# looping on it would spin instead of waiting.
+if [ -e "$STATE/.afk" ]; then
+  echo "checkpoint: stood-down - away mode is active; the away supervisor owns the watcher. Stop checkpointing and load /afk."
+  exit 3
+fi
 
 OUT=$(mktemp "${TMPDIR:-/tmp}/fm-watch-checkpoint.out.XXXXXX") || exit 1
 ERR=$(mktemp "${TMPDIR:-/tmp}/fm-watch-checkpoint.err.XXXXXX") || {

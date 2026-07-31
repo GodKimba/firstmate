@@ -4,6 +4,8 @@ set -u
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=tests/pi-fixture-helpers.sh
+. "$(dirname "${BASH_SOURCE[0]}")/pi-fixture-helpers.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-pi-watch-extension)
 EXT="$ROOT/.pi/extensions/fm-primary-pi-watch.ts"
@@ -11,53 +13,6 @@ EXT="$ROOT/.pi/extensions/fm-primary-pi-watch.ts"
 # from a clean checkout with no tracked .opencode/package.json. The warning is
 # unrelated to plugin output, which the assertions intentionally require empty.
 export NODE_NO_WARNINGS=1
-
-install_pi_watch_extension_fixture() {
-  local repo=$1
-  mkdir -p \
-    "$repo/.pi/extensions/lib" \
-    "$repo/node_modules/@earendil-works/pi-coding-agent" \
-    "$repo/node_modules/@earendil-works/pi-tui" \
-    "$repo/node_modules/typebox"
-  cp "$EXT" "$repo/.pi/extensions/fm-primary-pi-watch.ts"
-  cp "$ROOT/.pi/extensions/lib/fm-calm-visibility.ts" "$repo/.pi/extensions/lib/fm-calm-visibility.ts"
-  cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" "$repo/.pi/extensions/lib/fm-operational-input.ts"
-  mkdir -p "$repo/bin"
-  cp "$ROOT/bin/fm-operational-input.sh" "$repo/bin/fm-operational-input.sh"
-  chmod +x "$repo/bin/fm-operational-input.sh"
-  cat > "$repo/node_modules/@earendil-works/pi-coding-agent/package.json" <<'JSON'
-{"name":"@earendil-works/pi-coding-agent","type":"module","exports":"./index.js"}
-JSON
-  cat > "$repo/node_modules/@earendil-works/pi-coding-agent/index.js" <<'JS'
-export function getMarkdownTheme() { return {}; }
-export class UserMessageComponent {
-  render() { return []; }
-  invalidate() {}
-}
-JS
-  cat > "$repo/node_modules/@earendil-works/pi-tui/package.json" <<'JSON'
-{"name":"@earendil-works/pi-tui","type":"module","exports":"./index.js"}
-JSON
-  cat > "$repo/node_modules/@earendil-works/pi-tui/index.js" <<'JS'
-export class Box {
-  addChild() {}
-  clear() {}
-  setBgFn() {}
-}
-export class Container {}
-export class Text {}
-JS
-  cat > "$repo/node_modules/typebox/package.json" <<'JSON'
-{"name":"typebox","type":"module","exports":"./index.js"}
-JSON
-  cat > "$repo/node_modules/typebox/index.js" <<'JS'
-export const Type = {
-  Object(properties) {
-    return { type: "object", properties, additionalProperties: false };
-  },
-};
-JS
-}
 
 test_tracked_extension_present_and_self_hashing() {
   local text expected_config_source
