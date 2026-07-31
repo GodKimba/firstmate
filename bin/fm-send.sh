@@ -24,9 +24,11 @@
 # refuses unless that exact decision is open right now in the task's status
 # stream, and only then mints and records the answer token that lets the worker's
 # resolved line close the request (bin/fm-classify-lib.sh owns the correlation
-# contract). Because the token cannot exist before the request opened, no queued
-# generic command, unkeyed message, or earlier input can close it. Plain sends
-# are unchanged and still reach a busy worker's queue.
+# contract). Before minting, it accepts either one valid cutover marker or a
+# wholly unmarked legacy stream and refuses malformed or multiple markers.
+# Because the token cannot exist before the request opened, no queued generic
+# command, unkeyed message, or earlier input can close it. Plain sends are
+# unchanged and still reach a busy worker's queue.
 # The token remains live only after confirmed delivery.
 # Every pre-submit failure or unconfirmed send revokes it, and a revocation
 # failure is reported loudly because retrying could otherwise duplicate answer

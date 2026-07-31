@@ -486,11 +486,11 @@ bin/fm-wake-lib.sh
 `fm-watch.sh` loads the same owner transitively through `fm-push-transition-lib.sh`, and wake-queue consumers load it through `fm-wake-lib.sh`.
 
 Observed guarantee: a runtime carries the answer message as opaque text and a backend carries it as opaque keystrokes, so neither can weaken, forge, or bypass the correlation.
-`fm-send.sh --decision` mints and records the token before any backend dispatch, and `fm_backend_send_text_submit` receives an already-composed message, so the refusal to answer a request that is not open is identical on every backend.
+`fm-send.sh --decision` enforces its header-owned issuance refusals before any backend dispatch, and `fm_backend_send_text_submit` receives an already-composed message, so invalid decision streams and requests that are not open are refused identically on every backend.
 Every non-delivery exit revokes that exact answer record, so an unconfirmed attempt followed by a resend leaves only the delivered attempt's token live; a revocation failure is reported rather than hidden.
 The status stream a worker appends is a plain file folded only through that shared library, so a new harness or backend adds no correlation surface and needs no per-adapter change.
 
-Token-era initialization, legacy compatibility, lifecycle retention, and retained-decision notification are pinned by:
+Token-era initialization, strict answer issuance, legacy compatibility, lifecycle retention, and retained-decision notification are pinned by:
 
 ```sh
 tests/fm-decision-answer-authority.test.sh
