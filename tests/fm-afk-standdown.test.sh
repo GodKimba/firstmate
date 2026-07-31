@@ -534,6 +534,63 @@ EOF
   pass "Pi treats an arm-layer stand-down as terminal, not as an empty-cycle failure"
 }
 
+test_pi_successor_stand_down_is_terminal_not_a_failure() {
+  local repo home plugin log out status
+  repo="$TMP_ROOT/pi-successor-standdown-root"
+  home=$(make_home pi-successor-standdown)
+  log="$TMP_ROOT/pi-successor-standdown.log"
+  mkdir -p "$repo/bin"
+  install_pi_watch_extension_fixture "$repo"
+  plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  : > "$home/state/task.meta"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'arm=%s\n' "$$" >> "${FM_ARM_LOG:?}"
+count=$(wc -l < "$FM_ARM_LOG" | tr -d '[:space:]')
+if [ "$count" -eq 1 ]; then
+  printf 'signal: successor stand-down\n'
+  exit 0
+fi
+printf 'watcher: stood-down - away supervisor ownership is verified\n'
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" node --input-type=module 2>&1 <<'EOF'
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+let tool = null;
+const injected = [];
+const pi = {
+  on() {},
+  registerCommand() {},
+  registerTool(candidate) {
+    if (candidate.name === "fm_watch_arm_pi") tool = candidate;
+  },
+  sendUserMessage: async (content) => {
+    injected.push(typeof content === "string" ? content : JSON.stringify(content));
+  },
+};
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+await tool.execute("tool-call-successor-standdown", {}, undefined, undefined, {});
+for (let i = 0; i < 250; i += 1) {
+  if (existsSync(process.env.FM_ARM_LOG) && readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n").length >= 2) break;
+  await new Promise((resolve) => setTimeout(resolve, 10));
+}
+await new Promise((resolve) => setTimeout(resolve, 300));
+const rows = readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n");
+if (rows.length !== 2) throw new Error(`successor stand-down opened a retry ladder: ${rows.length} arms`);
+if (injected.length !== 0) throw new Error(`successor stand-down injected a wake: ${injected.join(" | ")}`);
+EOF
+  )
+  status=$?
+  expect_code 0 "$status" "Pi must preserve a successor stand-down as terminal, with no retry and no wake: $out"
+  [ -z "$out" ] || fail "Pi successor stand-down test printed output: $out"
+  pass "Pi preserves a successor arm stand-down as terminal"
+}
+
 test_pi_rechecks_away_mode_at_final_delivery() {
   local repo home plugin log encoder out status
   repo="$TMP_ROOT/pi-delivery-race-root"
@@ -1031,6 +1088,7 @@ test_restart_evicts_an_unverified_tagged_watcher
 test_restart_still_evicts_an_ordinary_watcher
 test_pi_extension_does_not_arm_while_away_mode_is_active
 test_pi_stand_down_is_terminal_not_a_failure
+test_pi_successor_stand_down_is_terminal_not_a_failure
 test_pi_rechecks_away_mode_at_final_delivery
 test_pi_stand_down_clears_retry_state
 test_opencode_stand_down_is_a_clean_break

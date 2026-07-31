@@ -24,6 +24,8 @@ type ArmResult = {
 
 type LockOwnership = "owned" | "missing" | "other";
 
+type ArmReadiness = "ready" | "stood-down" | "unready";
+
 type CloseClassification = {
   kind: "actionable" | "failure" | "stood-down";
   message: string;
@@ -88,7 +90,7 @@ let retryFailures = 0;
 let stopping = false;
 let seq = 0;
 let restoring = false;
-const armReadiness = new WeakMap<ChildProcess, Promise<boolean>>();
+const armReadiness = new WeakMap<ChildProcess, Promise<ArmReadiness>>();
 const armExit = new WeakMap<ChildProcess, Promise<void>>();
 const restorationRetiredArms = new WeakSet<ChildProcess>();
 
@@ -253,15 +255,15 @@ export default function (pi: ExtensionAPI) {
     });
   }
 
-  function waitForReadiness(armChild: ChildProcess): Promise<boolean> {
+  function waitForReadiness(armChild: ChildProcess): Promise<ArmReadiness> {
     const readiness = armReadiness.get(armChild);
-    if (!readiness) return Promise.resolve(false);
+    if (!readiness) return Promise.resolve("unready");
     return new Promise((resolveReady) => {
-      const timer = setTimeout(() => resolveReady(false), armReadyTimeoutMs);
+      const timer = setTimeout(() => resolveReady("unready"), armReadyTimeoutMs);
       timer.unref();
-      void readiness.then((ready) => {
+      void readiness.then((status) => {
         clearTimeout(timer);
-        resolveReady(ready);
+        resolveReady(status);
       });
     });
   }
@@ -298,7 +300,14 @@ export default function (pi: ExtensionAPI) {
         resetRetryState();
         return { standDown: true, failure: "" };
       }
-      if (replacement.ok && successorChild && await waitForReadiness(successorChild)) return { standDown: false, failure: "" };
+      const readiness = replacement.ok && successorChild
+        ? await waitForReadiness(successorChild)
+        : "unready";
+      if (readiness === "ready") return { standDown: false, failure: "" };
+      if (readiness === "stood-down") {
+        resetRetryState();
+        return { standDown: true, failure: "" };
+      }
       if (replacement.ok) {
         // Away mode can start between the check above and the successor's own
         // check, in which case the successor stands down instead of reporting
@@ -413,9 +422,9 @@ export default function (pi: ExtensionAPI) {
     let settled = false;
     let exitDrainTimer: ReturnType<typeof setTimeout> | null = null;
     let readinessSettled = false;
-    let resolveReadiness: (ready: boolean) => void = () => {};
+    let resolveReadiness: (status: ArmReadiness) => void = () => {};
     let resolveExited: () => void = () => {};
-    const readiness = new Promise<boolean>((resolveReady) => {
+    const readiness = new Promise<ArmReadiness>((resolveReady) => {
       resolveReadiness = resolveReady;
     });
     armReadiness.set(armChild, readiness);
@@ -423,14 +432,14 @@ export default function (pi: ExtensionAPI) {
       resolveExited = resolveExitedChild;
     });
     armExit.set(armChild, exited);
-    const settleReadiness = (ready: boolean): void => {
+    const settleReadiness = (status: ArmReadiness): void => {
       if (readinessSettled) return;
       readinessSettled = true;
-      resolveReadiness(ready);
+      resolveReadiness(status);
     };
     const observeEstablishedArm = (): void => {
       if (/^watcher: (?:started|attached)\b/m.test(`${stdout}\n${stderr}`)) {
-        settleReadiness(true);
+        settleReadiness("ready");
       }
     };
     const releaseChild = (): void => {
@@ -441,10 +450,10 @@ export default function (pi: ExtensionAPI) {
       settled = true;
       if (exitDrainTimer) clearTimeout(exitDrainTimer);
       exitDrainTimer = null;
-      settleReadiness(false);
+      const classification = classifyClose(stdout, stderr, code, signal);
+      settleReadiness(classification.kind === "stood-down" ? "stood-down" : "unready");
       releaseChild();
       if (stopping) return;
-      const classification = classifyClose(stdout, stderr, code, signal);
       const predecessor = String(armChild.pid ?? "");
       if (classification.kind === "stood-down") {
         // Terminal non-failure: away mode owns the cycle. Start no successor,
@@ -499,7 +508,7 @@ export default function (pi: ExtensionAPI) {
       settled = true;
       if (exitDrainTimer) clearTimeout(exitDrainTimer);
       exitDrainTimer = null;
-      settleReadiness(false);
+      settleReadiness("unready");
       releaseChild();
       if (stopping) return;
       if (restoring) return;
