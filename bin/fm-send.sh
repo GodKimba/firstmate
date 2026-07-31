@@ -24,9 +24,11 @@
 # refuses unless that exact decision is open right now in the task's status
 # stream, and only then mints and records the answer token that lets the worker's
 # resolved line close the request (bin/fm-classify-lib.sh owns the correlation
-# contract). Because the token cannot exist before the request opened, no queued
-# generic command, unkeyed message, or earlier input can close it. Plain sends
-# are unchanged and still reach a busy worker's queue.
+# contract). Before minting, it accepts either one valid cutover marker or a
+# wholly unmarked legacy stream and refuses malformed or multiple markers.
+# Because the token cannot exist before the request opened, no queued generic
+# command, unkeyed message, or earlier input can close it. Plain sends are
+# unchanged and still reach a busy worker's queue.
 # The token remains live only after confirmed delivery.
 # Every pre-submit failure or unconfirmed send revokes it, and a revocation
 # failure is reported loudly because retrying could otherwise duplicate answer
@@ -471,6 +473,18 @@ else
       exit 1
     fi
     DECISION_STATUS="$STATE/$(fm_send_id_from_meta "$TARGET_META").status"
+    if fm_decision_stream_id "$DECISION_STATUS" >/dev/null; then
+      :
+    else
+      DECISION_STREAM_RC=$?
+      case "$DECISION_STREAM_RC" in
+        1) ;;
+        2)
+          echo "error: decision status stream $DECISION_STATUS is malformed or ambiguous; refusing to mint or record an answer token" >&2
+          exit 1
+          ;;
+      esac
+    fi
     DECISION_INSTANCE=''
     DECISION_FOUND=0
     while IFS=$'\t' read -r d_key _d_verb d_instance _d_summary || [ -n "$d_key" ]; do

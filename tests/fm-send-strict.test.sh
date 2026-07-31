@@ -235,6 +235,83 @@ EOF
   pass "fm-send strict: --decision mints one token bound to the open request"
 }
 
+test_decision_answer_requires_strict_stream_identity() {
+  local dir fb home err log rc answers before marker token record_key record_instance stream
+  dir="$TMP_ROOT/decision-stream-identity"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir")
+
+  home=$(setup_home decision-malformed); err="$dir/malformed.err"; log="$dir/malformed.log"; : > "$log"
+  fm_write_meta "$home/state/lane-d6.meta" "window=sess:fm-lane-d6" "kind=ship"
+  {
+    printf '[fm-decision-answer-cutover:v1 stream=not-hex]\n'
+    printf 'needs-decision [key=red-test]: accept the red test, or keep fixing?\n'
+  } > "$home/state/lane-d6.status"
+  answers="$home/state/lane-d6.decision-answers"
+  printf '0000000000000000aaaaaaaaaaaaaaaa\tprior\t0000000000000000\n' > "$answers"
+  before=$(cat "$answers")
+  PATH="$fb:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_TMUX_LOG="$log" FM_SEND_SETTLE=0 \
+    "$SEND" lane-d6 --decision red-test "keep fixing" >/dev/null 2>"$err"; rc=$?
+  [ "$rc" -ne 0 ] || fail "a malformed marker stream should refuse a decision answer"
+  assert_contains "$(cat "$err")" "decision status stream $home/state/lane-d6.status is malformed or ambiguous" \
+    "the malformed-stream refusal should name the invalid decision stream"
+  [ "$(cat "$answers")" = "$before" ] \
+    || fail "a malformed marker stream appended a decision answer record"
+  [ ! -s "$log" ] || fail "a malformed marker stream still sent a decision answer"$'\n'"$(cat "$log")"
+
+  home=$(setup_home decision-ambiguous); err="$dir/ambiguous.err"; log="$dir/ambiguous.log"; : > "$log"
+  fm_write_meta "$home/state/lane-d7.meta" "window=sess:fm-lane-d7" "kind=ship"
+  fm_decision_cutover_ensure_status "$home/state/lane-d7.status" \
+    || fail "could not establish an ambiguous-stream send fixture"
+  marker=$(fm_decision_status_marker) || fail "could not create the second stream marker"
+  printf '%s\n' "$marker" >> "$home/state/lane-d7.status"
+  printf 'needs-decision [key=red-test]: accept the red test, or keep fixing?\n' \
+    >> "$home/state/lane-d7.status"
+  answers="$home/state/lane-d7.decision-answers"
+  printf '0000000000000000aaaaaaaaaaaaaaaa\tprior\t0000000000000000\n' > "$answers"
+  before=$(cat "$answers")
+  PATH="$fb:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_TMUX_LOG="$log" FM_SEND_SETTLE=0 \
+    "$SEND" lane-d7 --decision red-test "keep fixing" >/dev/null 2>"$err"; rc=$?
+  [ "$rc" -ne 0 ] || fail "a two-marker stream should refuse a decision answer"
+  assert_contains "$(cat "$err")" "decision status stream $home/state/lane-d7.status is malformed or ambiguous" \
+    "the ambiguous-stream refusal should name the invalid decision stream"
+  [ "$(cat "$answers")" = "$before" ] \
+    || fail "an ambiguous marker stream appended a decision answer record"
+  [ ! -s "$log" ] || fail "an ambiguous marker stream still sent a decision answer"$'\n'"$(cat "$log")"
+
+  home=$(setup_home decision-legacy); err="$dir/legacy.err"; log="$dir/legacy.log"; : > "$log"
+  fm_write_meta "$home/state/lane-d8.meta" "window=sess:fm-lane-d8" "kind=ship"
+  printf 'needs-decision [key=red-test]: accept the red test, or keep fixing?\n' \
+    > "$home/state/lane-d8.status"
+  PATH="$fb:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_TMUX_LOG="$log" FM_SEND_SETTLE=0 \
+    "$SEND" lane-d8 --decision red-test "keep fixing" >/dev/null 2>"$err"; rc=$?
+  expect_code 0 "$rc" "an unmarked legacy stream should still accept a decision answer"
+  IFS=$'\t' read -r token record_key record_instance < "$home/state/lane-d8.decision-answers"
+  [ "$record_key" = red-test ] || fail "the legacy answer record lost its decision key"
+  [ "$record_instance" = "$(fm_decision_instance_id 1)" ] \
+    || fail "the legacy answer record lost its positional instance"
+  [ "${token:0:16}" = "$record_instance" ] \
+    || fail "the legacy answer token was not bound to its opening"
+
+  home=$(setup_home decision-valid-marker); err="$dir/valid.err"; log="$dir/valid.log"; : > "$log"
+  fm_write_meta "$home/state/lane-d9.meta" "window=sess:fm-lane-d9" "kind=ship"
+  fm_decision_cutover_ensure_status "$home/state/lane-d9.status" \
+    || fail "could not establish a valid-marker send fixture"
+  stream=$(fm_decision_stream_id "$home/state/lane-d9.status") \
+    || fail "the valid-marker fixture is not self-describing"
+  printf 'needs-decision [key=red-test]: accept the red test, or keep fixing?\n' \
+    >> "$home/state/lane-d9.status"
+  PATH="$fb:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_TMUX_LOG="$log" FM_SEND_SETTLE=0 \
+    "$SEND" lane-d9 --decision red-test "keep fixing" >/dev/null 2>"$err"; rc=$?
+  expect_code 0 "$rc" "a single valid marker stream should accept a decision answer"
+  IFS=$'\t' read -r token record_key record_instance < "$home/state/lane-d9.decision-answers"
+  [ "$record_key" = red-test ] || fail "the valid-marker answer record lost its decision key"
+  [ "$record_instance" = "$(fm_decision_instance_id 2 "$stream")" ] \
+    || fail "the valid-marker answer record lost its stream-bound instance"
+  [ "${token:0:16}" = "$record_instance" ] \
+    || fail "the valid-marker answer token was not bound to its opening"
+  pass "fm-send strict: --decision requires one valid marker or a true legacy stream"
+}
+
 # An unconfirmed decision send is the duplicate-authority hazard: the token was
 # already recorded before the text was submitted, so if delivery cannot be
 # confirmed and the answer is later re-sent, TWO live tokens exist for the same
@@ -327,6 +404,7 @@ test_exact_lane_id_send_still_works
 test_unset_fm_home_fails
 test_decision_answer_requires_an_open_request
 test_decision_answer_mints_a_correlated_token
+test_decision_answer_requires_strict_stream_identity
 test_unconfirmed_decision_answer_revokes_its_token
 test_secondmate_pre_submit_failure_revokes_its_decision_token
 test_decision_answer_resend_leaves_exactly_one_live_token

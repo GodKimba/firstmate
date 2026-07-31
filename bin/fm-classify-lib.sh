@@ -626,7 +626,7 @@ EOF
 _fm_status_open_decisions_stream() {  # <answers-file> [--with-instance|--with-authority]
   local answers=$1 view=${2:-} line verb key note resolve held open='' stripped
   local held_rec held_fields held_verb held_instance held_authority ans
-  local position=0 instance authority=legacy stream_id=''
+  local position=0 instance authority=legacy stream_id='' marker_id
   local out_key out_verb out_instance _out_authority out_note
   case "$view" in
     ''|--with-instance|--with-authority) ;;
@@ -636,7 +636,14 @@ _fm_status_open_decisions_stream() {  # <answers-file> [--with-instance|--with-a
   held=${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}
   while IFS= read -r line || [ -n "$line" ]; do
     position=$((position + 1))
-    if stream_id=$(fm_decision_marker_line_id "$line"); then
+    # Assign the stream id only from a VALID marker. Assigning the command
+    # substitution directly would clear it on every ordinary line, because a
+    # failed fm_decision_marker_line_id still substitutes empty - which silently
+    # demoted every post-cutover opening to a legacy positional instance while
+    # authority stayed correlated. Matches the same read in
+    # status_latest_decision_is_open_occurrence, which both surfaces must agree on.
+    if marker_id=$(fm_decision_marker_line_id "$line"); then
+      stream_id=$marker_id
       authority=correlated
       continue
     fi
