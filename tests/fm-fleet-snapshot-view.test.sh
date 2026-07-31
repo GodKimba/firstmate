@@ -672,9 +672,13 @@ test_uncorrelated_resolution_survives_active_ordinary_lifecycle() {
     "window=firstmate:fm-authority-ship-task" \
     "worktree=$home/projects/ordinary" \
     "project=alpha" \
-    "harness=codex" \
+    "harness=claude" \
     "kind=ship" \
     "mode=ship"
+  local gen
+  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$home/state" authority-ship-task)
+  "$ROOT/bin/fm-busy-event.sh" apply "$home/state" authority-ship-task busy --gen "$gen" \
+    --source claude-hook --event user-prompt-submit
   status="$home/state/authority-ship-task.status"
   fm_decision_cutover_ensure_status "$status" \
     || fail "could not establish a post-cutover ordinary-task fixture"

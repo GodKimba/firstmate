@@ -760,6 +760,16 @@ fi
 [ -n "$BACKEND_TARGET" ] || emit unknown none "no backend target recorded"
 pane_readable "$BACKEND_TARGET" || emit unknown none "backend target gone: $BACKEND_TARGET"
 
+# A worker's own green-ready report still carries a concrete CI wait even when
+# the converted harness has no readable semantic busy record. Apply the fork's
+# forge corroboration before that unrelated ambiguity can mask the report.
+if [ "$KIND" != secondmate ] && [ "$LOG_VERB" = done ] && log_reports_ci_ready; then
+  if ci_ready_log_allowed; then
+    emit "done" status-log "$CI_READY_LOG_DETAIL"
+  fi
+  emit working ci-withheld "$CI_READY_LOG_DETAIL"
+fi
+
 # Secondmates idle on their own watcher (idle pane = healthy), so the busy
 # state is not meaningful for them; read their state from the status log only.
 # Only an exact busy verdict reports working here, and only an exact idle
@@ -770,7 +780,15 @@ if [ "$KIND" != secondmate ]; then
   case "${BUSY_VERDICT%% *}" in
     busy) emit working pane "harness busy (${BUSY_VERDICT#* })" ;;
     idle) ;;
-    *) emit unknown pane "harness state unavailable ($BUSY_VERDICT)" ;;
+    *)
+      # Durable captain-actionable states remain authoritative even when a
+      # converted adapter's semantic busy record is absent or unreadable.
+      # Ambiguous progress and completion events still stay unknown below.
+      case "$LOG_VERB" in
+        needs-decision|blocked|paused) ;;
+        *) emit unknown pane "harness state unavailable ($BUSY_VERDICT)" ;;
+      esac
+      ;;
   esac
 fi
 
@@ -787,12 +805,6 @@ fi
 if [ -n "$LOG_VERB" ]; then
   LOG_STATE=$(map_log_state "$LOG_LINE")
   if [ "$LOG_STATE" != unknown ]; then
-    if [ "$LOG_STATE" = "done" ] && log_reports_ci_ready; then
-      if ci_ready_log_allowed; then
-        emit "done" status-log "$CI_READY_LOG_DETAIL"
-      fi
-      emit working ci-withheld "$CI_READY_LOG_DETAIL"
-    fi
     emit "$LOG_STATE" status-log "$(status_line_note "$LOG_LINE")"
   fi
 fi

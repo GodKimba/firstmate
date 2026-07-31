@@ -1240,7 +1240,7 @@ test_active_rebased_run_rejects_mismatched_submission_ref() {
   FM_FAKE_BUSY=0
   local out; out=$(run_crew_state "$d" feat-rebased-mismatch)
   assert_contains "$out" "state: unknown" "mismatched submitted code -> unknown"
-  assert_contains "$out" "source: none" "mismatched submitted code has no authoritative source"
+  assert_contains "$out" "source: pane" "mismatched submitted code falls back to the converted harness state"
   assert_not_contains "$out" "source: run-step" "mismatched submitted code is not attributed"
   pass "active rebased run rejects a mismatched submission ref"
 }
@@ -1279,7 +1279,7 @@ test_terminal_unresolved_run_head_not_revived_by_submission_ref() {
   FM_FAKE_BUSY=0
   local out; out=$(run_crew_state "$d" feat-old-terminal)
   assert_contains "$out" "state: unknown" "terminal unresolved run head -> unknown"
-  assert_contains "$out" "source: none" "terminal unresolved run is not a current source"
+  assert_contains "$out" "source: pane" "terminal unresolved run falls back to the converted harness state"
   assert_not_contains "$out" "source: run-step" "terminal run is not revived by a stale submission ref"
   pass "terminal run is not revived by the submission-ref fallback"
 }
