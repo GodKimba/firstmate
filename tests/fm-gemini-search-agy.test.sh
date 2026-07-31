@@ -145,13 +145,23 @@ assert.notEqual(extension.cacheKey(baseKey), extension.cacheKey({ ...baseKey, mo
 assert.notEqual(extension.cacheKey(baseKey), extension.cacheKey({ ...baseKey, binary: "/custom/agy" }));
 assert.notEqual(extension.cacheKey(baseKey), extension.cacheKey({ ...baseKey, validateUrls: true }));
 
-const publicIpv4 = extension.canonicalPublicIp("93.184.216.34");
-assert.deepEqual(publicIpv4, { address: "93.184.216.34", family: 4 });
-assert.deepEqual(extension.canonicalPublicIp("::ffff:93.184.216.34"), publicIpv4);
-assert.deepEqual(extension.canonicalPublicIp("2606:4700:4700:0:0:0:0:1111"), {
-  address: "2606:4700:4700::1111",
-  family: 6,
-});
+function nat64Address(ipv4) {
+  const bytes = ipv4.split(".").map(Number);
+  const high = ((bytes[0] << 8) | bytes[1]).toString(16);
+  const low = ((bytes[2] << 8) | bytes[3]).toString(16);
+  return `64:ff9b::${high}:${low}`;
+}
+
+for (const address of ["93.184.216.34", "192.0.0.9", "192.0.0.10"]) {
+  const publicIpv4 = { address, family: 4 };
+  assert.deepEqual(extension.canonicalPublicIp(address), publicIpv4);
+  assert.deepEqual(extension.canonicalPublicIp(`::ffff:${address}`), publicIpv4);
+  assert.deepEqual(extension.canonicalPublicIp(nat64Address(address)), {
+    address: nat64Address(address),
+    family: 6,
+  });
+}
+
 for (const address of [
   "0.1.2.3",
   "10.0.0.1",
@@ -168,23 +178,67 @@ for (const address of [
   "203.0.113.1",
   "224.0.0.1",
   "240.0.0.1",
+  "255.255.255.255",
+]) {
+  assert.throws(() => extension.canonicalPublicIp(address), /private or non-global IP address/);
+  assert.throws(() => extension.canonicalPublicIp(`::ffff:${address}`), /private or non-global IP address/);
+  assert.throws(() => extension.canonicalPublicIp(nat64Address(address)), /private or non-global IP address/);
+}
+
+for (const [address, canonical] of [
+  ["2001:1::1", "2001:1::1"],
+  ["2001:1::2", "2001:1::2"],
+  ["2001:1::3", "2001:1::3"],
+  ["2001:3::", "2001:3::"],
+  ["2001:3:ffff:ffff:ffff:ffff:ffff:ffff", "2001:3:ffff:ffff:ffff:ffff:ffff:ffff"],
+  ["2001:4:112::", "2001:4:112::"],
+  ["2001:4:112:ffff:ffff:ffff:ffff:ffff", "2001:4:112:ffff:ffff:ffff:ffff:ffff"],
+  ["2001:20::", "2001:20::"],
+  ["2001:2f:ffff:ffff:ffff:ffff:ffff:ffff", "2001:2f:ffff:ffff:ffff:ffff:ffff:ffff"],
+  ["2001:30::", "2001:30::"],
+  ["2001:3f:ffff:ffff:ffff:ffff:ffff:ffff", "2001:3f:ffff:ffff:ffff:ffff:ffff:ffff"],
+  ["2606:4700:4700:0:0:0:0:1111", "2606:4700:4700::1111"],
+  ["2620:4f:8000::1", "2620:4f:8000::1"],
+]) {
+  assert.deepEqual(extension.canonicalPublicIp(address), { address: canonical, family: 6 });
+}
+
+for (const address of [
   "::",
   "::1",
-  "64:ff9b::808:808",
+  "64:ff9a:ffff:ffff:ffff:ffff:ffff:ffff:ffff",
+  "64:ff9b:0:1::",
+  "64:ff9b:1::",
+  "64:ff9b:1:ffff:ffff:ffff:ffff:ffff",
   "100::1",
+  "100:ffff:ffff:ffff::ffff",
+  "100:0:0:1::",
+  "100:0:0:1:ffff:ffff:ffff:ffff",
   "2001::1",
+  "2001:1::",
+  "2001:1::4",
+  "2001:2::",
+  "2001:2:0:ffff:ffff:ffff:ffff:ffff",
+  "2001:2:ffff:ffff:ffff:ffff:ffff:ffff",
+  "2001:4:111:ffff:ffff:ffff:ffff:ffff",
+  "2001:4:113::",
+  "2001:10::",
+  "2001:1f:ffff:ffff:ffff:ffff:ffff:ffff",
+  "2001:40::",
   "2001:db8::1",
   "2002:7f00:1::",
   "3fff::1",
   "5f00::1",
+  "5f00:ffff:ffff:ffff:ffff:ffff:ffff:ffff",
   "fc00::1",
+  "fdff:ffff:ffff:ffff:ffff:ffff:ffff:ffff",
+  "fe80::1",
   "febf::1",
   "ff02::1",
-  "::ffff:172.16.0.1",
-  "::ffff:169.254.169.254",
 ]) {
   assert.throws(() => extension.canonicalPublicIp(address), /private or non-global IP address/);
 }
+const publicIpv4 = extension.canonicalPublicIp("93.184.216.34");
 const pinnedOptions = extension.buildPinnedRequestOptions(
   new URL("https://source.example:8443/docs?q=one"),
   publicIpv4,

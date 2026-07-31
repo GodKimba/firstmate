@@ -977,6 +977,23 @@ const NON_GLOBAL_IPV4_CIDRS: Array<[number[], number]> = [
   [[240, 0, 0, 0], 4],
 ];
 
+const GLOBAL_IPV4_SPECIAL_CIDRS: Array<[number[], number]> = [
+  [[192, 0, 0, 9], 32],
+  [[192, 0, 0, 10], 32],
+];
+
+const GLOBAL_IPV6_SPECIAL_CIDRS: Array<[number[], number]> = [
+  [[0x20, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01], 128],
+  [[0x20, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02], 128],
+  [[0x20, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03], 128],
+  [[0x20, 0x01, 0x00, 0x03], 32],
+  [[0x20, 0x01, 0x00, 0x04, 0x01, 0x12], 48],
+  [[0x20, 0x01, 0x00, 0x20], 28],
+  [[0x20, 0x01, 0x00, 0x30], 28],
+];
+
+const NAT64_WELL_KNOWN_PREFIX = [0x00, 0x64, 0xff, 0x9b, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
+
 function parseIpv4(address: string): Uint8Array | undefined {
   const parts = address.split(".");
   if (parts.length !== 4) return undefined;
@@ -1065,17 +1082,28 @@ function canonicalizeIpAddress(address: string): CanonicalIpAddress | undefined 
   return { address: formatIpv6(bytes), family: 6, bytes };
 }
 
+function matchesAnyCidr(bytes: Uint8Array, cidrs: Array<[number[], number]>): boolean {
+  return cidrs.some(([prefix, length]) => prefixMatches(bytes, prefix, length));
+}
+
+function isGlobalIpv4(bytes: Uint8Array): boolean {
+  if (matchesAnyCidr(bytes, GLOBAL_IPV4_SPECIAL_CIDRS)) return true;
+  return !matchesAnyCidr(bytes, NON_GLOBAL_IPV4_CIDRS);
+}
+
 function isGlobalIpAddress(address: CanonicalIpAddress): boolean {
   if (address.family === 4) {
-    return !NON_GLOBAL_IPV4_CIDRS.some(([prefix, length]) => prefixMatches(address.bytes, prefix, length));
+    return isGlobalIpv4(address.bytes);
   }
+  if (prefixMatches(address.bytes, NAT64_WELL_KNOWN_PREFIX, 96)) return isGlobalIpv4(address.bytes.slice(12));
+  if (matchesAnyCidr(address.bytes, GLOBAL_IPV6_SPECIAL_CIDRS)) return true;
   if (!prefixMatches(address.bytes, [0x20, 0x00], 3)) return false;
-  return ![
+  return !matchesAnyCidr(address.bytes, [
     [[0x20, 0x01, 0x00], 23],
     [[0x20, 0x01, 0x0d, 0xb8], 32],
     [[0x20, 0x02], 16],
     [[0x3f, 0xff, 0x00], 20],
-  ].some(([prefix, length]) => prefixMatches(address.bytes, prefix as number[], length as number));
+  ]);
 }
 
 export function canonicalPublicIp(address: string): { address: string; family: 4 | 6 } {
