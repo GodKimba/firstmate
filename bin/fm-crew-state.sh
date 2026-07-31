@@ -763,7 +763,7 @@ pane_readable "$BACKEND_TARGET" || emit unknown none "backend target gone: $BACK
 # A worker's own green-ready report still carries a concrete CI wait even when
 # the converted harness has no readable semantic busy record. Apply the fork's
 # forge corroboration before that unrelated ambiguity can mask the report.
-if [ "$KIND" != secondmate ] && [ "$LOG_VERB" = done ] && log_reports_ci_ready; then
+if [ "$KIND" != secondmate ] && [ "$LOG_VERB" = "done" ] && log_reports_ci_ready; then
   if ci_ready_log_allowed; then
     emit "done" status-log "$CI_READY_LOG_DETAIL"
   fi
