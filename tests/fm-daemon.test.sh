@@ -201,13 +201,19 @@ test_stale_diagnostic_wedge_survives_busy_housekeeping() {
       || fail "$case_name enriched wedge did not produce exactly one escalation"
     grep -F "${reason#stale: }" "$state/.subsuper-escalations" >/dev/null \
       || fail "$case_name enriched wedge lost its demand-deep-inspection detail"
-    [ ! -e "$state/.subsuper-stale-$key" ] \
-      || fail "$case_name enriched wedge retained ordinary stale tracking"
     case "$case_name" in
-      paused) [ -e "$state/.subsuper-paused-$key" ] \
-        || fail "paused enriched wedge erased ordinary pause tracking" ;;
-      *) [ ! -e "$state/.subsuper-paused-$key" ] \
-        || fail "$case_name enriched wedge created pause tracking" ;;
+      paused)
+        [ ! -e "$state/.subsuper-paused-$key" ] \
+          || fail "paused enriched wedge retained a pause contradicted by authoritative working state"
+        [ -e "$state/.subsuper-stale-$key" ] \
+          || fail "paused enriched wedge did not resume ordinary stale tracking after the pause was disproved"
+        ;;
+      *)
+        [ ! -e "$state/.subsuper-stale-$key" ] \
+          || fail "$case_name enriched wedge retained ordinary stale tracking"
+        [ ! -e "$state/.subsuper-paused-$key" ] \
+          || fail "$case_name enriched wedge created pause tracking"
+        ;;
     esac
     [ ! -s "$action_log" ] \
       || fail "$case_name enriched wedge interrupted or killed the busy worker"

@@ -1377,7 +1377,7 @@ is_wake_reason() {  # <reason>
 # --- dispatch one wake reason to self-handle or escalate --------------------
 # Side effects: logging, marker records, escalation buffer appends.
 handle_wake() {  # <reason> <state>
-  local reason=$1 state=$2 decision action distilled task last stale_detail
+  local reason=$1 state=$2 decision action distilled task last stale_detail enriched_wedge=0
   local kind="" arg=""
   if should_force_self "$reason"; then
     log "wake force-self (FM_INJECT_SKIP): $reason"
@@ -1391,6 +1391,7 @@ handle_wake() {  # <reason> <state>
               decision=$(classify_stale "$arg" "$state")
               case "$stale_detail" in
                 idle\ *s,\ possible\ wedge,\ escalation\ *)
+                  enriched_wedge=1
                   decision="escalate|${reason#stale: }" ;;
               esac ;;
     check:*)  decision=$(classify_check "$reason") ;;
@@ -1410,7 +1411,15 @@ handle_wake() {  # <reason> <state>
         task=$(window_to_task "$arg" "$state")
         last=$(last_status_line "$state/$task.status")
         if status_is_paused "$last"; then
-          if [ "$(crew_supervision_precedence "$state/$task.status" none unknown)" != actionable ]; then
+          if [ "$enriched_wedge" = 1 ]; then
+            # The watcher already performed the bounded wedge escalation.
+            # Preserve the valid pause, refresh its recheck cadence, and remove
+            # ordinary stale aging so housekeeping cannot duplicate the same
+            # escalation in this pass.
+            stale_marker_remove "$arg" "$state"
+            pause_marker_record "$arg" "$state"
+            _now > "$(daemon_pause_recheck_path "$state" "$task")"
+          elif [ "$(crew_supervision_precedence "$state/$task.status" none unknown)" != actionable ]; then
             clear_pause_markers "$arg" "$state"
             stale_marker_record "$arg" "$state"
           else
