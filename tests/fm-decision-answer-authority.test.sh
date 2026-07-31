@@ -353,6 +353,217 @@ test_answer_token_does_not_disturb_line_parsers() {
   pass "the answer token is transparent to the shared single-line parsers"
 }
 
+# --- stream identity must survive the fold ----------------------------------
+#
+# The defect these pin: the fold assigned its stream id straight from the
+# marker reader on EVERY line, so an ordinary line substituted empty and cleared
+# the stream while the authority flag stayed correlated. Every post-cutover
+# opening then received a legacy positional instance under correlated authority,
+# and fm-send minted a legacy-shaped token for a token-era request.
+
+# Print the occurrence identifier the authoritative fold holds for <key>.
+folded_instance() {  # <status-file> <key> -> instance
+  local f=$1 key=$2 d_key d_verb d_instance _d_summary instance=''
+  while IFS=$'\t' read -r d_key d_verb d_instance _d_summary || [ -n "$d_key" ]; do
+    [ "$d_key" = "$key" ] || continue
+    [ "$d_verb" = needs-decision ] || continue
+    instance=$d_instance
+  done <<EOF
+$(status_open_decisions "$f" --with-instance)
+EOF
+  printf '%s' "$instance"
+}
+
+# Print the authority the fold assigned to <key>: legacy or correlated.
+folded_authority() {  # <status-file> <key> -> legacy|correlated
+  local f=$1 key=$2 d_key d_verb _d_instance d_authority _d_summary authority=''
+  while IFS=$'\t' read -r d_key d_verb _d_instance d_authority _d_summary \
+    || [ -n "$d_key" ]; do
+    [ "$d_key" = "$key" ] || continue
+    [ "$d_verb" = needs-decision ] || continue
+    authority=$d_authority
+  done <<EOF
+$(status_open_decisions "$f" --with-authority)
+EOF
+  printf '%s' "$authority"
+}
+
+test_post_marker_opening_uses_the_stream_bound_instance() {
+  local d f stream instance
+  d=$(new_case stream-bound)
+  f="$d/state/task.status"
+  stream=$(fm_decision_stream_id "$f") || fail "the fixture stream is not self-describing"
+  # Physical line 2 is the first ordinary line, line 3 opens the decision.
+  printf 'working: mapping the surface\n' >> "$f"
+  printf 'needs-decision [key=route]: north or south?\n' >> "$f"
+  instance=$(folded_instance "$f" route)
+  [ "$instance" = "$(fm_decision_instance_id 3 "$stream")" ] \
+    || fail "a post-cutover opening did not bind to its stream: '$instance'"
+  [ "$instance" != "$(fm_decision_instance_id 3)" ] \
+    || fail "a post-cutover opening kept the legacy positional instance"
+  [ "$(folded_authority "$f" route)" = correlated ] \
+    || fail "a post-cutover opening lost its correlated authority"
+  # An opening adjacent to the marker binds to the stream as well: the clearing
+  # bug reached the very first line after the marker, not only distant ones.
+  d=$(new_case stream-bound-adjacent)
+  f="$d/state/task.status"
+  stream=$(fm_decision_stream_id "$f") || fail "the adjacent fixture is not self-describing"
+  printf 'needs-decision [key=adjacent]: choose now\n' >> "$f"
+  instance=$(folded_instance "$f" adjacent)
+  [ "$instance" = "$(fm_decision_instance_id 2 "$stream")" ] \
+    || fail "an opening adjacent to the marker did not bind to its stream: '$instance'"
+  pass "post-cutover openings carry the stream-bound occurrence instance"
+}
+
+test_stream_bound_mint_record_and_resolve_close_the_exact_opening() {
+  local d f stream token recorded instance legacy_token
+  d=$(new_case stream-bound-close)
+  f="$d/state/task.status"
+  stream=$(fm_decision_stream_id "$f") || fail "the fixture stream is not self-describing"
+  printf 'working: still deciding whether to ask\n' >> "$f"
+  printf 'needs-decision [key=route]: north or south?\n' >> "$f"
+  instance=$(fm_decision_instance_id 3 "$stream")
+  token=$(mint_for "$f" route)
+  # The recorded token and its record both carry the stream-bound instance, so a
+  # later reader cannot mistake this token-era grant for a legacy one.
+  [ "${token:0:16}" = "$instance" ] \
+    || fail "the minted token did not embed the stream-bound instance: '$token'"
+  recorded=$(awk -F '\t' -v t="$token" '$1 == t { print $3 }' \
+    "$(fm_decision_answers_file "$f")")
+  [ "$recorded" = "$instance" ] \
+    || fail "the answer record did not carry the stream-bound instance: '$recorded'"
+  # A token minted against the SAME position under the legacy formula is not this
+  # opening's authority and must not close it.
+  legacy_token=$(fm_decision_mint_answer_token "$(fm_decision_instance_id 3)") \
+    || fail "could not mint a legacy-shaped token"
+  fm_decision_record_answer "$(fm_decision_answers_file "$f")" "$legacy_token" route \
+    "$(fm_decision_instance_id 3)" >/dev/null \
+    || fail "could not record the legacy-shaped token"
+  printf 'resolved [key=route] [ans=%s]: replayed a legacy-shaped token\n' "$legacy_token" >> "$f"
+  assert_contains "$(open_set "$f")" "route|needs-decision|" \
+    "a legacy-shaped token closed a stream-bound opening"
+  printf 'resolved [key=route] [ans=%s]: captain chose south\n' "$token" >> "$f"
+  [ -z "$(open_set "$f")" ] \
+    || fail "the stream-bound token failed to close its own opening"
+  pass "a stream-bound token mints, records, and closes exactly its opening"
+}
+
+test_ordinary_lines_cannot_clear_stream_identity() {
+  local d f stream instance position
+  d=$(new_case stream-persists)
+  f="$d/state/task.status"
+  stream=$(fm_decision_stream_id "$f") || fail "the fixture stream is not self-describing"
+  # Every shape an ordinary line can take sits between the marker and the
+  # opening: prose, a blank line, whitespace, a resolution, and a line that only
+  # looks like a marker.
+  {
+    printf 'working: mapping the surface\n'
+    printf '\n'
+    printf '   \n'
+    printf 'resolved: an earlier unkeyed blocker cleared\n'
+    printf '[fm-decision-answer-cutover:v1 stream=not-hex]\n'
+    printf 'paused: waiting on an upstream release\n'
+  } >> "$f"
+  printf 'needs-decision [key=route]: north or south?\n' >> "$f"
+  position=8
+  instance=$(folded_instance "$f" route)
+  [ "$instance" = "$(fm_decision_instance_id "$position" "$stream")" ] \
+    || fail "ordinary lines cleared the stream identity: '$instance'"
+  [ "$instance" != "$(fm_decision_instance_id "$position")" ] \
+    || fail "the opening fell back to a legacy positional instance"
+  [ "$(folded_authority "$f" route)" = correlated ] \
+    || fail "ordinary lines downgraded the correlated authority"
+  pass "ordinary lines never clear an established stream identity"
+}
+
+test_a_valid_later_marker_establishes_the_new_stream() {
+  local d f first second instance
+  d=$(new_case later-marker)
+  f="$d/state/task.status"
+  first=$(fm_decision_stream_id "$f") || fail "the first marker is not self-describing"
+  second=$(fm_decision_status_marker) || fail "could not build a second marker"
+  printf 'working: the first stream ran here\n' >> "$f"
+  printf '%s\n' "$second" >> "$f"
+  second=$(fm_decision_marker_line_id "$second") || fail "the second marker is malformed"
+  [ "$first" != "$second" ] || fail "the second marker reused the first identity"
+  printf 'working: the second stream starts here\n' >> "$f"
+  printf 'needs-decision [key=route]: north or south?\n' >> "$f"
+  instance=$(folded_instance "$f" route)
+  [ "$instance" = "$(fm_decision_instance_id 5 "$second")" ] \
+    || fail "an opening after a later marker did not bind to the new stream: '$instance'"
+  [ "$instance" != "$(fm_decision_instance_id 5 "$first")" ] \
+    || fail "an opening after a later marker stayed bound to the retired stream"
+  pass "a valid later marker deterministically establishes the new stream"
+}
+
+test_true_legacy_streams_keep_legacy_identity_and_closure() {
+  local d f instance
+  d=$(new_legacy_case true-legacy)
+  f="$d/state/task.status"
+  {
+    printf 'working: mapping the surface\n'
+    printf 'needs-decision [key=route]: north or south?\n'
+  } > "$f"
+  instance=$(folded_instance "$f" route)
+  [ "$instance" = "$(fm_decision_instance_id 2)" ] \
+    || fail "an unmarked opening lost its legacy positional instance: '$instance'"
+  [ "$(folded_authority "$f" route)" = legacy ] \
+    || fail "an unmarked opening claimed correlated authority"
+  printf 'resolved [key=route]: captain chose south\n' >> "$f"
+  [ -z "$(open_set "$f")" ] \
+    || fail "a legacy stream lost its plain keyed closure"
+  pass "true legacy streams keep legacy identity and plain keyed closure"
+}
+
+test_malformed_or_ambiguous_markers_refuse_authority() {
+  local d f second instance stream
+  # A marker-shaped line that is not a valid marker never grants token-era
+  # authority: the stream stays legacy and stays closable the legacy way.
+  d=$(new_legacy_case malformed-marker)
+  f="$d/state/task.status"
+  {
+    printf '[fm-decision-answer-cutover:v1 stream=not-a-valid-hex-identity-value]\n'
+    printf 'needs-decision [key=route]: north or south?\n'
+  } > "$f"
+  fm_decision_stream_id "$f" >/dev/null \
+    && fail "a malformed marker was accepted as a stream identity"
+  [ -z "$(status_open_token_needs_decisions "$f")" ] \
+    || fail "a malformed marker surfaced a token-era decision"
+  status_has_open_token_needs_decision "$f" \
+    && fail "a malformed marker claimed an open token-era decision"
+  status_latest_needs_decision_is_open_token_occurrence "$f" \
+    && fail "a malformed marker claimed a token-era latest occurrence"
+  [ "$(folded_authority "$f" route)" = legacy ] \
+    || fail "a malformed marker granted correlated authority"
+  # Two valid markers are ambiguous: the strict identity reader refuses, so the
+  # token-era surfaces refuse too, rather than answering against a guessed stream.
+  d=$(new_case ambiguous-markers)
+  f="$d/state/task.status"
+  second=$(fm_decision_status_marker) || fail "could not build a second marker"
+  printf '%s\n' "$second" >> "$f"
+  printf 'needs-decision [key=route]: north or south?\n' >> "$f"
+  fm_decision_stream_id "$f" >/dev/null \
+    && fail "two markers were accepted as one stream identity"
+  [ -z "$(status_open_token_needs_decisions "$f")" ] \
+    || fail "an ambiguous stream surfaced a token-era decision"
+  status_latest_needs_decision_is_open_token_occurrence "$f" \
+    && fail "an ambiguous stream claimed a token-era latest occurrence"
+  # A malformed marker arriving AFTER a valid one must not downgrade the
+  # established stream back to a legacy positional instance. That silent
+  # downgrade under retained correlated authority is the defect class itself.
+  d=$(new_case malformed-after-valid)
+  f="$d/state/task.status"
+  stream=$(fm_decision_stream_id "$f") || fail "the fixture stream is not self-describing"
+  printf '[fm-decision-answer-cutover:v1 stream=not-a-valid-hex-identity-value]\n' >> "$f"
+  printf 'needs-decision [key=route]: north or south?\n' >> "$f"
+  instance=$(folded_instance "$f" route)
+  [ "$instance" = "$(fm_decision_instance_id 3 "$stream")" ] \
+    || fail "a malformed trailing marker downgraded the established stream: '$instance'"
+  [ "$(folded_authority "$f" route)" = correlated ] \
+    || fail "a malformed trailing marker dropped correlated authority"
+  pass "malformed and ambiguous markers refuse authority instead of granting it"
+}
+
 test_pre_request_generic_command_never_answers
 test_queued_generic_command_reaches_a_busy_worker_unchanged
 test_settled_pre_cutover_history_stays_settled
@@ -367,3 +578,9 @@ test_answer_for_another_key_does_not_transfer
 test_generic_and_unkeyed_input_never_closes_a_decision
 test_blocked_and_captain_held_closure_are_unchanged
 test_answer_token_does_not_disturb_line_parsers
+test_post_marker_opening_uses_the_stream_bound_instance
+test_stream_bound_mint_record_and_resolve_close_the_exact_opening
+test_ordinary_lines_cannot_clear_stream_identity
+test_a_valid_later_marker_establishes_the_new_stream
+test_true_legacy_streams_keep_legacy_identity_and_closure
+test_malformed_or_ambiguous_markers_refuse_authority
