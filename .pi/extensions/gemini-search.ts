@@ -6,9 +6,12 @@ import { createHash, randomUUID } from "node:crypto";
 import { lookup } from "node:dns/promises";
 import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { request as requestHttp, type RequestOptions as HttpRequestOptions } from "node:http";
+import { request as requestHttps } from "node:https";
 import { isIP } from "node:net";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { Readable } from "node:stream";
 
 const MAX_RESULTS = 8;
 const DEFAULT_LIMIT = 5;
@@ -373,7 +376,10 @@ function cacheTtlMs(mode: SearchMode, confidence: SearchConfidence): number {
   return confidence === "low" ? LOW_CONFIDENCE_CACHE_TTL_MS : ttlMsForMode(mode);
 }
 
-function shouldCacheSearch(search: NormalizedSearch, confidence: SearchConfidence): boolean {
+function shouldCacheSearch(search: NormalizedSearch, confidence: SearchConfidence, mode: SearchMode): boolean {
+  if (mode === "docs" || mode === "source-finder") {
+    return search.results.some((result) => acceptsResultInContent(result, mode));
+  }
   return search.results.length > 0 && confidence !== "low";
 }
 
@@ -385,13 +391,14 @@ function cachePath(key: string): string {
   return join(CACHE_DIR, `${key}.json`);
 }
 
-async function readSearchCache(key: string): Promise<SearchCacheEntry | undefined> {
+async function readSearchCache(key: string, mode: SearchMode): Promise<SearchCacheEntry | undefined> {
   const path = cachePath(key);
   if (!existsSync(path)) return undefined;
   try {
     const entry = JSON.parse(await readFile(path, "utf8")) as SearchCacheEntry;
     if (entry.version !== CACHE_VERSION) return undefined;
     if (entry.expiresAt <= Date.now()) return undefined;
+    if (!shouldCacheSearch(entry.normalized, entry.confidence, mode)) return undefined;
     return entry;
   } catch {
     return undefined;
@@ -617,17 +624,22 @@ function shouldRetryValidationWithGet(validation: UrlValidation): boolean {
   return validation.status === 403 || validation.status === 405 || validation.status === 429 || validation.error !== undefined;
 }
 
-async function validateUrl(url: string, signal?: AbortSignal): Promise<UrlValidation> {
+async function validateUrl(
+  url: string,
+  signal?: AbortSignal,
+  dependencies: PublicFetchDependencies = PUBLIC_FETCH_DEPENDENCIES,
+): Promise<UrlValidation> {
+  throwIfAborted(signal, "gemini_search cancelled during URL validation.");
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), URL_VALIDATION_TIMEOUT_MS);
-  const abortHandler = () => controller.abort();
+  const abortHandler = () => controller.abort(signal?.reason);
   signal?.addEventListener("abort", abortHandler, { once: true });
+  if (signal?.aborted) abortHandler();
   try {
-    await assertPublicFetchableUrl(url);
     const headResponse = await fetchPublic(url, {
       method: "HEAD",
       headers: { "user-agent": WEB_FETCH_USER_AGENT, accept: "text/html,text/markdown,text/plain,*/*" },
-    }, controller.signal);
+    }, controller.signal, dependencies);
     const headValidation = validationFromResponse(headResponse, "HEAD");
     await headResponse.body?.cancel();
     if (!shouldRetryValidationWithGet(headValidation)) return headValidation;
@@ -635,14 +647,14 @@ async function validateUrl(url: string, signal?: AbortSignal): Promise<UrlValida
     const getResponse = await fetchPublic(url, {
       method: "GET",
       headers: { "user-agent": WEB_FETCH_USER_AGENT, accept: "text/html,text/markdown,text/plain,*/*", range: "bytes=0-1024" },
-    }, controller.signal);
+    }, controller.signal, dependencies);
     const getValidation = validationFromResponse(getResponse, "GET");
     await getResponse.body?.cancel();
     return getValidation;
   } catch (error) {
     if (signal?.aborted) throw new Error("gemini_search cancelled during URL validation.");
     const message = error instanceof Error ? error.message : String(error);
-    const quality: UrlQuality = message.includes("local/private") || message.includes("private IP") ? "private_blocked" : "invalid";
+    const quality: UrlQuality = message.includes("local/private") || message.includes("private") || message.includes("non-global") ? "private_blocked" : "invalid";
     return { ok: false, quality, error: message };
   } finally {
     clearTimeout(timeout);
@@ -655,12 +667,17 @@ function mergeWarnings(...warnings: Array<string | undefined>): string | undefin
   return uniqueWarnings.join(" ") || undefined;
 }
 
-async function maybeValidateResults(search: NormalizedSearch, enabled: boolean, signal?: AbortSignal): Promise<NormalizedSearch> {
+async function maybeValidateResults(
+  search: NormalizedSearch,
+  enabled: boolean,
+  signal?: AbortSignal,
+  dependencies: PublicFetchDependencies = PUBLIC_FETCH_DEPENDENCIES,
+): Promise<NormalizedSearch> {
   if (!enabled) return { ...search, results: annotateAndSortResults(search.results) };
   const results: NormalizedResult[] = [];
   for (const result of search.results) {
     if (signal?.aborted) throw new Error("gemini_search cancelled during URL validation.");
-    const validation = await validateUrl(result.url, signal);
+    const validation = await validateUrl(result.url, signal, dependencies);
     const finalUrlQuality = validation.finalUrl ? urlQuality(validation.finalUrl) : undefined;
     const canCanonicalizeRedirect = validation.finalUrl
       && validation.finalUrl !== result.url
@@ -876,48 +893,266 @@ function renderGeminiSearchResult(
   return container;
 }
 
-function isLikelyPrivateIp(address: string): boolean {
-  if (isIP(address) === 6) {
-    const normalized = address.toLowerCase();
-    return normalized === "::1"
-      || normalized.startsWith("fc")
-      || normalized.startsWith("fd")
-      || normalized.startsWith("fe80:")
-      || normalized.startsWith("::ffff:127.")
-      || normalized.startsWith("::ffff:10.")
-      || normalized.startsWith("::ffff:192.168.");
+type CanonicalIpAddress = {
+  address: string;
+  family: 4 | 6;
+  bytes: Uint8Array;
+};
+
+type PublicFetchDependencies = {
+  lookupHost: (hostname: string) => Promise<Array<{ address: string; family: number }>>;
+  requestAddress: (url: URL, address: CanonicalIpAddress, init: RequestInit, signal?: AbortSignal) => Promise<Response>;
+};
+
+const NON_GLOBAL_IPV4_CIDRS: Array<[number[], number]> = [
+  [[0, 0, 0, 0], 8],
+  [[10, 0, 0, 0], 8],
+  [[100, 64, 0, 0], 10],
+  [[127, 0, 0, 0], 8],
+  [[169, 254, 0, 0], 16],
+  [[172, 16, 0, 0], 12],
+  [[192, 0, 0, 0], 24],
+  [[192, 0, 2, 0], 24],
+  [[192, 88, 99, 0], 24],
+  [[192, 168, 0, 0], 16],
+  [[198, 18, 0, 0], 15],
+  [[198, 51, 100, 0], 24],
+  [[203, 0, 113, 0], 24],
+  [[224, 0, 0, 0], 4],
+  [[240, 0, 0, 0], 4],
+];
+
+function parseIpv4(address: string): Uint8Array | undefined {
+  const parts = address.split(".");
+  if (parts.length !== 4) return undefined;
+  const bytes = parts.map((part) => Number(part));
+  if (bytes.some((byte, index) => !/^\d+$/.test(parts[index]) || !Number.isInteger(byte) || byte < 0 || byte > 255)) return undefined;
+  return Uint8Array.from(bytes);
+}
+
+function parseIpv6(address: string): Uint8Array | undefined {
+  let normalized = address.toLowerCase();
+  if (normalized.includes(".")) {
+    const separator = normalized.lastIndexOf(":");
+    if (separator < 0) return undefined;
+    const ipv4 = parseIpv4(normalized.slice(separator + 1));
+    if (!ipv4) return undefined;
+    normalized = `${normalized.slice(0, separator)}:${((ipv4[0] << 8) | ipv4[1]).toString(16)}:${((ipv4[2] << 8) | ipv4[3]).toString(16)}`;
   }
 
-  if (isIP(address) !== 4) return false;
-  return /^10\./.test(address)
-    || /^127\./.test(address)
-    || /^169\.254\./.test(address)
-    || /^192\.168\./.test(address)
-    || /^172\.(1[6-9]|2\d|3[0-1])\./.test(address)
-    || address === "0.0.0.0";
+  const halves = normalized.split("::");
+  if (halves.length > 2) return undefined;
+  const left = halves[0] ? halves[0].split(":") : [];
+  const right = halves.length === 2 && halves[1] ? halves[1].split(":") : [];
+  const zeroCount = halves.length === 2 ? 8 - left.length - right.length : 0;
+  if ((halves.length === 1 && left.length !== 8) || (halves.length === 2 && zeroCount < 1)) return undefined;
+  const parts = halves.length === 2 ? [...left, ...Array(zeroCount).fill("0"), ...right] : left;
+  if (parts.length !== 8 || parts.some((part) => !/^[0-9a-f]{1,4}$/.test(part))) return undefined;
+
+  const bytes = new Uint8Array(16);
+  parts.forEach((part, index) => {
+    const value = Number.parseInt(part, 16);
+    bytes[index * 2] = value >> 8;
+    bytes[index * 2 + 1] = value & 0xff;
+  });
+  return bytes;
 }
+
+function formatIpv6(bytes: Uint8Array): string {
+  const parts = Array.from({ length: 8 }, (_, index) => ((bytes[index * 2] << 8) | bytes[index * 2 + 1]).toString(16));
+  let bestStart = -1;
+  let bestLength = 0;
+  for (let index = 0; index < parts.length;) {
+    if (parts[index] !== "0") {
+      index += 1;
+      continue;
+    }
+    let end = index;
+    while (end < parts.length && parts[end] === "0") end += 1;
+    if (end - index > bestLength && end - index >= 2) {
+      bestStart = index;
+      bestLength = end - index;
+    }
+    index = end;
+  }
+  if (bestStart < 0) return parts.join(":");
+  const before = parts.slice(0, bestStart).join(":");
+  const after = parts.slice(bestStart + bestLength).join(":");
+  return `${before}::${after}`;
+}
+
+function prefixMatches(bytes: Uint8Array, prefix: number[], prefixLength: number): boolean {
+  const wholeBytes = Math.floor(prefixLength / 8);
+  for (let index = 0; index < wholeBytes; index += 1) {
+    if (bytes[index] !== prefix[index]) return false;
+  }
+  const remainingBits = prefixLength % 8;
+  if (remainingBits === 0) return true;
+  const mask = (0xff << (8 - remainingBits)) & 0xff;
+  return (bytes[wholeBytes] & mask) === ((prefix[wholeBytes] ?? 0) & mask);
+}
+
+function canonicalizeIpAddress(address: string): CanonicalIpAddress | undefined {
+  const unwrapped = address.replace(/^\[|\]$/g, "").split("%", 1)[0];
+  if (isIP(unwrapped) === 4) {
+    const bytes = parseIpv4(unwrapped);
+    if (!bytes) return undefined;
+    return { address: Array.from(bytes).join("."), family: 4, bytes };
+  }
+  if (isIP(unwrapped) !== 6) return undefined;
+  const bytes = parseIpv6(unwrapped);
+  if (!bytes) return undefined;
+  const mappedIpv4 = bytes.slice(0, 10).every((byte) => byte === 0) && bytes[10] === 0xff && bytes[11] === 0xff;
+  if (mappedIpv4) {
+    const mappedBytes = bytes.slice(12);
+    return { address: Array.from(mappedBytes).join("."), family: 4, bytes: mappedBytes };
+  }
+  return { address: formatIpv6(bytes), family: 6, bytes };
+}
+
+function isGlobalIpAddress(address: CanonicalIpAddress): boolean {
+  if (address.family === 4) {
+    return !NON_GLOBAL_IPV4_CIDRS.some(([prefix, length]) => prefixMatches(address.bytes, prefix, length));
+  }
+  if (!prefixMatches(address.bytes, [0x20, 0x00], 3)) return false;
+  return ![
+    [[0x20, 0x01, 0x00], 23],
+    [[0x20, 0x01, 0x0d, 0xb8], 32],
+    [[0x20, 0x02], 16],
+    [[0x3f, 0xff, 0x00], 20],
+  ].some(([prefix, length]) => prefixMatches(address.bytes, prefix as number[], length as number));
+}
+
+export function canonicalPublicIp(address: string): { address: string; family: 4 | 6 } {
+  const canonical = canonicalizeIpAddress(address);
+  if (!canonical || !isGlobalIpAddress(canonical)) {
+    throw new Error(`Refusing to fetch private or non-global IP address: ${address}`);
+  }
+  return { address: canonical.address, family: canonical.family };
+}
+
+function throwIfAborted(signal: AbortSignal | undefined, message: string): void {
+  if (signal?.aborted) throw new Error(message);
+}
+
+async function withAbort<T>(promise: Promise<T>, signal: AbortSignal | undefined, message: string): Promise<T> {
+  throwIfAborted(signal, message);
+  if (!signal) return promise;
+  let abortHandler: (() => void) | undefined;
+  return new Promise<T>((resolve, reject) => {
+    abortHandler = () => reject(new Error(message));
+    signal.addEventListener("abort", abortHandler, { once: true });
+    if (signal.aborted) abortHandler();
+    promise.then(resolve, reject);
+  }).finally(() => {
+    if (abortHandler) signal.removeEventListener("abort", abortHandler);
+  });
+}
+
+function originalHostname(url: URL): string {
+  return url.hostname.replace(/^\[|\]$/g, "");
+}
+
+export function buildPinnedRequestOptions(
+  url: URL,
+  address: { address: string; family: 4 | 6 },
+  init: RequestInit,
+): HttpRequestOptions & { servername?: string } {
+  const headers = new Headers(init.headers);
+  headers.set("host", url.host);
+  if (!headers.has("accept-encoding")) headers.set("accept-encoding", "identity");
+  const hostname = originalHostname(url);
+  return {
+    protocol: url.protocol,
+    hostname: address.address,
+    family: address.family,
+    port: url.port ? Number(url.port) : undefined,
+    path: `${url.pathname}${url.search}`,
+    method: init.method ?? "GET",
+    headers: Object.fromEntries(headers.entries()),
+    servername: isIP(hostname) ? undefined : hostname,
+  };
+}
+
+async function requestPinnedAddress(
+  url: URL,
+  address: CanonicalIpAddress,
+  init: RequestInit,
+  signal?: AbortSignal,
+): Promise<Response> {
+  throwIfAborted(signal, `Public fetch cancelled while requesting ${url.toString()}`);
+  const transport = url.protocol === "https:" ? requestHttps : requestHttp;
+  const options = { ...buildPinnedRequestOptions(url, address, init), signal };
+  return new Promise<Response>((resolve, reject) => {
+    const request = transport(options, (incoming) => {
+      const status = incoming.statusCode ?? 0;
+      if (status < 200 || status > 599) {
+        incoming.destroy();
+        reject(new Error(`Unsupported HTTP status ${status} while fetching ${url.toString()}`));
+        return;
+      }
+      const headers = new Headers();
+      for (let index = 0; index < incoming.rawHeaders.length; index += 2) {
+        headers.append(incoming.rawHeaders[index], incoming.rawHeaders[index + 1]);
+      }
+      const hasBody = init.method?.toUpperCase() !== "HEAD" && status !== 204 && status !== 205 && status !== 304;
+      const body = hasBody ? Readable.toWeb(incoming) as ReadableStream<Uint8Array> : null;
+      if (!hasBody) incoming.resume();
+      const response = new Response(body, { status, statusText: incoming.statusMessage, headers });
+      Object.defineProperty(response, "url", { configurable: true, value: url.toString() });
+      resolve(response);
+    });
+    request.once("error", reject);
+    request.end();
+  });
+}
+
+const PUBLIC_FETCH_DEPENDENCIES: PublicFetchDependencies = {
+  lookupHost: (hostname) => lookup(hostname, { all: true, verbatim: true }),
+  requestAddress: requestPinnedAddress,
+};
 
 function assertFetchableUrl(urlText: string): URL {
   const url = new URL(urlText);
   if (url.protocol !== "https:" && url.protocol !== "http:") {
     throw new Error(`Only http(s) URLs are supported: ${urlText}`);
   }
-  const host = url.hostname.toLowerCase();
-  const blockedHosts = new Set(["localhost", "127.0.0.1", "0.0.0.0", "::1", "[::1]"]);
-  if (blockedHosts.has(host) || host.endsWith(".local")) throw new Error(`Refusing to fetch local/private host: ${host}`);
-  if (isLikelyPrivateIp(host)) throw new Error(`Refusing to fetch private IP address: ${host}`);
+  const host = originalHostname(url).toLowerCase();
+  const normalizedHost = host.replace(/\.$/, "");
+  if (normalizedHost === "localhost" || normalizedHost.endsWith(".localhost") || normalizedHost.endsWith(".local")) {
+    throw new Error(`Refusing to fetch local/private host: ${host}`);
+  }
+  const literalAddress = canonicalizeIpAddress(host);
+  if (literalAddress && !isGlobalIpAddress(literalAddress)) {
+    throw new Error(`Refusing to fetch private or non-global IP address: ${host}`);
+  }
   return url;
 }
 
-async function assertPublicFetchableUrl(urlText: string): Promise<URL> {
+async function resolvePublicAddress(
+  urlText: string,
+  signal: AbortSignal | undefined,
+  dependencies: PublicFetchDependencies,
+): Promise<{ url: URL; address: CanonicalIpAddress }> {
   const url = assertFetchableUrl(urlText);
-  const host = url.hostname.toLowerCase();
-  if (isIP(host)) return url;
+  const host = originalHostname(url).toLowerCase();
+  const literalAddress = canonicalizeIpAddress(host);
+  if (literalAddress) return { url, address: literalAddress };
 
-  const addresses = await lookup(host, { all: true, verbatim: true });
-  const privateAddress = addresses.find((entry) => isLikelyPrivateIp(entry.address));
-  if (privateAddress) throw new Error(`Refusing to fetch host that resolves to private IP address: ${host}`);
-  return url;
+  throwIfAborted(signal, `Public fetch cancelled while resolving ${host}`);
+  const records = await withAbort(
+    dependencies.lookupHost(host),
+    signal,
+    `Public fetch cancelled while resolving ${host}`,
+  );
+  throwIfAborted(signal, `Public fetch cancelled while resolving ${host}`);
+  if (records.length === 0) throw new Error(`Host did not resolve to an IP address: ${host}`);
+  const addresses = records.map((record) => canonicalizeIpAddress(record.address));
+  const rejected = addresses.find((address) => !address || !isGlobalIpAddress(address));
+  if (rejected !== undefined || addresses.some((address) => address === undefined)) {
+    throw new Error(`Refusing to fetch host that resolves to a private or non-global IP address: ${host}`);
+  }
+  return { url, address: addresses[0]! };
 }
 
 function redirectTarget(currentUrl: string, location: string | null): string | undefined {
@@ -925,18 +1160,30 @@ function redirectTarget(currentUrl: string, location: string | null): string | u
   return new URL(location, currentUrl).toString();
 }
 
-async function fetchPublic(urlText: string, init: RequestInit, signal?: AbortSignal): Promise<Response> {
-  let currentUrl = (await assertPublicFetchableUrl(urlText)).toString();
+export async function fetchPublic(
+  urlText: string,
+  init: RequestInit,
+  signal?: AbortSignal,
+  dependencies: PublicFetchDependencies = PUBLIC_FETCH_DEPENDENCIES,
+): Promise<Response> {
+  let currentUrl = assertFetchableUrl(urlText).toString();
 
   for (let redirectCount = 0; redirectCount <= MAX_REDIRECTS; redirectCount += 1) {
-    const response = await fetch(currentUrl, { ...init, redirect: "manual", signal });
+    throwIfAborted(signal, `Public fetch cancelled while fetching ${currentUrl}`);
+    const target = await resolvePublicAddress(currentUrl, signal, dependencies);
+    throwIfAborted(signal, `Public fetch cancelled while fetching ${currentUrl}`);
+    const response = await withAbort(
+      dependencies.requestAddress(target.url, target.address, init, signal),
+      signal,
+      `Public fetch cancelled while fetching ${currentUrl}`,
+    );
     if (!REDIRECT_STATUSES.has(response.status)) return response;
 
     const nextUrl = redirectTarget(currentUrl, response.headers.get("location"));
     await response.body?.cancel();
     if (!nextUrl) return response;
     if (redirectCount === MAX_REDIRECTS) throw new Error(`Too many redirects while fetching ${urlText}`);
-    currentUrl = (await assertPublicFetchableUrl(nextUrl)).toString();
+    currentUrl = assertFetchableUrl(nextUrl).toString();
   }
 
   throw new Error(`Too many redirects while fetching ${urlText}`);
@@ -1010,18 +1257,24 @@ async function readResponseBodyWithinLimit(response: Response): Promise<{ body: 
   return { body: Buffer.concat(chunks).toString("utf8"), byteTruncated };
 }
 
-async function fetchOne(urlText: string, maxChars: number, signal?: AbortSignal): Promise<FetchedPage> {
+async function fetchOne(
+  urlText: string,
+  maxChars: number,
+  signal?: AbortSignal,
+  dependencies: PublicFetchDependencies = PUBLIC_FETCH_DEPENDENCIES,
+): Promise<FetchedPage> {
+  throwIfAborted(signal, "web_fetch cancelled.");
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), WEB_FETCH_TIMEOUT_MS);
-  const abortHandler = () => controller.abort();
+  const abortHandler = () => controller.abort(signal?.reason);
   signal?.addEventListener("abort", abortHandler, { once: true });
+  if (signal?.aborted) abortHandler();
 
   try {
-    await assertPublicFetchableUrl(urlText);
     const response = await fetchPublic(urlText, {
       method: "GET",
       headers: { "user-agent": WEB_FETCH_USER_AGENT, accept: "text/html,text/markdown,text/plain,application/json,*/*" },
-    }, controller.signal);
+    }, controller.signal, dependencies);
     const contentLength = Number.parseInt(response.headers.get("content-length") || "", 10);
     if (Number.isFinite(contentLength) && contentLength > MAX_FETCH_BYTES) {
       await response.body?.cancel();
@@ -1057,6 +1310,7 @@ async function fetchOne(urlText: string, maxChars: number, signal?: AbortSignal)
         : response.ok ? undefined : `HTTP ${response.status} ${response.statusText}`,
     };
   } catch (error) {
+    if (signal?.aborted) throw new Error("web_fetch cancelled.");
     return { originalUrl: urlText, ok: false, text: "", truncated: false, error: error instanceof Error ? error.message : String(error) };
   } finally {
     clearTimeout(timeout);
@@ -1081,7 +1335,7 @@ function formatFetchedPages(pages: FetchedPage[]): string {
   return lines.join("\n");
 }
 
-export default function geminiSearch(pi: ExtensionAPI) {
+export default function geminiSearch(pi: ExtensionAPI, publicFetchDependencies: PublicFetchDependencies = PUBLIC_FETCH_DEPENDENCIES) {
   pi.registerTool({
     name: "gemini_search",
     label: "Grounded Search (agy)",
@@ -1104,7 +1358,7 @@ export default function geminiSearch(pi: ExtensionAPI) {
       const modelForCli = resolveModelForCli(params);
       const model = modelForDetails(modelForCli);
       const key = cacheKey({ query, limit, mode, model, validateUrls, binary: AGY_BINARY });
-      const cachedEntry = params.forceRefresh ? undefined : await readSearchCache(key);
+      const cachedEntry = params.forceRefresh ? undefined : await readSearchCache(key, mode);
       if (cachedEntry) {
         return {
           content: [{ type: "text", text: formatResults(query, cachedEntry.normalized, true, mode) }],
@@ -1167,7 +1421,7 @@ export default function geminiSearch(pi: ExtensionAPI) {
           }),
         });
       }
-      const normalized = await maybeValidateResults(normalizeParsedResult(parsed, rawResponseText, limit), validateUrls, signal);
+      const normalized = await maybeValidateResults(normalizeParsedResult(parsed, rawResponseText, limit), validateUrls, signal, publicFetchDependencies);
       const confidence = searchConfidence(normalized);
       const expiresAt = Date.now() + cacheTtlMs(mode, confidence);
       const cacheEntry: SearchCacheEntry = {
@@ -1179,7 +1433,7 @@ export default function geminiSearch(pi: ExtensionAPI) {
         durationMs: processResult.durationMs,
         confidence,
       };
-      const cacheWritten = shouldCacheSearch(normalized, confidence);
+      const cacheWritten = shouldCacheSearch(normalized, confidence, mode);
       if (cacheWritten) await writeSearchCache(key, cacheEntry);
 
       return {
@@ -1217,8 +1471,9 @@ export default function geminiSearch(pi: ExtensionAPI) {
 
       const pages: FetchedPage[] = [];
       for (const [index, url] of urls.entries()) {
+        throwIfAborted(signal, "web_fetch cancelled.");
         onUpdate?.({ content: [{ type: "text", text: `Fetching URL ${index + 1}/${urls.length}: ${url}` }], details: {} });
-        pages.push(await fetchOne(url, maxCharsPerUrl, signal));
+        pages.push(await fetchOne(url, maxCharsPerUrl, signal, publicFetchDependencies));
       }
 
       return {

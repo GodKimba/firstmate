@@ -34,6 +34,8 @@ const counts = existsSync(process.env.AGY_FAKE_COUNTS)
   : {};
 const key = prompt.includes("RETRY_TEST") ? "retry"
   : prompt.includes("CANCEL_TEST") ? "cancel"
+    : prompt.includes("STRICT_DOCS") ? "strict_docs"
+      : prompt.includes("STRICT_SOURCE") ? "strict_source"
     : prompt.includes("PERMANENT_FAIL") ? "permanent"
       : "other";
 counts[key] = (counts[key] ?? 0) + 1;
@@ -96,6 +98,7 @@ AGY_FAKE_COUNTS="$FIXTURE/counts.json" \
 node --input-type=module <<'JS'
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
 const extension = await import(`${pathToFileURL(process.env.EXT).href}?test=${Date.now()}`);
@@ -140,6 +143,57 @@ assert.equal(extension.cacheKey(baseKey), extension.cacheKey({ ...baseKey }));
 assert.notEqual(extension.cacheKey(baseKey), extension.cacheKey({ ...baseKey, model: "model-b" }));
 assert.notEqual(extension.cacheKey(baseKey), extension.cacheKey({ ...baseKey, binary: "/custom/agy" }));
 assert.notEqual(extension.cacheKey(baseKey), extension.cacheKey({ ...baseKey, validateUrls: true }));
+
+const publicIpv4 = extension.canonicalPublicIp("93.184.216.34");
+assert.deepEqual(publicIpv4, { address: "93.184.216.34", family: 4 });
+assert.deepEqual(extension.canonicalPublicIp("::ffff:93.184.216.34"), publicIpv4);
+assert.deepEqual(extension.canonicalPublicIp("2606:4700:4700:0:0:0:0:1111"), {
+  address: "2606:4700:4700::1111",
+  family: 6,
+});
+for (const address of [
+  "0.1.2.3",
+  "10.0.0.1",
+  "100.64.0.1",
+  "127.0.0.1",
+  "169.254.169.254",
+  "172.16.0.1",
+  "192.0.0.1",
+  "192.0.2.1",
+  "192.88.99.1",
+  "192.168.0.1",
+  "198.18.0.1",
+  "198.51.100.1",
+  "203.0.113.1",
+  "224.0.0.1",
+  "240.0.0.1",
+  "::",
+  "::1",
+  "64:ff9b::808:808",
+  "100::1",
+  "2001::1",
+  "2001:db8::1",
+  "2002:7f00:1::",
+  "3fff::1",
+  "5f00::1",
+  "fc00::1",
+  "febf::1",
+  "ff02::1",
+  "::ffff:172.16.0.1",
+  "::ffff:169.254.169.254",
+]) {
+  assert.throws(() => extension.canonicalPublicIp(address), /private or non-global IP address/);
+}
+const pinnedOptions = extension.buildPinnedRequestOptions(
+  new URL("https://source.example:8443/docs?q=one"),
+  publicIpv4,
+  { method: "GET", headers: { accept: "text/plain" } },
+);
+assert.equal(pinnedOptions.hostname, "93.184.216.34");
+assert.equal(pinnedOptions.family, 4);
+assert.equal(pinnedOptions.servername, "source.example");
+assert.equal(pinnedOptions.headers.host, "source.example:8443");
+assert.equal(pinnedOptions.path, "/docs?q=one");
 
 const tools = new Map();
 extension.default({ registerTool(tool) { tools.set(tool.name, tool); } });
@@ -188,6 +242,19 @@ await search.execute("call-3", {
 }, undefined, undefined);
 assert.equal(JSON.parse(readFileSync(process.env.AGY_FAKE_COUNTS, "utf8")).retry, 3);
 
+for (const [query, mode, countKey] of [
+  ["STRICT_DOCS", "docs", "strict_docs"],
+  ["STRICT_SOURCE", "source-finder", "strict_source"],
+]) {
+  const strictFirst = await search.execute(`strict-${mode}-1`, { query, mode, validateUrls: false }, undefined, undefined);
+  const strictSecond = await search.execute(`strict-${mode}-2`, { query, mode, validateUrls: false }, undefined, undefined);
+  assert.equal(strictFirst.details.confidence, "medium");
+  assert.equal(strictFirst.details.cacheWritten, false);
+  assert.equal(strictSecond.details.cached, false);
+  assert.match(strictSecond.content[0].text, /No validated citeable results found/);
+  assert.equal(JSON.parse(readFileSync(process.env.AGY_FAKE_COUNTS, "utf8"))[countKey], 2);
+}
+
 await assert.rejects(
   search.execute("call-4", { query: "PERMANENT_FAIL", validateUrls: false }, undefined, undefined),
   (error) => {
@@ -205,23 +272,88 @@ setTimeout(() => controller.abort(), 100);
 await assert.rejects(cancellation, /cancelled while agy was running/);
 assert(Date.now() - cancellationStarted < 3000);
 
-const originalFetch = globalThis.fetch;
-let fetchCalls = 0;
-globalThis.fetch = async () => {
-  fetchCalls += 1;
-  return new Response("", { status: 302, headers: { location: "http://127.0.0.1/private" } });
-};
-const redirectBlocked = await webFetch.execute("fetch-1", { urls: ["https://1.1.1.1/start"] }, undefined, undefined);
-assert.equal(fetchCalls, 1);
-assert.match(redirectBlocked.details.pages[0].error, /local\/private host|private IP address/);
+function toolsWithNetwork(network) {
+  const registered = new Map();
+  extension.default({ registerTool(tool) { registered.set(tool.name, tool); } }, network);
+  return registered;
+}
 
-globalThis.fetch = async () => new Response("body", {
-  status: 200,
-  headers: { "content-length": "2000000", "content-type": "text/plain" },
-});
-const sizeBlocked = await webFetch.execute("fetch-2", { urls: ["https://1.1.1.1/large"] }, undefined, undefined);
+let rebindLookups = 0;
+let boundRequests = 0;
+const reboundNetwork = {
+  async lookupHost(hostname) {
+    assert.equal(hostname, "rebind.example");
+    rebindLookups += 1;
+    return [{ address: rebindLookups === 1 ? "93.184.216.34" : "127.0.0.1", family: 4 }];
+  },
+  async requestAddress(url, address) {
+    boundRequests += 1;
+    assert.equal(url.hostname, "rebind.example");
+    assert.equal(address.address, "93.184.216.34");
+    return new Response("bound body", { status: 200, headers: { "content-type": "text/plain" } });
+  },
+};
+const reboundFetch = toolsWithNetwork(reboundNetwork).get("web_fetch");
+const reboundResult = await reboundFetch.execute("fetch-bound", { urls: ["https://rebind.example/start"] }, undefined, undefined);
+assert.equal(reboundResult.details.pages[0].text, "bound body");
+assert.equal(rebindLookups, 1);
+assert.equal(boundRequests, 1);
+
+const redirectRequests = [];
+const redirectNetwork = {
+  async lookupHost(hostname) {
+    return hostname === "public.example"
+      ? [{ address: "93.184.216.34", family: 4 }]
+      : [{ address: "::ffff:169.254.169.254", family: 6 }];
+  },
+  async requestAddress(url, address) {
+    redirectRequests.push([url.toString(), address.address]);
+    return new Response("", { status: 302, headers: { location: "http://metadata.example/latest" } });
+  },
+};
+const redirectFetch = toolsWithNetwork(redirectNetwork).get("web_fetch");
+const redirectBlocked = await redirectFetch.execute("fetch-redirect", { urls: ["https://public.example/start"] }, undefined, undefined);
+assert.equal(redirectRequests.length, 1);
+assert.match(redirectBlocked.details.pages[0].error, /private or non-global IP address/);
+
+const sizeNetwork = {
+  async lookupHost() { return [{ address: "93.184.216.34", family: 4 }]; },
+  async requestAddress() {
+    return new Response("body", {
+      status: 200,
+      headers: { "content-length": "2000000", "content-type": "text/plain" },
+    });
+  },
+};
+const sizeFetch = toolsWithNetwork(sizeNetwork).get("web_fetch");
+const sizeBlocked = await sizeFetch.execute("fetch-size", { urls: ["https://large.example/file"] }, undefined, undefined);
 assert.match(sizeBlocked.details.pages[0].error, /exceeds 1500000 byte safety limit/);
-globalThis.fetch = originalFetch;
+
+const requestStarted = Promise.withResolvers();
+const cancellationRequests = [];
+const cancellationNetwork = {
+  async lookupHost(hostname) {
+    return [{ address: hostname === "first.example" ? "93.184.216.34" : "1.1.1.1", family: 4 }];
+  },
+  requestAddress(url, _address, _init, signal) {
+    cancellationRequests.push(url.hostname);
+    requestStarted.resolve();
+    return new Promise((_resolve, reject) => {
+      const rejectCancelled = () => reject(new Error("transport cancelled"));
+      signal.addEventListener("abort", rejectCancelled, { once: true });
+      if (signal.aborted) rejectCancelled();
+    });
+  },
+};
+const cancellationFetch = toolsWithNetwork(cancellationNetwork).get("web_fetch");
+const fetchController = new AbortController();
+const cancelledFetch = cancellationFetch.execute("fetch-cancel", {
+  urls: ["https://first.example/slow", "https://second.example/never"],
+}, fetchController.signal, undefined);
+await requestStarted.promise;
+fetchController.abort();
+await assert.rejects(cancelledFetch, /web_fetch cancelled/);
+assert.deepEqual(cancellationRequests, ["first.example"]);
 
 const packageRoot = process.env.PI_PACKAGE_DIR;
 const [{ SettingsManager }, { DefaultPackageManager }] = await Promise.all([
@@ -232,8 +364,8 @@ const settingsManager = SettingsManager.create(process.env.PROJECT, process.env.
 const manager = new DefaultPackageManager({ cwd: process.env.PROJECT, agentDir: process.env.AGENT_DIR, settingsManager });
 const resolved = await manager.resolve();
 const enabled = resolved.extensions.filter((entry) => entry.enabled).map((entry) => entry.path);
-const tracked = `${process.env.PROJECT}/.pi/extensions/gemini-search.ts`;
-const legacy = process.env.PROJECT.replace(/\/project$/, "/legacy.ts");
+const tracked = resolve(process.env.PROJECT, ".pi/extensions/gemini-search.ts");
+const legacy = resolve(process.env.PROJECT, "../legacy.ts");
 assert.equal(enabled[0], tracked);
 assert.equal(enabled.filter((path) => path === tracked).length, 1);
 assert(enabled.indexOf(legacy) > enabled.indexOf(tracked));
@@ -246,7 +378,7 @@ assert.equal(retryArgs[retryArgs.indexOf("--mode") + 1], "plan");
 assert.equal(retryArgs[retryArgs.indexOf("--output-format") + 1], "json");
 assert.match(retryArgs.at(-1), /Use the search_web tool/);
 
-console.log("ok - agy command construction, structured parsing, retries, cancellation, cache separation, and failure output are deterministic");
+console.log("ok - agy command construction, structured parsing, retries, cancellation, strict cache admission, cache separation, and failure output are deterministic");
 console.log("ok - tracked project settings load the authoritative extension before the configured legacy source without duplicate auto-discovery");
-console.log("ok - web_fetch retains private-redirect and response-size protections");
+console.log("ok - web_fetch binds public DNS answers, blocks non-global ranges and redirect rebinding, propagates cancellation, and retains response-size protections");
 JS
