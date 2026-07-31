@@ -690,12 +690,18 @@ async function validateUrl(
   signal?.addEventListener("abort", abortHandler, { once: true });
   if (signal?.aborted) abortHandler();
   try {
-    const headResponse = await fetchPublic(url, {
-      method: "HEAD",
-      headers: { "user-agent": WEB_FETCH_USER_AGENT, accept: "text/html,text/markdown,text/plain,*/*" },
-    }, controller.signal, dependencies);
-    const headValidation = validationFromResponse(headResponse, "HEAD");
-    await headResponse.body?.cancel();
+    let headValidation: UrlValidation;
+    try {
+      const headResponse = await fetchPublic(url, {
+        method: "HEAD",
+        headers: { "user-agent": WEB_FETCH_USER_AGENT, accept: "text/html,text/markdown,text/plain,*/*" },
+      }, controller.signal, dependencies);
+      headValidation = validationFromResponse(headResponse, "HEAD");
+      await headResponse.body?.cancel();
+    } catch (error) {
+      if (!(error instanceof PublicFetchTransportError)) throw error;
+      headValidation = { ok: false, quality: "invalid", error: error.message };
+    }
     if (!shouldRetryValidationWithGet(headValidation)) return headValidation;
 
     const getResponse = await fetchPublic(url, {
@@ -958,6 +964,19 @@ type PublicFetchDependencies = {
   requestAddress: (url: URL, address: CanonicalIpAddress, init: RequestInit, signal?: AbortSignal) => Promise<Response>;
   addressAttemptTimeoutMs?: number;
 };
+
+class PublicFetchTransportError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "PublicFetchTransportError";
+  }
+}
+
+function asPublicFetchTransportError(error: unknown): PublicFetchTransportError {
+  return error instanceof PublicFetchTransportError
+    ? error
+    : new PublicFetchTransportError(error instanceof Error ? error.message : String(error));
+}
 
 const NON_GLOBAL_IPV4_CIDRS: Array<[number[], number]> = [
   [[0, 0, 0, 0], 8],
@@ -1223,13 +1242,19 @@ async function resolvePublicAddresses(
   if (literalAddress) return { url, addresses: [literalAddress] };
 
   throwIfAborted(signal, `Public fetch cancelled while resolving ${host}`);
-  const records = await withAbort(
-    dependencies.lookupHost(host),
-    signal,
-    `Public fetch cancelled while resolving ${host}`,
-  );
+  let records: Array<{ address: string; family: number }>;
+  try {
+    records = await withAbort(
+      dependencies.lookupHost(host),
+      signal,
+      `Public fetch cancelled while resolving ${host}`,
+    );
+  } catch (error) {
+    throwIfAborted(signal, `Public fetch cancelled while resolving ${host}`);
+    throw asPublicFetchTransportError(error);
+  }
   throwIfAborted(signal, `Public fetch cancelled while resolving ${host}`);
-  if (records.length === 0) throw new Error(`Host did not resolve to an IP address: ${host}`);
+  if (records.length === 0) throw new PublicFetchTransportError(`Host did not resolve to an IP address: ${host}`);
   const addresses: CanonicalIpAddress[] = [];
   const seenAddresses = new Set<string>();
   for (const record of records) {
@@ -1280,8 +1305,7 @@ async function requestPublicAddresses(
     }
   }
 
-  if (lastError instanceof Error) throw lastError;
-  throw new Error(String(lastError ?? `No validated public address was reachable for ${target.url.toString()}`));
+  throw asPublicFetchTransportError(lastError ?? `No validated public address was reachable for ${target.url.toString()}`);
 }
 
 function redirectTarget(currentUrl: string, location: string | null): string | undefined {

@@ -577,6 +577,56 @@ function toolsWithNetwork(network) {
   return registered;
 }
 
+const headFallbackMethods = [];
+const headFallbackSearch = toolsWithNetwork({
+  async lookupHost(hostname) {
+    assert.equal(hostname, "example.com");
+    return [{ address: "93.184.216.34", family: 4 }];
+  },
+  async requestAddress(url, _address, init) {
+    headFallbackMethods.push(init.method);
+    if (init.method === "HEAD") throw new Error("HEAD connection reset");
+    const response = new Response("documentation", {
+      status: 200,
+      headers: { "content-type": "text/html" },
+    });
+    Object.defineProperty(response, "url", { configurable: true, value: url.toString() });
+    return response;
+  },
+}).get("gemini_search");
+const headFallbackResult = await headFallbackSearch.execute("head-fallback", {
+  query: "HEAD_FALLBACK",
+  mode: "docs",
+  validateUrls: true,
+  forceRefresh: true,
+}, undefined, undefined);
+assert.deepEqual(headFallbackMethods, ["HEAD", "GET"]);
+assert.equal(headFallbackResult.details.results[0].validation.method, "GET");
+assert.equal(headFallbackResult.details.results[0].confidence, "high");
+assert.match(headFallbackResult.content[0].text, /Validated citeable results/);
+
+let policyBlockedRequests = 0;
+const policyBlockedSearch = toolsWithNetwork({
+  async lookupHost(hostname) {
+    assert.equal(hostname, "example.com");
+    return [{ address: "169.254.169.254", family: 4 }];
+  },
+  async requestAddress() {
+    policyBlockedRequests += 1;
+    throw new Error("address policy refusal must not reach transport");
+  },
+}).get("gemini_search");
+const policyBlockedResult = await policyBlockedSearch.execute("head-policy-block", {
+  query: "HEAD_POLICY_BLOCK",
+  mode: "docs",
+  validateUrls: true,
+  forceRefresh: true,
+}, undefined, undefined);
+assert.equal(policyBlockedRequests, 0);
+assert.equal(policyBlockedResult.details.results[0].validation.quality, "private_blocked");
+assert.equal(policyBlockedResult.details.results[0].validation.method, undefined);
+assert.match(policyBlockedResult.content[0].text, /No validated citeable results/);
+
 let rebindLookups = 0;
 let boundRequests = 0;
 const reboundNetwork = {
@@ -725,7 +775,7 @@ assert.equal(retryArgs[retryArgs.indexOf("--mode") + 1], "plan");
 assert.equal(retryArgs[retryArgs.indexOf("--output-format") + 1], "json");
 assert.match(retryArgs.at(-1), /Use the search_web tool/);
 
-console.log("ok - agy command construction, structured parsing, retries, cancellation boundaries, best-effort cleanup, strict cache admission, cache separation, and failure output are deterministic");
+console.log("ok - agy command construction, structured parsing, retries, cancellation boundaries, best-effort cleanup, HEAD-to-GET validation fallback, strict cache admission, cache separation, and failure output are deterministic");
 console.log("ok - tracked project settings load the authoritative extension before the configured legacy source without duplicate auto-discovery");
 console.log("ok - TUI rendering strips untrusted terminal controls while preserving trusted theme styling");
 console.log("ok - web_fetch binds and falls back across public DNS answers, blocks non-global ranges and redirect rebinding, propagates cancellation, and retains response-size protections");

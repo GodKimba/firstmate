@@ -95,7 +95,7 @@ No agy-specific serialization queue is required by the tracked extension, so ind
 
 ```sh
 $ tests/fm-gemini-search-agy.test.sh
-ok - agy command construction, structured parsing, retries, cancellation boundaries, best-effort cleanup, strict cache admission, cache separation, and failure output are deterministic
+ok - agy command construction, structured parsing, retries, cancellation boundaries, best-effort cleanup, HEAD-to-GET validation fallback, strict cache admission, cache separation, and failure output are deterministic
 ok - tracked project settings load the authoritative extension before the configured legacy source without duplicate auto-discovery
 ok - TUI rendering strips untrusted terminal controls while preserving trusted theme styling
 ok - web_fetch binds and falls back across public DNS answers, blocks non-global ranges and redirect rebinding, propagates cancellation, and retains response-size protections
