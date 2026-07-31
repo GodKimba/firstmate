@@ -12,7 +12,8 @@ Use this reference before any harness-specific firstmate operation: spawn, recov
 
 Crewmates default to the same harness firstmate is running on unless `config/crew-harness` records an adapter name.
 Optional dispatch profiles in `config/crew-dispatch.json` can override that static default for one crewmate or scout dispatch by selecting concrete harness, model, and effort axes at intake.
-When a matched rule or default is a profile array, load `quota-array-dispatch` for the pace-aware candidate choice after this skill establishes harness and model/provider facts.
+A single concrete profile is the final configured route after validation; never replace it from quota observations alone.
+When a matched rule or default is a profile array, load `quota-array-dispatch` for the pace-aware candidate choice after this skill establishes harness and model/provider facts, and compare only the offered candidates without crossing configured Anthropic/GPT harness-family intent.
 The captain may override that file at session start or later; a per-task instruction such as "run this one on codex" overrides it for that dispatch only.
 `default` means mirror firstmate's own harness.
 
@@ -129,7 +130,9 @@ The supported launch-profile flags below are verified locally; each row records 
 | kimi | `--model <model>` | none | Verified 2026-07-25 on Kimi Code CLI 0.29.1. |
 
 The concrete `harness` field owns adapter identity independently of the model provider: `harness=pi` with `model=xai/grok-*` is Pi using xAI, not `harness=grok`, and does not require Grok CLI login; `harness=grok` remains the standalone Grok Build CLI adapter.
-No script resolves that split for you: establish which credential store a tuple reads from the discovery surfaces below plus `quota-axi auth --json`'s per-provider sources, and show that reasoning rather than inferring it from a harness, model, or source name.
+A profile explicitly routed through the local CLIProxyAPI account pool likewise uses that pool rather than the ambient direct CLI login, so stale direct-login state cannot overrule fresh pool health.
+The proxy owns the account behind that route; Firstmate never binds one.
+No script resolves these splits for you: establish which credential store a tuple reads from the discovery surfaces below plus `quota-axi auth --json` and the pool preflight when applicable, and show that reasoning rather than inferring it from a harness, model, or source name.
 
 ### Model support discovery
 

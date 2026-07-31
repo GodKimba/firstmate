@@ -21,7 +21,8 @@ Deterministic shell owns only schema, configuration, and version validation plus
 ## Collect facts
 
 Run `quota-axi --json` once per intake and reuse that snapshot for every candidate.
-Do not take a second snapshot to settle a candidate, and read `quota-axi auth --json` when a candidate's credential surface is in question.
+Do not take a second general snapshot to settle a candidate, and read `quota-axi auth --json` when a candidate's credential surface is in question.
+A local CLIProxyAPI pool profile is the one exception with its own established reader: use `bin/fm-pool-preflight.sh --pool --json` once for that routed surface, never as a second reading of a direct login and never as an account reservation.
 For each candidate, preserve explicit `harness`, `model`, and `provider`; `harness-adapters` owns identity, and model/provider never infer harness:
 
 - task/profile fit and required reasoning class
@@ -51,6 +52,9 @@ Name the evidence for each relation you assert so the conclusion is inspectable.
 ## Authentication is scoped to the selected surface
 
 A candidate authenticates through its own tuple's surface; another harness's CLI can never gate it, and `harness=pi` with `model=xai/grok-*` is Pi using xAI rather than the standalone Grok CLI.
+A candidate explicitly routed through the local CLIProxyAPI account pool uses the pool credential and health surface, not the ambient direct CLI session.
+Fresh pool health therefore outranks a stale, expired, or missing direct-login record the candidate never reads.
+Never run a direct Codex or other vendor probe to gate that pooled candidate.
 `quota-axi auth --json` lists each provider's credential sources independently, so read the one source the candidate actually uses rather than collapsing a provider to a single status.
 A provider can carry a healthy source beside a missing or expired one; the unused source's state is not the candidate's state.
 A Pi-hosted family may authenticate through the vendor's own store with no `pi:`-prefixed source at all, which is normal and never evidence against the candidate.
@@ -67,6 +71,15 @@ When a credential's local classification is the only thing standing between a ca
 `bin/fm-vendor-auth-probe.sh` is the only approved vendor-credential probe; its `--help` owns the registered probes and mechanics.
 It takes no harness, model, or provider and returns a fact, not a route: only `authenticated` and `unauthenticated` are ground truth, while `indeterminate`, `timeout`, and `unavailable` establish nothing and must never be read as either outcome.
 Never launch a vendor CLI yourself, and never probe a credential store the candidate does not use.
+
+## Local CLIProxyAPI pool boundary
+
+The pool's proxy owns per-account selection, session affinity, failover, and cooldown.
+Firstmate can admit or defer the pooled profile from measured aggregate health but cannot name or reserve the account that will serve the request.
+Treat every pool result as `binds_account=false`, preserve its disclosed approximation and coverage limits, and never rank masked accounts into a route that the proxy cannot honor.
+A single concrete pooled profile stays the selected profile; low pool headroom is a report or wait condition, not authority to invent a direct-login fallback or switch harness families.
+For an array, compare the pooled profile as one candidate against the other configured profiles while preserving the matched array's Anthropic/GPT family intent.
+`docs/verification/pool-account-routing.md` owns the evidence for this boundary.
 
 ## Pace semantics
 

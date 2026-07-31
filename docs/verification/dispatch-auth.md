@@ -99,6 +99,14 @@ Observed source statuses are `available`, `expired` (with an `error` slug), and 
 Neither this per-source shape nor `state.authStatus` exists before quota-axi 0.1.16.
 `bin/fm-bootstrap.sh` enforces that floor through `bin/fm-quota-axi-lib.sh`.
 
+## Local CLIProxyAPI pool is a distinct surface
+
+A profile explicitly routed through the local CLIProxyAPI pool does not read the ambient direct CLI credential represented by the direct `auth-json` or `cli-rpc` source.
+Its current admission evidence comes from `bin/fm-pool-preflight.sh --pool --json`, while the proxy remains the sole account selector.
+A stale direct-login record is therefore unrelated evidence and cannot overrule fresh pool health.
+The pool snapshot is still approximate and binds no account, so it cannot justify naming a masked account, enabling the Management API, or silently falling back to a direct route.
+[`pool-account-routing.md`](pool-account-routing.md) owns the empirical routing and no-pin evidence.
+
 Grok also reports `credits.remaining: 0` alongside `percentRemaining: 41` on a healthy account.
 That zero is a prepaid balance, not the subscription window, and is never headroom.
 
