@@ -232,6 +232,81 @@ const second = await search.execute("call-2", {
 }, undefined, undefined);
 assert.equal(second.details.cached, true);
 assert.equal(JSON.parse(readFileSync(process.env.AGY_FAKE_COUNTS, "utf8")).retry, 2);
+
+function toolsWithSearchDependencies(dependencies) {
+  const registered = new Map();
+  extension.default({ registerTool(tool) { registered.set(tool.name, tool); } }, undefined, dependencies);
+  return registered;
+}
+
+const cachedFixtureKey = extension.cacheKey({
+  query: "RETRY_TEST official docs",
+  limit: 3,
+  mode: "search",
+  model: "model-a",
+  validateUrls: false,
+  binary: process.env.PI_AGY_SEARCH_BIN,
+});
+const cachedFixture = JSON.parse(readFileSync(`${process.env.PI_AGY_SEARCH_CACHE_DIR}/${cachedFixtureKey}.json`, "utf8"));
+const cacheReadStarted = Promise.withResolvers();
+const releaseCacheRead = Promise.withResolvers();
+let cacheRaceSpawns = 0;
+const cacheRaceSearch = toolsWithSearchDependencies({
+  async readCache() {
+    cacheReadStarted.resolve();
+    await releaseCacheRead.promise;
+    return cachedFixture;
+  },
+  spawnProcess() {
+    cacheRaceSpawns += 1;
+    throw new Error("cache-race search must not spawn");
+  },
+}).get("gemini_search");
+const cacheRaceController = new AbortController();
+const cacheRaceResult = cacheRaceSearch.execute(
+  "cache-race",
+  { query: "RETRY_TEST official docs", limit: 3, mode: "search", validateUrls: false, model: "model-a" },
+  cacheRaceController.signal,
+  undefined,
+);
+await cacheReadStarted.promise;
+cacheRaceController.abort();
+releaseCacheRead.resolve();
+await assert.rejects(cacheRaceResult, /cancelled during cache access/);
+assert.equal(cacheRaceSpawns, 0);
+
+const temporaryDirectoryStarted = Promise.withResolvers();
+const releaseTemporaryDirectory = Promise.withResolvers();
+const removedTemporaryDirectories = [];
+let temporaryDirectoryRaceSpawns = 0;
+const temporaryDirectoryRaceSearch = toolsWithSearchDependencies({
+  async createTemporaryDirectory() {
+    temporaryDirectoryStarted.resolve();
+    await releaseTemporaryDirectory.promise;
+    return "/virtual/pi-agy-search-cancelled";
+  },
+  async removeTemporaryDirectory(path) {
+    removedTemporaryDirectories.push(path);
+  },
+  spawnProcess() {
+    temporaryDirectoryRaceSpawns += 1;
+    throw new Error("temporary-directory race search must not spawn");
+  },
+}).get("gemini_search");
+const temporaryDirectoryRaceController = new AbortController();
+const temporaryDirectoryRaceResult = temporaryDirectoryRaceSearch.execute(
+  "temporary-directory-race",
+  { query: "CANCEL_TEST temporary-directory setup", validateUrls: false, forceRefresh: true },
+  temporaryDirectoryRaceController.signal,
+  undefined,
+);
+await temporaryDirectoryStarted.promise;
+temporaryDirectoryRaceController.abort();
+releaseTemporaryDirectory.resolve();
+await assert.rejects(temporaryDirectoryRaceResult, /cancelled during agy temporary-directory setup/);
+assert.deepEqual(removedTemporaryDirectories, ["/virtual/pi-agy-search-cancelled"]);
+assert.equal(temporaryDirectoryRaceSpawns, 0);
+
 await search.execute("call-3", {
   query: "RETRY_TEST official docs",
   limit: 3,
@@ -378,7 +453,7 @@ assert.equal(retryArgs[retryArgs.indexOf("--mode") + 1], "plan");
 assert.equal(retryArgs[retryArgs.indexOf("--output-format") + 1], "json");
 assert.match(retryArgs.at(-1), /Use the search_web tool/);
 
-console.log("ok - agy command construction, structured parsing, retries, cancellation, strict cache admission, cache separation, and failure output are deterministic");
+console.log("ok - agy command construction, structured parsing, retries, cancellation boundaries, strict cache admission, cache separation, and failure output are deterministic");
 console.log("ok - tracked project settings load the authoritative extension before the configured legacy source without duplicate auto-discovery");
 console.log("ok - web_fetch binds public DNS answers, blocks non-global ranges and redirect rebinding, propagates cancellation, and retains response-size protections");
 JS

@@ -417,6 +417,22 @@ async function writeSearchCache(key: string, entry: SearchCacheEntry): Promise<v
   }
 }
 
+type AgySearchDependencies = {
+  readCache: typeof readSearchCache;
+  writeCache: typeof writeSearchCache;
+  createTemporaryDirectory: typeof mkdtemp;
+  removeTemporaryDirectory: (path: string) => Promise<void>;
+  spawnProcess: typeof spawn;
+};
+
+const AGY_SEARCH_DEPENDENCIES: AgySearchDependencies = {
+  readCache: readSearchCache,
+  writeCache: writeSearchCache,
+  createTemporaryDirectory: mkdtemp,
+  removeTemporaryDirectory: (path) => rm(path, { recursive: true, force: true }),
+  spawnProcess: spawn,
+};
+
 function buildPrompt(params: GeminiSearchInput, limit: number): string {
   const mode = params.mode ?? "search";
   const modeInstruction: Record<SearchMode, string> = {
@@ -511,8 +527,19 @@ export function buildAgyArgs(prompt: string, model: string | undefined, timeoutM
   return args;
 }
 
-async function runAgy(prompt: string, model: string | undefined, signal?: AbortSignal): Promise<ProcessResult> {
-  const cwd = await mkdtemp(join(tmpdir(), "pi-agy-search-"));
+async function runAgy(
+  prompt: string,
+  model: string | undefined,
+  signal?: AbortSignal,
+  dependencies: AgySearchDependencies = AGY_SEARCH_DEPENDENCIES,
+): Promise<ProcessResult> {
+  throwIfAborted(signal, "gemini_search cancelled before agy temporary-directory setup.");
+  const cwd = await dependencies.createTemporaryDirectory(join(tmpdir(), "pi-agy-search-"));
+  if (signal?.aborted) {
+    await dependencies.removeTemporaryDirectory(cwd);
+    throw new Error("gemini_search cancelled during agy temporary-directory setup.");
+  }
+  throwIfAborted(signal, "gemini_search cancelled before agy spawn.");
   const startedAt = Date.now();
 
   return new Promise((resolve, reject) => {
@@ -524,10 +551,10 @@ async function runAgy(prompt: string, model: string | undefined, signal?: AbortS
     let forceKillTimer: ReturnType<typeof setTimeout> | undefined;
 
     const cleanup = async () => {
-      await rm(cwd, { recursive: true, force: true });
+      await dependencies.removeTemporaryDirectory(cwd);
     };
 
-    const child = spawn(AGY_BINARY, args, {
+    const child = dependencies.spawnProcess(AGY_BINARY, args, {
       cwd,
       env: { ...process.env, NO_COLOR: "1" },
       stdio: ["ignore", "pipe", "pipe"],
@@ -574,7 +601,12 @@ async function runAgy(prompt: string, model: string | undefined, signal?: AbortS
   });
 }
 
-async function runAgyWithRetry(prompt: string, model: string | undefined, signal?: AbortSignal): Promise<ProcessResult> {
+async function runAgyWithRetry(
+  prompt: string,
+  model: string | undefined,
+  signal?: AbortSignal,
+  dependencies: AgySearchDependencies = AGY_SEARCH_DEPENDENCIES,
+): Promise<ProcessResult> {
   let lastResult: ProcessResult | undefined;
   let lastError: unknown;
 
@@ -582,14 +614,17 @@ async function runAgyWithRetry(prompt: string, model: string | undefined, signal
     if (isAbortLike(signal)) throw new Error("gemini_search cancelled before agy completed.");
 
     try {
-      const result = await runAgy(prompt, model, signal);
+      const result = await runAgy(prompt, model, signal, dependencies);
       lastResult = { ...result, attempts: attempt };
       if (isAbortLike(signal)) throw new Error("gemini_search cancelled while agy was running.");
       if (result.code === 0 && !result.timedOut) return lastResult;
       if (!isTransientAgyFailure(result) || attempt === MAX_AGY_ATTEMPTS) return lastResult;
     } catch (error) {
       lastError = error;
-      if (isAbortLike(signal)) throw new Error("gemini_search cancelled while agy was running.");
+      if (isAbortLike(signal)) {
+        if (error instanceof Error && error.message.startsWith("gemini_search cancelled")) throw error;
+        throw new Error("gemini_search cancelled while agy was running.");
+      }
       if (!isTransientError(error) || attempt === MAX_AGY_ATTEMPTS) throw error;
     }
 
@@ -1335,7 +1370,12 @@ function formatFetchedPages(pages: FetchedPage[]): string {
   return lines.join("\n");
 }
 
-export default function geminiSearch(pi: ExtensionAPI, publicFetchDependencies: PublicFetchDependencies = PUBLIC_FETCH_DEPENDENCIES) {
+export default function geminiSearch(
+  pi: ExtensionAPI,
+  publicFetchDependencies: PublicFetchDependencies = PUBLIC_FETCH_DEPENDENCIES,
+  agySearchDependencyOverrides: Partial<AgySearchDependencies> = {},
+) {
+  const agySearchDependencies = { ...AGY_SEARCH_DEPENDENCIES, ...agySearchDependencyOverrides };
   pi.registerTool({
     name: "gemini_search",
     label: "Grounded Search (agy)",
@@ -1351,6 +1391,7 @@ export default function geminiSearch(pi: ExtensionAPI, publicFetchDependencies: 
     async execute(_toolCallId, params, signal, onUpdate) {
       const query = params.query.trim();
       if (!query) throw new Error("gemini_search requires a non-empty query.");
+      throwIfAborted(signal, "gemini_search cancelled before execution.");
 
       const limit = clampLimit(params.limit);
       const mode: SearchMode = params.mode ?? "search";
@@ -1358,7 +1399,17 @@ export default function geminiSearch(pi: ExtensionAPI, publicFetchDependencies: 
       const modelForCli = resolveModelForCli(params);
       const model = modelForDetails(modelForCli);
       const key = cacheKey({ query, limit, mode, model, validateUrls, binary: AGY_BINARY });
-      const cachedEntry = params.forceRefresh ? undefined : await readSearchCache(key, mode);
+      let cachedEntry: SearchCacheEntry | undefined;
+      if (!params.forceRefresh) {
+        throwIfAborted(signal, "gemini_search cancelled before cache access.");
+        try {
+          cachedEntry = await agySearchDependencies.readCache(key, mode);
+        } catch (error) {
+          throwIfAborted(signal, "gemini_search cancelled during cache access.");
+          throw error;
+        }
+        throwIfAborted(signal, "gemini_search cancelled during cache access.");
+      }
       if (cachedEntry) {
         return {
           content: [{ type: "text", text: formatResults(query, cachedEntry.normalized, true, mode) }],
@@ -1379,7 +1430,7 @@ export default function geminiSearch(pi: ExtensionAPI, publicFetchDependencies: 
         }),
       });
       const prompt = buildPrompt({ ...params, query, mode, model: modelForCli }, limit);
-      const processResult = await runAgyWithRetry(prompt, modelForCli, signal);
+      const processResult = await runAgyWithRetry(prompt, modelForCli, signal, agySearchDependencies);
 
       if (processResult.timedOut) {
         throw new Error(`gemini_search agy process timed out after ${TIMEOUT_MS}ms and ${processResult.attempts ?? 1} attempt(s).`);
@@ -1422,6 +1473,7 @@ export default function geminiSearch(pi: ExtensionAPI, publicFetchDependencies: 
         });
       }
       const normalized = await maybeValidateResults(normalizeParsedResult(parsed, rawResponseText, limit), validateUrls, signal, publicFetchDependencies);
+      throwIfAborted(signal, "gemini_search cancelled during result validation.");
       const confidence = searchConfidence(normalized);
       const expiresAt = Date.now() + cacheTtlMs(mode, confidence);
       const cacheEntry: SearchCacheEntry = {
@@ -1434,7 +1486,16 @@ export default function geminiSearch(pi: ExtensionAPI, publicFetchDependencies: 
         confidence,
       };
       const cacheWritten = shouldCacheSearch(normalized, confidence, mode);
-      if (cacheWritten) await writeSearchCache(key, cacheEntry);
+      if (cacheWritten) {
+        throwIfAborted(signal, "gemini_search cancelled before cache write.");
+        try {
+          await agySearchDependencies.writeCache(key, cacheEntry);
+        } catch (error) {
+          throwIfAborted(signal, "gemini_search cancelled during cache write.");
+          throw error;
+        }
+        throwIfAborted(signal, "gemini_search cancelled during cache write.");
+      }
 
       return {
         content: [{ type: "text", text: formatResults(query, normalized, false, mode) }],
