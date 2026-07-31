@@ -471,6 +471,18 @@ else
       exit 1
     fi
     DECISION_STATUS="$STATE/$(fm_send_id_from_meta "$TARGET_META").status"
+    if fm_decision_stream_id "$DECISION_STATUS" >/dev/null; then
+      :
+    else
+      DECISION_STREAM_RC=$?
+      case "$DECISION_STREAM_RC" in
+        1) ;;
+        2)
+          echo "error: decision status stream $DECISION_STATUS is malformed or ambiguous; refusing to mint or record an answer token" >&2
+          exit 1
+          ;;
+      esac
+    fi
     DECISION_INSTANCE=''
     DECISION_FOUND=0
     while IFS=$'\t' read -r d_key _d_verb d_instance _d_summary || [ -n "$d_key" ]; do
