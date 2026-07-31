@@ -10,7 +10,7 @@
 // callbacks from a prior generation are no-ops against the active replacement.
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ExtensionAPI, Theme } from "@earendil-works/pi-coding-agent";
@@ -26,13 +26,22 @@ import { encodeFirstmateOperationalInput } from "./lib/fm-operational-input.ts";
 type ArmResult = {
   ok: boolean;
   message: string;
+  // Away mode owns supervision, so this arm intentionally started nothing.
+  stoodDown?: boolean;
 };
 
 type LockOwnership = "owned" | "missing" | "other";
 
+type ArmReadiness = "ready" | "stood-down" | "unready";
+
 type CloseClassification = {
-  kind: "actionable" | "failure";
+  kind: "actionable" | "failure" | "stood-down";
   message: string;
+};
+
+type RestoreResult = {
+  standDown: boolean;
+  failure: string;
 };
 
 type WatchToolShellState = {
@@ -96,13 +105,15 @@ const armReadyTimeoutMs = positiveInteger(
   process.platform === "win32" ? 35000 : 12000,
 );
 const armRetireTimeoutMs = positiveInteger("FM_WATCH_ARM_RETIRE_TIMEOUT_MS", 1000);
+const armExitDrainMs = positiveInteger("FM_PI_ARM_EXIT_DRAIN_MS", 50);
 const repairOnlyHint = "call fm_watch_arm_pi again only after a later notification says the cycle is missing, failed, or unhealthy";
 const shuttingDownMessage = "watcher: not armed - Pi session is shutting down";
 
 let nextGenerationId = 0;
 let activeGeneration: SessionGeneration | null = null;
-const armReadiness = new WeakMap<ChildProcess, Promise<boolean>>();
-const armClose = new WeakMap<ChildProcess, Promise<void>>();
+const armReadiness = new WeakMap<ChildProcess, Promise<ArmReadiness>>();
+const armExit = new WeakMap<ChildProcess, Promise<void>>();
+const restorationRetiredArms = new WeakSet<ChildProcess>();
 
 function positiveInteger(name: string, fallback: number): number {
   const value = Number(process.env[name]);
@@ -123,6 +134,12 @@ function pidAlive(pid: string): boolean {
   } catch {
     return false;
   }
+}
+
+function armChildAlive(armChild: ChildProcess): boolean {
+  if (armChild.exitCode !== null || armChild.signalCode !== null) return false;
+  if (!armChild.pid) return false;
+  return pidAlive(String(armChild.pid));
 }
 
 function lockOwnership(): LockOwnership {
@@ -148,6 +165,11 @@ function markLoaded(): void {
   writeFileSync(marker, `${extensionVersion}\n${process.pid}\n`);
 }
 
+// While away mode is active, the away supervisor owns the one watcher cycle.
+function awayModeActive(): boolean {
+  return existsSync(`${state}/.afk`);
+}
+
 function actionableLine(output: string): string {
   const lines = output.split(/\r?\n/);
   return lines.find((line) => /^(signal:|stale:|check:|heartbeat($|:))/.test(line)) || "";
@@ -157,6 +179,8 @@ function classifyClose(stdout: string, stderr: string, code: number | null, sign
   const combined = `${stdout}\n${stderr}`.trim();
   const reason = actionableLine(combined);
   if (reason) return { kind: "actionable", message: reason };
+  const stoodDown = combined.split(/\r?\n/).find((line) => /^watcher: stood-down\b/.test(line));
+  if (stoodDown) return { kind: "stood-down", message: stoodDown };
   const healthy = combined.split(/\r?\n/).find((line) => /^watcher: healthy\b/.test(line));
   if (healthy) {
     return {
@@ -204,10 +228,15 @@ function generationIsLive(generation: SessionGeneration): boolean {
   return activeGeneration === generation && !generation.stopping;
 }
 
-function stopGeneration(generation: SessionGeneration): void {
-  generation.stopping = true;
+function resetRetryState(generation: SessionGeneration): void {
   if (generation.retryTimer) clearTimeout(generation.retryTimer);
   generation.retryTimer = null;
+  generation.retryFailures = 0;
+}
+
+function stopGeneration(generation: SessionGeneration): void {
+  generation.stopping = true;
+  resetRetryState(generation);
   if (generation.child) generation.child.kill("SIGTERM");
   generation.child = null;
 }
@@ -243,6 +272,10 @@ export default function (pi: ExtensionAPI) {
       "watcher",
       `FIRSTMATE WATCHER WAKE: ${message}\n\nRun bin/fm-wake-drain.sh first and handle the queued wake. Watcher continuity is extension-owned.`,
     );
+    if (awayModeActive()) {
+      resetRetryState(owner);
+      return;
+    }
     await pi.sendUserMessage(content, { deliverAs: "followUp" });
   }
 
@@ -263,45 +296,71 @@ export default function (pi: ExtensionAPI) {
     });
   }
 
-  function waitForReadiness(armChild: ChildProcess): Promise<boolean> {
+  function waitForReadiness(armChild: ChildProcess): Promise<ArmReadiness> {
     const readiness = armReadiness.get(armChild);
-    if (!readiness) return Promise.resolve(false);
+    if (!readiness) return Promise.resolve("unready");
     return new Promise((resolveReady) => {
-      const timer = setTimeout(() => resolveReady(false), armReadyTimeoutMs);
+      const timer = setTimeout(() => resolveReady("unready"), armReadyTimeoutMs);
       timer.unref();
-      void readiness.then((ready) => {
+      void readiness.then((status) => {
         clearTimeout(timer);
-        resolveReady(ready);
+        resolveReady(status);
       });
     });
   }
 
   async function retireArm(armChild: ChildProcess | null): Promise<boolean> {
     if (!armChild) return true;
+    const exited = armExit.get(armChild);
+    if (!exited) return false;
     armChild.kill("SIGTERM");
-    const closed = armClose.get(armChild);
-    if (!closed) return false;
     return new Promise((resolveRetired) => {
-      const timer = setTimeout(() => resolveRetired(false), armRetireTimeoutMs);
+      let retirementSettled = false;
+      const timer = setTimeout(() => {
+        retirementSettled = true;
+        resolveRetired(false);
+      }, armRetireTimeoutMs);
       timer.unref();
-      void closed.then(() => {
+      void exited.then(() => {
+        if (retirementSettled) return;
+        retirementSettled = true;
         clearTimeout(timer);
+        restorationRetiredArms.add(armChild);
         resolveRetired(true);
       });
     });
   }
 
-  async function restoreAfterActionableClose(owner: SessionGeneration, predecessorArmPid: string): Promise<string> {
+  async function restoreAfterActionableClose(owner: SessionGeneration, predecessorArmPid: string): Promise<RestoreResult> {
     let failure = "";
     for (let attempt = 0; attempt <= retryLimit; attempt += 1) {
-      if (!generationIsLive(owner)) return "";
+      if (!generationIsLive(owner)) return { standDown: false, failure: "" };
       const replacement = startArm(owner, predecessorArmPid);
       const successorChild = owner.child;
-      if (replacement.ok && successorChild && await waitForReadiness(successorChild)) return "";
+      if (replacement.stoodDown) {
+        resetRetryState(owner);
+        return { standDown: true, failure: "" };
+      }
+      const readiness = replacement.ok && successorChild
+        ? await waitForReadiness(successorChild)
+        : "unready";
+      if (readiness === "ready") return { standDown: false, failure: "" };
+      if (readiness === "stood-down") {
+        resetRetryState(owner);
+        return { standDown: true, failure: "" };
+      }
       if (replacement.ok) {
+        if (awayModeActive()) {
+          resetRetryState(owner);
+          await retireArm(successorChild);
+          return { standDown: true, failure: "" };
+        }
         failure = "watcher: FAILED - Pi extension could not verify a ready successor watcher";
         if (!(await retireArm(successorChild))) {
-          return `${failure}\nwatcher: FAILED - Pi extension could not restore watcher continuity because the unready successor arm did not exit within ${armRetireTimeoutMs}ms`;
+          return {
+            standDown: false,
+            failure: `${failure}\nwatcher: FAILED - Pi extension could not restore watcher continuity because the unready successor arm did not exit within ${armRetireTimeoutMs}ms`,
+          };
         }
       } else {
         failure = /(?:read-only|no live session)/.test(replacement.message)
@@ -312,11 +371,19 @@ export default function (pi: ExtensionAPI) {
       if (attempt === retryLimit) break;
       await waitForRetry(attempt + 1);
     }
-    return `${failure}\nwatcher: FAILED - Pi extension could not restore watcher continuity after ${retryLimit} retries`;
+    return {
+      standDown: false,
+      failure: `${failure}\nwatcher: FAILED - Pi extension could not restore watcher continuity after ${retryLimit} retries`,
+    };
   }
 
   function scheduleRetry(owner: SessionGeneration, message: string, predecessorArmPid: string): void {
-    if (!generationIsLive(owner) || owner.child || owner.retryTimer) return;
+    if (!generationIsLive(owner)) return;
+    if (awayModeActive()) {
+      resetRetryState(owner);
+      return;
+    }
+    if (owner.child || owner.retryTimer) return;
     const ownership = lockOwnership();
     if (ownership !== "owned") {
       surfaceFailure(owner, `watcher: FAILED - Pi extension cannot restore continuity because this session no longer owns the lock\n${message}`);
@@ -341,6 +408,14 @@ export default function (pi: ExtensionAPI) {
 
   function startArm(owner: SessionGeneration, predecessorArmPid = ""): ArmResult {
     if (!generationIsLive(owner)) return { ok: false, message: shuttingDownMessage };
+    if (awayModeActive()) {
+      resetRetryState(owner);
+      return {
+        ok: true,
+        stoodDown: true,
+        message: "watcher: stood-down - away mode is active; the away supervisor owns the watcher",
+      };
+    }
     const ownership = lockOwnership();
     if (ownership === "other") return { ok: false, message: "watcher: read-only - session lock is held by another firstmate session" };
     if (ownership === "missing") {
@@ -350,6 +425,7 @@ export default function (pi: ExtensionAPI) {
       };
     }
     markLoaded();
+    if (owner.child && !armChildAlive(owner.child)) owner.child = null;
     if (owner.child) {
       return {
         ok: true,
@@ -380,29 +456,64 @@ export default function (pi: ExtensionAPI) {
     let stdout = "";
     let stderr = "";
     let settled = false;
+    let exitDrainTimer: ReturnType<typeof setTimeout> | null = null;
     let readinessSettled = false;
-    let resolveReadiness: (ready: boolean) => void = () => {};
-    let resolveClosed: () => void = () => {};
-    const readiness = new Promise<boolean>((resolveReady) => {
+    let resolveReadiness: (status: ArmReadiness) => void = () => {};
+    let resolveExited: () => void = () => {};
+    const readiness = new Promise<ArmReadiness>((resolveReady) => {
       resolveReadiness = resolveReady;
     });
     armReadiness.set(armChild, readiness);
-    const closed = new Promise<void>((resolveClosedChild) => {
-      resolveClosed = resolveClosedChild;
+    const exited = new Promise<void>((resolveExitedChild) => {
+      resolveExited = resolveExitedChild;
     });
-    armClose.set(armChild, closed);
-    const settleReadiness = (ready: boolean): void => {
+    armExit.set(armChild, exited);
+    const settleReadiness = (status: ArmReadiness): void => {
       if (readinessSettled) return;
       readinessSettled = true;
-      resolveReadiness(ready);
+      resolveReadiness(status);
     };
     const observeEstablishedArm = (): void => {
       if (/^watcher: (?:started|attached)\b/m.test(`${stdout}\n${stderr}`)) {
-        settleReadiness(true);
+        settleReadiness("ready");
       }
     };
     const releaseChild = (): void => {
       if (owner.child === armChild) owner.child = null;
+    };
+    const settleArm = (code: number | null, signal: NodeJS.Signals | null): void => {
+      if (settled) return;
+      settled = true;
+      if (exitDrainTimer) clearTimeout(exitDrainTimer);
+      exitDrainTimer = null;
+      const classification = classifyClose(stdout, stderr, code, signal);
+      settleReadiness(classification.kind === "stood-down" ? "stood-down" : "unready");
+      releaseChild();
+      if (!generationIsLive(owner)) return;
+      const predecessor = String(armChild.pid ?? "");
+      if (classification.kind === "stood-down") {
+        resetRetryState(owner);
+        return;
+      }
+      if (classification.kind === "actionable") {
+        owner.retryFailures = 0;
+        owner.restoring = true;
+        void (async () => {
+          const restored = await restoreAfterActionableClose(owner, predecessor);
+          if (generationIsLive(owner)) owner.restoring = false;
+          if (!generationIsLive(owner)) return;
+          if (restored.standDown) {
+            resetRetryState(owner);
+            return;
+          }
+          const message = restored.failure ? `${classification.message}\n\n${restored.failure}` : classification.message;
+          await sendWake(owner, message);
+        })().catch(() => {
+        });
+        return;
+      }
+      if (restorationRetiredArms.has(armChild) || owner.restoring) return;
+      scheduleRetry(owner, classification.message, predecessor);
     };
     armChild.stdout.on("data", (chunk: Buffer) => {
       stdout += chunk.toString();
@@ -412,36 +523,22 @@ export default function (pi: ExtensionAPI) {
       stderr += chunk.toString();
       observeEstablishedArm();
     });
-    armChild.on("close", (code: number | null, signal: NodeJS.Signals | null) => {
+    armChild.on("exit", (code: number | null, signal: NodeJS.Signals | null) => {
+      resolveExited();
       if (settled) return;
-      settled = true;
-      resolveClosed();
-      settleReadiness(false);
-      releaseChild();
-      if (!generationIsLive(owner)) return;
-      const classification = classifyClose(stdout, stderr, code, signal);
-      const predecessor = String(armChild.pid ?? "");
-      if (classification.kind === "actionable") {
-        owner.retryFailures = 0;
-        owner.restoring = true;
-        void (async () => {
-          const failure = await restoreAfterActionableClose(owner, predecessor);
-          if (generationIsLive(owner)) owner.restoring = false;
-          if (!generationIsLive(owner)) return;
-          const message = failure ? `${classification.message}\n\n${failure}` : classification.message;
-          await sendWake(owner, message);
-        })().catch(() => {
-        });
-        return;
-      }
-      if (owner.restoring) return;
-      scheduleRetry(owner, classification.message, predecessor);
+      exitDrainTimer = setTimeout(() => settleArm(code, signal), armExitDrainMs);
+    });
+    armChild.on("close", (code: number | null, signal: NodeJS.Signals | null) => {
+      settleArm(code, signal);
     });
     armChild.on("error", (error: Error) => {
+      if (armChildAlive(armChild)) return;
+      resolveExited();
       if (settled) return;
       settled = true;
-      resolveClosed();
-      settleReadiness(false);
+      if (exitDrainTimer) clearTimeout(exitDrainTimer);
+      exitDrainTimer = null;
+      settleReadiness("unready");
       releaseChild();
       if (!generationIsLive(owner)) return;
       if (owner.restoring) return;
