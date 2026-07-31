@@ -308,6 +308,10 @@
       "audience": "operator-current"
     },
     {
+      "path": "docs/verification/agy-search.md",
+      "audience": "maintainer-verification"
+    },
+    {
       "path": "docs/verification/pool-account-routing.md",
       "audience": "maintainer-verification"
     },
