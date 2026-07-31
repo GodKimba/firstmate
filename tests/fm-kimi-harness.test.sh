@@ -125,7 +125,19 @@ esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
-  fm_fake_exit0 "$fakebin" treehouse gh-axi gh
+  fm_fake_exit0 "$fakebin" gh-axi gh
+  cat > "$fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  firstmate-return-route) printf 'managed' ;;
+  return)
+    wt=${!#}
+    git -C "${FM_TREEHOUSE_RETURN_PROJECT:?}" worktree remove --force "$wt"
+    ;;
+esac
+exit 0
+SH
+  chmod +x "$fakebin/treehouse"
   fm_fake_exit0 "$fakebin" kimi
   ln -s "$JQ_BIN" "$fakebin/jq"
   printf '%s\n' "$fakebin"
@@ -433,7 +445,8 @@ test_kimi_teardown_removes_pointer_and_registry_token() {
   HOME="$HOME_DIR" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$HOME_DIR" \
     FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
     FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
-    FM_SPAWN_NO_GUARD=1 PATH="$FAKEBIN_DIR:$BASE_PATH" \
+    FM_SPAWN_NO_GUARD=1 FM_FAKE_TMUX_CALL_LOG="$CASE_DIR/tmux-calls.log" \
+    PATH="$FAKEBIN_DIR:$BASE_PATH" \
     "$TEARDOWN" "$id" --force >/dev/null 2>&1 || fail "Kimi teardown failed"
   assert_absent "$WT_DIR/.fm-kimi-turnend" "Kimi token pointer survived teardown"
   assert_absent "$HOME_DIR/.kimi-code/fm-turn-end.d/$token" "Kimi registry token survived teardown"

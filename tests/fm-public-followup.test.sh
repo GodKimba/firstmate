@@ -87,7 +87,19 @@ make_home() {  # <name> [relay-on|relay-off]
 EOF
   [ "$relay" = relay-off ] || printf 'FMX_PAIRING_TOKEN=test-token\n' > "$home/.env"
   make_fake_curl "$home" >/dev/null
-  fm_fake_exit0 "$home/fakebin" tmux treehouse no-mistakes gh gh-axi
+  fm_fake_exit0 "$home/fakebin" tmux no-mistakes gh gh-axi
+  cat > "$home/fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  firstmate-return-route) printf 'managed' ;;
+  return)
+    wt=${!#}
+    git -C "${FM_TREEHOUSE_RETURN_PROJECT:?}" worktree remove --force "$wt"
+    ;;
+esac
+exit 0
+SH
+  chmod +x "$home/fakebin/treehouse"
   printf '%s\n' "$home"
 }
 
@@ -633,7 +645,7 @@ test_secondmate_teardown_requires_parent_binding() {
 test_relay_disabled_unmarked_teardown_skips_public_path() {
   local home tasks_log out rc
   home=$(make_home teardown-disabled-unmarked relay-off)
-  fm_git_init_commit "$home/projects/worktree"
+  fm_git_worktree "$home/projects/project" "$home/projects/worktree" fm/work-disabled
   tasks_log="$home/tasks-axi.log"; : > "$tasks_log"
   printf 'manual\n' > "$home/config/backlog-backend"
   cat > "$home/fakebin/tasks-axi" <<'SH'
@@ -644,8 +656,8 @@ SH
   chmod +x "$home/fakebin/tasks-axi"
   fm_write_meta "$home/state/work-disabled.meta" \
     "window=firstmate:fm-work-disabled" "endpoint_task_id=work-disabled" \
-    "worktree=$home/projects/worktree" "project=$home/projects/worktree" \
-    "kind=ship" "mode=local-only"
+    "worktree=$home/projects/worktree" "project=$home/projects/project" \
+    "acquisition_branch=fm/work-disabled" "kind=ship" "mode=local-only"
 
   rc=0
   out=$(PATH="$home/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
@@ -665,7 +677,7 @@ test_relay_disabled_parent_allows_marked_child_teardown() {
   local parent child tasks_log out rc
   parent=$(make_home teardown-disabled-parent relay-off)
   child=$(make_home teardown-disabled-child relay-off)
-  fm_git_init_commit "$child/projects/worktree"
+  fm_git_worktree "$child/projects/project" "$child/projects/worktree" fm/work-disabled
   printf '%s\n' disabled-mate > "$child/.fm-secondmate-home"
   printf -- '- disabled-mate - synthetic (home: %s; scope: synthetic; projects: ; added 2026-07-30)\n' \
     "$child" > "$parent/data/secondmates.md"
@@ -680,8 +692,8 @@ SH
   chmod +x "$child/fakebin/tasks-axi"
   fm_write_meta "$child/state/work-disabled.meta" \
     "window=firstmate:fm-work-disabled" "endpoint_task_id=work-disabled" \
-    "worktree=$child/projects/worktree" "project=$child/projects/worktree" \
-    "kind=ship" "mode=local-only"
+    "worktree=$child/projects/worktree" "project=$child/projects/project" \
+    "acquisition_branch=fm/work-disabled" "kind=ship" "mode=local-only"
 
   rc=0
   out=$(PATH="$child/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$child" \
