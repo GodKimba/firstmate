@@ -6,9 +6,7 @@ When this session owns supervision and away mode is not active:
 3. First cycle: run one foreground watcher checkpoint with `bin/fm-watch-checkpoint.sh --seconds "${FM_CODEX_WATCH_CHECKPOINT:-180}"`.
 4. Ordinary wake: if the command prints `signal:`, `stale:`, `check:`, or `heartbeat`, drain queued wakes, handle that wake, then start the next checkpoint.
 5. If the command prints `checkpoint: no actionable wake` or exits 124 with no wake, drain queued wakes anyway, process any queued user message now visible to Codex, then start the next checkpoint.
-6. Stand-down: if the command prints `checkpoint: stood-down` and exits 3, away mode became active and the away supervisor now owns supervision.
-   Stop checkpointing, load `/afk`, and do not start another checkpoint until away mode ends.
-   This is a terminal non-failure, not a quiet checkpoint: it returns immediately, so starting the next one would spin instead of waiting.
+6. If the command reports an away-mode stand-down, stop checkpointing and load `/afk`; [`watcher-continuity.md`](../watcher-continuity.md) owns the full stand-down contract.
 7. Never use shell `&` or Codex background tasks for firstmate watcher supervision.
 8. Do not run `bin/fm-watch-arm.sh` as Codex's normal supervision command.
    If it is ever shelled anyway, a backgrounded, piped, or bundled anti-pattern is denied automatically by the PreToolUse seatbelt (`bin/fm-arm-pretool-check.sh`) registered in `.codex/hooks.json`.

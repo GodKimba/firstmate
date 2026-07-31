@@ -353,7 +353,8 @@ fi
 if [ "$mode" = restart ]; then
   # Home-scoped stop: only the watcher pid recorded in THIS home's lock.
   lock_pid=$(cat "$WATCH_LOCK/pid" 2>/dev/null || true)
-  if fm_pid_alive "$lock_pid" && fm_watcher_lock_away_supervised "$STATE"; then
+  if fm_pid_alive "$lock_pid" \
+    && fm_watcher_lock_away_supervised "$STATE" "$WATCH" "$lock_pid" "$FM_HOME"; then
     # The away supervisor reaps this watcher itself during shutdown. Evicting it
     # here would leave the home with no supervision cycle at all, so refuse
     # rather than restart. The .afk stand-down above already covers the ordinary

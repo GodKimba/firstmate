@@ -59,9 +59,10 @@ Pi and OpenCode therefore both check the flag before spawning, classify a `stood
 Claude's Stop auto-arm already exits before arming while the flag exists and is unchanged.
 Codex and Grok are model-issued paths with no adapter of their own, so the script-level gate is their protection and their protocols name the stand-down explicitly.
 
-The away supervisor tags its watcher's singleton lock with `owner=away-supervisor`.
-`bin/fm-watch-arm.sh --restart` refuses to signal a lock carrying that tag, which also covers the window where the flag is already cleared but the daemon has not finished reaping its child.
-A lock written before owner tagging carries no tag and is not assumed ordinary: while away mode is active it is treated as daemon-owned, and outside away mode it stays evictable so normal restart recovery is unchanged.
+The away supervisor's watcher tags its singleton lock with `owner=away-supervisor` only after its live parent matches the exact identity in this home's daemon lock.
+`bin/fm-watch-arm.sh --restart` honors that tag only when the watcher itself still matches the lock's exact identity, its live parent still matches the recorded owner identity, and that owner still matches the daemon lock.
+This protects the daemon's child during the window where the flag is already cleared but the daemon has not finished reaping it, without letting an environment variable, stale tag, or recycled PID claim protection.
+A lock written before owner tagging carries no tag and is not assumed ordinary: after exact watcher-identity validation, it is treated as daemon-owned while away mode is active and stays evictable outside away mode so normal restart recovery is unchanged.
 
 `bin/fm-afk-launch.sh stop` bounds its shutdown wait with `FM_AFK_STOP_TIMEOUT` (default 45 seconds), derived from the daemon's measured shutdown floor rather than a round number: the deferred TERM trap in the idle branch, the escalation flush's submit-confirm retries, and the watcher child's own poll sleep together put that floor near 30 seconds on a busy home.
 Expiry is not a verdict.

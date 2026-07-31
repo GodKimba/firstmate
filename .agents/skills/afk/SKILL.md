@@ -49,16 +49,8 @@ batched digest rather than per-wake injections.
    The daemon is **presence-gated**: it injects escalations only while
    `state/.afk` exists, and stays quiet otherwise.
 
-3. **Do not separately arm `fm-watch.sh`.** The daemon manages the watcher as
-   its child, and every arm path in this home stands down instead of competing:
-   `bin/fm-watch-arm.sh` exits 0 with `watcher: stood-down ...` and
-   `bin/fm-watch-checkpoint.sh` exits 3 with `checkpoint: stood-down ...`, both
-   without starting anything. A stand-down is terminal and is not a failure, so
-   nothing re-arms, retries, alarms, or delivers a wake off it; wakes stay
-   durable in the queue for the daemon and for return catch-up.
-   [`watcher-continuity.md`](../../../docs/watcher-continuity.md) owns that
-   contract and the daemon's `owner=away-supervisor` lock tag that keeps a
-   restart from evicting the daemon's own watcher.
+3. **Do not separately arm `fm-watch.sh`.**
+   [`watcher-continuity.md`](../../../docs/watcher-continuity.md) owns the daemon-child, away-mode stand-down, and lock-owner contract.
 
 4. **Acknowledge** in `AGENTS.md` section 9 language: "Captain, away mode is active; I will batch routine updates and surface only decisions, failures, credentials, or review-ready work until you return."
 

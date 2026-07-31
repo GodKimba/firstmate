@@ -197,6 +197,7 @@ function observeArmOutput(stdout, stderr, settleReadiness) {
 
 async function sendPrompt(paths, client, sessionID, text) {
   const encoded = await encodeFirstmateOperationalInput(paths.root, "watcher", text);
+  if (awayModeActive(paths)) return;
   await client.session.promptAsync({
     path: { id: sessionID },
     body: {

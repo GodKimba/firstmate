@@ -39,6 +39,7 @@ TMP_ROOT=$(fm_test_tmproot fm-afk-standdown)
 mkdir -p "$TMP_ROOT"
 TMP_ROOT=$(cd "$TMP_ROOT" && pwd)
 ARM="$ROOT/bin/fm-watch-arm.sh"
+WATCH="$ROOT/bin/fm-watch.sh"
 CHECKPOINT="$ROOT/bin/fm-watch-checkpoint.sh"
 LAUNCH="$ROOT/bin/fm-afk-launch.sh"
 DRAIN="$ROOT/bin/fm-wake-drain.sh"
@@ -117,14 +118,21 @@ stop_reaped_bg() {
 
 # Write a complete watcher lock for <pid>, optionally tagged with an owner.
 write_watch_lock() {
-  local home=$1 watch_path=$2 pid=$3 owner=${4:-}
-  local lock="$home/state/.watch.lock"
+  local home=$1 watch_path=$2 pid=$3 owner=${4:-} owner_pid=${5:-}
+  local lock="$home/state/.watch.lock" daemon_lock="$home/state/.supervise-daemon.lock"
   mkdir -p "$lock"
   printf '%s\n' "$pid" > "$lock/pid"
   printf '%s\n' "$home" > "$lock/fm-home"
   printf '%s\n' "$watch_path" > "$lock/watcher-path"
   pid_identity_of "$home" "$pid" > "$lock/pid-identity"
   [ -z "$owner" ] || printf '%s\n' "$owner" > "$lock/owner"
+  if [ -n "$owner_pid" ]; then
+    printf '%s\n' "$owner_pid" > "$lock/owner-pid"
+    pid_identity_of "$home" "$owner_pid" > "$lock/owner-pid-identity"
+    mkdir -p "$daemon_lock"
+    printf '%s\n' "$owner_pid" > "$daemon_lock/pid"
+    pid_identity_of "$home" "$owner_pid" > "$daemon_lock/pid-identity"
+  fi
 }
 
 # --- arm layer --------------------------------------------------------------
@@ -170,48 +178,91 @@ test_checkpoint_stands_down_while_away_mode_is_active() {
 
 # --- daemon-owned lock ------------------------------------------------------
 
-test_owner_tag_identifies_the_away_supervisors_watcher() {
-  local home
+test_owner_tag_requires_verified_daemon_parent() {
+  local home watch_path
   home=$(make_home owner-tag)
-  # shellcheck source=bin/fm-wake-lib.sh
+  watch_path="$ROOT/bin/fm-watch.sh"
+  start_reaped_bg sleep 20
+  write_watch_lock "$home" "$watch_path" "$FM_BG_PID" away-supervisor "$FM_BG_REAPER"
   ( export FM_HOME="$home"
     . "$ROOT/bin/fm-wake-lib.sh"
 
-    mkdir -p "$home/state/.watch.lock"
-    printf '%s\n' away-supervisor > "$home/state/.watch.lock/owner"
-    fm_watcher_lock_away_supervised "$home/state" \
+    fm_watcher_lock_away_supervised "$home/state" "$watch_path" "$FM_BG_PID" "$home" \
       || fail "an owner=away-supervisor lock was not recognized as daemon-owned"
 
-    # A foreign tag is somebody else's lock even while away mode is on; only the
-    # away supervisor's own tag earns the restart refusal.
+    printf '%s\n' stale-watcher-identity > "$home/state/.watch.lock/pid-identity"
+    ! fm_watcher_lock_away_supervised "$home/state" "$watch_path" "$FM_BG_PID" "$home" \
+      || fail "a stale tagged watcher identity was treated as daemon-owned"
+    fm_pid_identity "$FM_BG_PID" > "$home/state/.watch.lock/pid-identity"
+
+    printf '%s\n' stale-daemon-identity > "$home/state/.supervise-daemon.lock/pid-identity"
+    ! fm_watcher_lock_away_supervised "$home/state" "$watch_path" "$FM_BG_PID" "$home" \
+      || fail "a stale daemon identity protected its recorded watcher"
+    fm_pid_identity "$FM_BG_REAPER" > "$home/state/.supervise-daemon.lock/pid-identity"
+
     printf '%s\n' some-other-owner > "$home/state/.watch.lock/owner"
     : > "$home/state/.afk"
-    ! fm_watcher_lock_away_supervised "$home/state" \
+    ! fm_watcher_lock_away_supervised "$home/state" "$watch_path" "$FM_BG_PID" "$home" \
       || fail "a foreign owner tag was treated as the away supervisor's lock"
-  ) || exit 1
-  pass "owner tag decides daemon ownership directly"
+  ) || { stop_reaped_bg; exit 1; }
+  stop_reaped_bg
+
+  home=$(make_home forged-owner-tag)
+  start_reaped_bg sleep 20
+  write_watch_lock "$home" "$watch_path" "$FM_BG_PID" away-supervisor
+  ( export FM_HOME="$home"
+    . "$ROOT/bin/fm-wake-lib.sh"
+    ! fm_watcher_lock_away_supervised "$home/state" "$watch_path" "$FM_BG_PID" "$home" \
+      || fail "an unverified owner tag protected an arbitrary watcher"
+  ) || { stop_reaped_bg; exit 1; }
+  stop_reaped_bg
+  pass "owner protection requires exact watcher and live daemon-parent identities"
+}
+
+test_owner_environment_requires_verified_daemon() {
+  local home output watcher_pid i=0 observed=0 tagged=0
+  home=$(make_home owner-env)
+  output="$TMP_ROOT/owner-env.out"
+  FM_HOME="$home" FM_WATCH_OWNER=away-supervisor FM_POLL=1 FM_HEARTBEAT=999999 \
+    FM_CHECK_INTERVAL=999999 "$WATCH" > "$output" 2>&1 &
+  watcher_pid=$!
+  while [ ! -s "$home/state/.watch.lock/pid" ] && kill -0 "$watcher_pid" 2>/dev/null \
+    && [ "$i" -lt 200 ]; do
+    sleep 0.02
+    i=$((i + 1))
+  done
+  [ -s "$home/state/.watch.lock/pid" ] && observed=1
+  [ -e "$home/state/.watch.lock/owner" ] && tagged=1
+  kill -TERM "$watcher_pid" 2>/dev/null || true
+  wait "$watcher_pid" 2>/dev/null || true
+  [ "$observed" -eq 1 ] || fail "the unverified owner probe never acquired its watcher lock: $(cat "$output" 2>/dev/null || true)"
+  [ "$tagged" -eq 0 ] || fail "FM_WATCH_OWNER alone created a protected watcher tag"
+  pass "the owner environment value alone cannot claim daemon protection"
 }
 
 test_untagged_lock_is_conservative_only_while_away() {
-  local home
+  local home watch_path
   home=$(make_home untagged-lock)
+  watch_path="$ROOT/bin/fm-watch.sh"
+  start_reaped_bg sleep 20
+  write_watch_lock "$home" "$watch_path" "$FM_BG_PID"
   ( export FM_HOME="$home"
     . "$ROOT/bin/fm-wake-lib.sh"
 
-    mkdir -p "$home/state/.watch.lock"
     # Backward compatibility: a lock written before owner tagging carries no tag
     # and is not assumed claimable. While away mode is active the daemon is this
     # home's only legitimate watcher owner, so that evidence decides.
     : > "$home/state/.afk"
-    fm_watcher_lock_away_supervised "$home/state" \
+    fm_watcher_lock_away_supervised "$home/state" "$watch_path" "$FM_BG_PID" "$home" \
       || fail "an untagged legacy lock was silently claimable during away mode"
 
     # Outside away mode there is no away supervisor to protect, so an untagged
     # lock stays an ordinary watcher and normal restart recovery is unchanged.
     rm -f "$home/state/.afk"
-    ! fm_watcher_lock_away_supervised "$home/state" \
+    ! fm_watcher_lock_away_supervised "$home/state" "$watch_path" "$FM_BG_PID" "$home" \
       || fail "an untagged lock outside away mode blocked ordinary restart recovery"
-  ) || exit 1
+  ) || { stop_reaped_bg; exit 1; }
+  stop_reaped_bg
   pass "an untagged legacy lock is conservative during away mode and evictable outside it"
 }
 
@@ -220,7 +271,7 @@ test_daemon_owned_watcher_still_reads_healthy() {
   home=$(make_home owner-healthy)
   watch_path="$ROOT/bin/fm-watch.sh"
   start_reaped_bg sleep 20
-  write_watch_lock "$home" "$watch_path" "$FM_BG_PID" away-supervisor
+  write_watch_lock "$home" "$watch_path" "$FM_BG_PID" away-supervisor "$FM_BG_REAPER"
   : > "$home/state/.last-watcher-beat"
 
   # The owner tag must not leak into the shared liveness predicate. If it did,
@@ -248,7 +299,7 @@ test_restart_refuses_to_evict_the_away_supervisors_watcher() {
   start_reaped_bg sleep 20
   # No .afk: this is the window where the flag is already cleared but the daemon
   # has not finished reaping its child. The tag has to hold on its own.
-  write_watch_lock "$home" "$dir/bin/fm-watch.sh" "$FM_BG_PID" away-supervisor
+  write_watch_lock "$home" "$dir/bin/fm-watch.sh" "$FM_BG_PID" away-supervisor "$FM_BG_REAPER"
 
   out=$(FM_HOME="$home" FM_STUB_WATCH_LOG="$log" "$dir/bin/fm-watch-arm.sh" --restart 2>&1)
   status=$?
@@ -260,6 +311,27 @@ test_restart_refuses_to_evict_the_away_supervisors_watcher() {
 
   stop_reaped_bg
   pass "--restart refuses to signal a daemon-owned watcher"
+}
+
+test_restart_evicts_an_unverified_tagged_watcher() {
+  local dir home log out status
+  dir="$TMP_ROOT/restart-forged-root"
+  home=$(make_home restart-forged)
+  log="$TMP_ROOT/restart-forged.log"
+  install_arm_fixture "$dir"
+  start_reaped_bg sleep 20
+  write_watch_lock "$home" "$dir/bin/fm-watch.sh" "$FM_BG_PID" away-supervisor
+
+  out=$(FM_HOME="$home" FM_STUB_WATCH_LOG="$log" "$dir/bin/fm-watch-arm.sh" --restart 2>&1)
+  status=$?
+  expect_code 0 "$status" "an unverified tag must remain recoverable"
+  assert_contains "$out" "signal: stub cycle" "an unverified tag blocked replacement startup"
+  assert_not_contains "$out" "watcher: stood-down" "an unverified tag claimed daemon protection"
+  assert_present "$log" "an unverified tagged watcher was not replaced"
+  ! fm_bg_alive || fail "an unverified tagged watcher was not evicted"
+
+  stop_reaped_bg
+  pass "--restart evicts a watcher whose owner tag is unverified"
 }
 
 test_restart_still_evicts_an_ordinary_watcher() {
@@ -395,6 +467,73 @@ EOF
   pass "Pi treats an arm-layer stand-down as terminal, not as an empty-cycle failure"
 }
 
+test_pi_rechecks_away_mode_at_final_delivery() {
+  local repo home plugin log encoder out status
+  repo="$TMP_ROOT/pi-delivery-race-root"
+  home=$(make_home pi-delivery-race)
+  log="$TMP_ROOT/pi-delivery-race.log"
+  encoder="$repo/bin/fm-operational-input-delayed.sh"
+  mkdir -p "$repo/bin"
+  install_pi_watch_extension_fixture "$repo"
+  plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  : > "$home/state/task.meta"
+  cat > "$encoder" <<'SH'
+#!/usr/bin/env bash
+: > "${FM_HOME:?}/state/.afk"
+exec "${FM_ROOT_OVERRIDE:?}/bin/fm-operational-input.sh" "$@"
+SH
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'arm=%s\n' "$$" >> "${FM_ARM_LOG:?}"
+count=$(wc -l < "$FM_ARM_LOG" | tr -d '[:space:]')
+if [ "$count" -eq 1 ]; then
+  printf 'signal: delivery race\n'
+  exit 0
+fi
+printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+trap 'exit 0' TERM INT
+while [ ! -e "$FM_HOME/state/.afk" ]; do sleep 0.02; done
+SH
+  chmod +x "$encoder" "$repo/bin/fm-watch-arm.sh"
+
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" \
+    FM_OPERATIONAL_INPUT_SCRIPT="$encoder" node --input-type=module 2>&1 <<'EOF'
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+let tool = null;
+let injections = 0;
+const pi = {
+  on() {},
+  registerCommand() {},
+  registerTool(candidate) {
+    if (candidate.name === "fm_watch_arm_pi") tool = candidate;
+  },
+  sendUserMessage: async () => {
+    injections += 1;
+  },
+};
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+await tool.execute("tool-call-delivery-race", {}, undefined, undefined, {});
+for (let i = 0; i < 250 && !existsSync(`${process.env.FM_HOME}/state/.afk`); i += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 10));
+}
+if (!existsSync(`${process.env.FM_HOME}/state/.afk`)) throw new Error("the delivery encoder never activated away mode");
+await new Promise((resolve) => setTimeout(resolve, 100));
+const rows = readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n");
+if (rows.length !== 2) throw new Error(`delivery race launched ${rows.length} arm cycles`);
+if (injections !== 0) throw new Error(`Pi injected ${injections} wakes after away mode became active`);
+process.exit(0);
+EOF
+  )
+  status=$?
+  expect_code 0 "$status" "Pi must suppress delivery when away mode starts after successor readiness: $out"
+  [ -z "$out" ] || fail "Pi final-delivery test printed output: $out"
+  pass "Pi rechecks away mode at its final wake-delivery boundary"
+}
+
 # --- OpenCode adapter -------------------------------------------------------
 
 test_opencode_stand_down_is_a_clean_break() {
@@ -491,6 +630,65 @@ EOF
   expect_code 0 "$status" "OpenCode must treat not-needed as a clean break with no delivery: $out"
   [ -z "$out" ] || fail "OpenCode not-needed test printed output: $out"
   pass "OpenCode treats a not-needed restoration as a clean break"
+}
+
+test_opencode_rechecks_away_mode_at_final_delivery() {
+  local repo home log out status
+  repo="$TMP_ROOT/opencode-delivery-race-root"
+  home=$(make_home opencode-delivery-race)
+  log="$TMP_ROOT/opencode-delivery-race.log"
+  mkdir -p "$repo/bin"
+  git init -q "$repo"
+  : > "$repo/AGENTS.md"
+  : > "$home/state/task.meta"
+  cat > "$repo/bin/fm-operational-input.sh" <<'SH'
+#!/usr/bin/env bash
+: > "${FM_HOME:?}/state/.afk"
+exec "${FM_REAL_OPERATIONAL_INPUT_SCRIPT:?}" "$@"
+SH
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'arm=%s\n' "$$" >> "${FM_ARM_LOG:?}"
+count=$(wc -l < "$FM_ARM_LOG" | tr -d '[:space:]')
+if [ "$count" -eq 1 ]; then
+  printf 'signal: delivery race\n'
+  exit 0
+fi
+printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+trap 'exit 0' TERM INT
+while [ ! -e "$FM_HOME/state/.afk" ]; do sleep 0.02; done
+SH
+  chmod +x "$repo/bin/fm-operational-input.sh" "$repo/bin/fm-watch-arm.sh"
+
+  out=$(PLUGIN="$OPENCODE_PLUGIN" WORKTREE="$repo" FM_HOME="$home" FM_ARM_LOG="$log" \
+    FM_REAL_OPERATIONAL_INPUT_SCRIPT="$ROOT/bin/fm-operational-input.sh" node 2>&1 <<'EOF'
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+let prompts = 0;
+const client = { session: { promptAsync: async () => { prompts += 1; } } };
+const hooks = await mod.FmPrimaryWatchArm({
+  client,
+  directory: process.env.WORKTREE,
+  worktree: process.env.WORKTREE,
+});
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+await hooks.event({ event: { type: "session.idle", properties: { sessionID: "session-delivery-race" } } });
+for (let i = 0; i < 250 && !existsSync(`${process.env.FM_HOME}/state/.afk`); i += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 10));
+}
+if (!existsSync(`${process.env.FM_HOME}/state/.afk`)) throw new Error("the delivery encoder never activated away mode");
+await new Promise((resolve) => setTimeout(resolve, 100));
+const rows = readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n");
+if (rows.length !== 2) throw new Error(`delivery race launched ${rows.length} arm cycles`);
+if (prompts !== 0) throw new Error(`OpenCode delivered ${prompts} prompts after away mode became active`);
+EOF
+  )
+  status=$?
+  expect_code 0 "$status" "OpenCode must suppress delivery when away mode starts during encoding: $out"
+  [ -z "$out" ] || fail "OpenCode final-delivery test printed output: $out"
+  pass "OpenCode rechecks away mode at its final prompt-delivery boundary"
 }
 
 # --- shutdown reconciliation ------------------------------------------------
@@ -618,15 +816,19 @@ test_stand_down_leaves_queued_wakes_for_return_catch_up() {
 
 test_arm_stands_down_while_away_mode_is_active
 test_checkpoint_stands_down_while_away_mode_is_active
-test_owner_tag_identifies_the_away_supervisors_watcher
+test_owner_tag_requires_verified_daemon_parent
+test_owner_environment_requires_verified_daemon
 test_untagged_lock_is_conservative_only_while_away
 test_daemon_owned_watcher_still_reads_healthy
 test_restart_refuses_to_evict_the_away_supervisors_watcher
+test_restart_evicts_an_unverified_tagged_watcher
 test_restart_still_evicts_an_ordinary_watcher
 test_pi_extension_does_not_arm_while_away_mode_is_active
 test_pi_stand_down_is_terminal_not_a_failure
+test_pi_rechecks_away_mode_at_final_delivery
 test_opencode_stand_down_is_a_clean_break
 test_opencode_not_needed_is_a_clean_break
+test_opencode_rechecks_away_mode_at_final_delivery
 test_stop_timeout_encodes_the_measured_shutdown_floor
 test_stop_wait_absorbs_a_deferred_shutdown_trap
 test_stop_preserves_state_for_a_genuinely_live_daemon

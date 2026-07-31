@@ -72,36 +72,59 @@ fm_path_age() {
   echo $(( $(date +%s) - m ))
 }
 
+FM_PID_LOCK_MATCHED_IDENTITY=
+fm_pid_lock_matches_pid() {
+  local lockdir=$1 pid=$2 lock_pid lock_identity current_identity
+  FM_PID_LOCK_MATCHED_IDENTITY=
+  lock_pid=$(cat "$lockdir/pid" 2>/dev/null || true)
+  lock_identity=$(cat "$lockdir/pid-identity" 2>/dev/null || true)
+  [ "$lock_pid" = "$pid" ] || return 1
+  [ -n "$lock_identity" ] || return 1
+  current_identity=$(fm_pid_identity "$pid") || return 1
+  [ "$current_identity" = "$lock_identity" ] || return 1
+  FM_PID_LOCK_MATCHED_IDENTITY=$current_identity
+}
+
+fm_pid_parent() {
+  local pid=$1 parent
+  case "$pid" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  parent=$(LC_ALL=C ps -p "$pid" -o ppid= 2>/dev/null | tr -d '[:space:]') || return 1
+  case "$parent" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  printf '%s\n' "$parent"
+}
+
 fm_watcher_lock_matches_pid() {
-  local state=$1 watch_path=$2 pid=$3 home=${4:-$FM_HOME} lockdir lock_home lock_path lock_identity current_identity
+  local state=$1 watch_path=$2 pid=$3 home=${4:-$FM_HOME} lockdir lock_home lock_path
   lockdir="$state/.watch.lock"
   lock_home=$(cat "$lockdir/fm-home" 2>/dev/null || true)
   lock_path=$(cat "$lockdir/watcher-path" 2>/dev/null || true)
-  lock_identity=$(cat "$lockdir/pid-identity" 2>/dev/null || true)
   [ "$lock_home" = "$home" ] || return 1
   [ "$lock_path" = "$watch_path" ] || return 1
-  [ -n "$lock_identity" ] || return 1
-  current_identity=$(fm_pid_identity "$pid") || return 1
-  [ "$current_identity" = "$lock_identity" ]
+  fm_pid_lock_matches_pid "$lockdir" "$pid"
 }
 
-# Is this home's watcher lock held on behalf of the away supervisor?
-#
-# The away supervisor runs the watcher as its own child and reaps it during
-# shutdown, so evicting that lock from an arm path removes the only live
-# supervision cycle. A lock written by a daemon-started watcher carries the
-# owner tag and answers directly.
-#
-# A lock written before owner tagging carries no tag, and an untagged lock is
-# deliberately NOT assumed ordinary: while away mode is active the daemon is the
-# only legitimate watcher owner in this home, so that evidence decides instead
-# of defaulting to claimable. Outside away mode an untagged lock is an ordinary
-# watcher and stays evictable, which keeps normal --restart recovery working.
+# Is this home's identity-verified watcher lock held on behalf of the away supervisor?
 fm_watcher_lock_away_supervised() {
-  local state=$1 lock_owner
-  lock_owner=$(cat "$state/.watch.lock/owner" 2>/dev/null || true)
+  local state=$1 watch_path=${2:-} pid=${3:-} home=${4:-$FM_HOME}
+  local lockdir lock_owner owner_pid owner_identity watcher_parent
+  lockdir="$state/.watch.lock"
+  [ -n "$watch_path" ] && [ -n "$pid" ] || return 1
+  fm_watcher_lock_matches_pid "$state" "$watch_path" "$pid" "$home" || return 1
+  lock_owner=$(cat "$lockdir/owner" 2>/dev/null || true)
   case "$lock_owner" in
-    away-supervisor) return 0 ;;
+    away-supervisor)
+      owner_pid=$(cat "$lockdir/owner-pid" 2>/dev/null || true)
+      owner_identity=$(cat "$lockdir/owner-pid-identity" 2>/dev/null || true)
+      [ -n "$owner_pid" ] && [ -n "$owner_identity" ] || return 1
+      watcher_parent=$(fm_pid_parent "$pid") || return 1
+      [ "$watcher_parent" = "$owner_pid" ] || return 1
+      fm_pid_lock_matches_pid "$state/.supervise-daemon.lock" "$owner_pid" || return 1
+      [ "$FM_PID_LOCK_MATCHED_IDENTITY" = "$owner_identity" ]
+      ;;
     '')
       if [ -e "$state/.afk" ]; then return 0; fi
       return 1
@@ -134,6 +157,8 @@ fm_lock_clean_known_files() {
     "$lockdir/pid-identity" \
     "$lockdir/watcher-path" \
     "$lockdir/owner" \
+    "$lockdir/owner-pid" \
+    "$lockdir/owner-pid-identity" \
     2>/dev/null || true
 }
 
