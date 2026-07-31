@@ -2474,6 +2474,10 @@ test_herdr_flat_teardown_refuses_orphaning_records_then_retry_completes() {
   cat > "$case_dir/fakebin/treehouse" <<SH
 #!/usr/bin/env bash
 printf '%s\n' "\$*" >> "$thlog"
+case "\${1:-}" in
+  firstmate-return-route) printf 'managed' ;;
+  return) git -C "$case_dir/project" worktree remove --force "$case_dir/wt" ;;
+esac
 exit 0
 SH
   chmod +x "$case_dir/fakebin/treehouse"
@@ -2913,9 +2917,9 @@ test_herdr_projection_teardown_retains_journal_when_close_unconfirmed() {
     || fail "unconfirmed task-pane close incorrectly retired the presentation journal"
   [ -e "$case_dir/state/task-x1.meta" ] \
     || fail "unconfirmed task-pane close erased the durable endpoint metadata"
-  assert_grep "close could not be confirmed" "$case_dir/stderr" \
+  assert_grep "could not be authoritatively queried after close" "$case_dir/stderr" \
     "unconfirmed projected close did not explain why the journal was retained"
-  assert_grep "not confirmed gone" "$case_dir/stderr" \
+  assert_grep "preserving task records and worktree" "$case_dir/stderr" \
     "unconfirmed projected close did not explain why the records were retained"
   assert_not_contains "$(cat "$log")" "workspace close" \
     "unconfirmed projected close must not escalate to workspace cleanup"
