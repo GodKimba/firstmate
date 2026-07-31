@@ -15,29 +15,10 @@ $ /opt/homebrew/bin/agy --version
 
 $ node -p "require('/opt/homebrew/lib/node_modules/@earendil-works/pi-coding-agent/package.json').version"
 0.83.0
-
-$ /opt/homebrew/bin/agy models
-
-gemini-3.6-flash-high
-gemini-3.6-flash-medium
-gemini-3.6-flash-low
-gemini-3.5-flash-high
-gemini-3.5-flash-medium
-gemini-3.5-flash-low
-gemini-3.1-pro-high
-gemini-3.1-pro-low
-claude-sonnet-4-6
-claude-opus-4-6-thinking
-gpt-oss-120b-medium
-
-$ /opt/homebrew/bin/agy agents
-Available agents:
 ```
 
-The running Firstmate Pi session used its `firstmate` Pi agent directory and received the pre-migration `gemini_search` registration from an explicit settings entry ending in `nutricheck/extensions/gemini-search.ts`.
-That dirty profile checkout was inspected only as read-only evidence and was not changed.
-Pi's installed resource resolver was then exercised by the deterministic regression with both the legacy user entry and the tracked project entry present.
-The resolved enabled extension order placed `.pi/extensions/gemini-search.ts` first, included that tracked path once, and placed the legacy source later.
+The deterministic regression below exercises Pi's installed resource resolver with synthetic tracked and user-scoped registrations.
+It proves the tracked extension resolves first and exactly once.
 
 ## Authenticated grounded-search smoke
 
@@ -45,6 +26,8 @@ The authenticated smoke used agy's plan mode, sandbox restrictions, structured o
 The full JSON schema required `summary`, `queries`, `results`, and `notes`, with each result requiring `title`, `url`, and `snippet`.
 
 ```sh
+$ SCHEMA='{"type":"object","additionalProperties":false,"required":["summary","queries","results","notes"],"properties":{"summary":{"type":"string"},"queries":{"type":"array","items":{"type":"string"}},"results":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["title","url","snippet"],"properties":{"title":{"type":"string"},"url":{"type":"string"},"snippet":{"type":"string"}}}},"notes":{"type":"array","items":{"type":"string"}}}}'
+
 $ /opt/homebrew/bin/agy \
     --sandbox \
     --mode plan \
@@ -71,25 +54,6 @@ $ jq -c 'select(.event=="result") | {status:.result.status,queries:.result.struc
 This proves that the installed authenticated agy process exposed and invoked `search_web`, returned the queries it used, and produced source URLs through enforced structured output.
 The smoke URLs were not independently validated by this command, so they remain source candidates rather than citeable evidence.
 The extension preserves that distinction by assigning unvalidated results medium confidence and telling callers to validate or fetch them before citation.
-
-## Timeout, cancellation, and concurrency
-
-A one-second agy print timeout returned exit code 1 with structured JSON on stdout and no stderr.
-
-```sh
-$ jq -c '{status,error,num_turns}' timeout.stdout
-{"status":"ERROR","error":"timeout waiting for response","num_turns":1}
-```
-
-Sending `SIGTERM` to an in-flight agy print process returned exit code 1 promptly with structured cancellation output.
-
-```sh
-$ jq -c '{status,error,num_turns}' cancel.stdout
-{"status":"ERROR","error":"context canceled","num_turns":0}
-```
-
-Two simultaneous bounded structured print invocations both completed with exit code 0.
-No agy-specific serialization queue is required by the tracked extension, so independent searches run as direct subprocesses while atomic cache replacement protects cache files.
 
 ## Deterministic regression
 
