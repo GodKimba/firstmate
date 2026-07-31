@@ -98,6 +98,12 @@ function positiveInteger(name: string, fallback: number): number {
   return Math.floor(value);
 }
 
+function resetRetryState(): void {
+  if (retryTimer) clearTimeout(retryTimer);
+  retryTimer = null;
+  retryFailures = 0;
+}
+
 function parentPid(pid: string): string {
   const result = spawnSync("ps", ["-o", "ppid=", "-p", pid], { encoding: "utf8" });
   if (result.status !== 0) return "";
@@ -208,8 +214,7 @@ export default function (pi: ExtensionAPI) {
 
   function stopArm(): void {
     stopping = true;
-    if (retryTimer) clearTimeout(retryTimer);
-    retryTimer = null;
+    resetRetryState();
     if (child) child.kill("SIGTERM");
     child = null;
   }
@@ -224,7 +229,10 @@ export default function (pi: ExtensionAPI) {
       "watcher",
       `FIRSTMATE WATCHER WAKE: ${message}\n\nRun bin/fm-wake-drain.sh first and handle the queued wake. Watcher continuity is extension-owned.`,
     );
-    if (awayModeActive()) return;
+    if (awayModeActive()) {
+      resetRetryState();
+      return;
+    }
     await pi.sendUserMessage(content, { deliverAs: "followUp" });
   }
 
@@ -286,7 +294,10 @@ export default function (pi: ExtensionAPI) {
       if (stopping) return { standDown: false, failure: "" };
       const replacement = startArm(predecessorArmPid);
       const successorChild = child;
-      if (replacement.stoodDown) return { standDown: true, failure: "" };
+      if (replacement.stoodDown) {
+        resetRetryState();
+        return { standDown: true, failure: "" };
+      }
       if (replacement.ok && successorChild && await waitForReadiness(successorChild)) return { standDown: false, failure: "" };
       if (replacement.ok) {
         // Away mode can start between the check above and the successor's own
@@ -294,6 +305,7 @@ export default function (pi: ExtensionAPI) {
         // readiness. Recognize that as the same terminal non-failure rather than
         // burning the retry ladder on it.
         if (awayModeActive()) {
+          resetRetryState();
           await retireArm(successorChild);
           return { standDown: true, failure: "" };
         }
@@ -320,10 +332,14 @@ export default function (pi: ExtensionAPI) {
   }
 
   function scheduleRetry(message: string, predecessorArmPid: string): void {
-    if (stopping || child || retryTimer) return;
+    if (stopping) return;
     // A stand-down ends this extension's continuity obligation, so never open a
     // retry ladder against the away supervisor's own watcher.
-    if (awayModeActive()) return;
+    if (awayModeActive()) {
+      resetRetryState();
+      return;
+    }
+    if (child || retryTimer) return;
     const ownership = lockOwnership();
     if (ownership !== "owned") {
       surfaceFailure(`watcher: FAILED - Pi extension cannot restore continuity because this session no longer owns the lock\n${message}`);
@@ -348,6 +364,7 @@ export default function (pi: ExtensionAPI) {
   function startArm(predecessorArmPid = ""): ArmResult {
     if (stopping) return { ok: false, message: "watcher: not armed - Pi session is shutting down" };
     if (awayModeActive()) {
+      resetRetryState();
       return {
         ok: true,
         stoodDown: true,
@@ -433,7 +450,7 @@ export default function (pi: ExtensionAPI) {
         // Terminal non-failure: away mode owns the cycle. Start no successor,
         // schedule no retry, raise no alarm, and deliver no wake. The watcher
         // still enqueues every wake durably, and the away supervisor triages it.
-        retryFailures = 0;
+        resetRetryState();
         return;
       }
       if (classification.kind === "actionable") {
@@ -446,7 +463,10 @@ export default function (pi: ExtensionAPI) {
           // Delivery is suppressed on a stand-down for the same reason the arm
           // is: the away supervisor owns wake handling while away mode is on,
           // and the wake itself is already durable in the queue.
-          if (restored.standDown) return;
+          if (restored.standDown) {
+            resetRetryState();
+            return;
+          }
           const message = restored.failure ? `${classification.message}\n\n${restored.failure}` : classification.message;
           await sendWake(message);
         })().catch(() => {

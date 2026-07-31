@@ -29,6 +29,13 @@ function setArmStatus(status) {
   armStatus = status;
 }
 
+function enterStandDown() {
+  if (retryTimer) clearTimeout(retryTimer);
+  retryTimer = null;
+  retryFailures = 0;
+  setArmStatus("stood-down");
+}
+
 function waitForArmReady(armChild) {
   const readiness = armReadiness.get(armChild);
   if (!readiness) return Promise.resolve("failed");
@@ -197,7 +204,10 @@ function observeArmOutput(stdout, stderr, settleReadiness) {
 
 async function sendPrompt(paths, client, sessionID, text) {
   const encoded = await encodeFirstmateOperationalInput(paths.root, "watcher", text);
-  if (awayModeActive(paths)) return;
+  if (awayModeActive(paths)) {
+    enterStandDown();
+    return;
+  }
   await client.session.promptAsync({
     path: { id: sessionID },
     body: {
@@ -266,7 +276,7 @@ async function restoreAfterActionableClose(paths, sessionID, client, predecessor
     // Do not retire it before that handler can start the successor cycle.
     if (status === "wake") return { standDown: false, failure: "" };
     if (isStandDownStatus(status)) {
-      setArmStatus("stood-down");
+      enterStandDown();
       await retireArm(armChild);
       return { standDown: true, failure: "" };
     }
@@ -283,7 +293,7 @@ async function restoreAfterActionableClose(paths, sessionID, client, predecessor
     // readiness. Recognize that as the same clean break rather than burning the
     // retry ladder on it.
     if (awayModeActive(paths)) {
-      setArmStatus("stood-down");
+      enterStandDown();
       return { standDown: true, failure: "" };
     }
     if (status === "read-only" || status === "not-primary" || status === "skipped") break;
@@ -298,13 +308,13 @@ async function restoreAfterActionableClose(paths, sessionID, client, predecessor
 }
 
 async function scheduleRetry(paths, sessionID, client, reason, predecessorArmPid) {
-  if (child || retryTimer) return;
   // A stand-down ends this plugin's continuity obligation, so never open a retry
   // ladder against the away supervisor's own watcher.
   if (awayModeActive(paths)) {
-    setArmStatus("stood-down");
+    enterStandDown();
     return;
   }
+  if (child || retryTimer) return;
   if (!(await sessionOwnsLock(paths))) {
     setArmStatus("failed");
     surfaceFailure(paths, client, sessionID, `watcher: FAILED - OpenCode cannot restore continuity because this session no longer owns the lock\n${reason}`);
@@ -322,7 +332,7 @@ async function scheduleRetry(paths, sessionID, client, reason, predecessorArmPid
     void ensureArm(paths, sessionID, client, predecessorArmPid).then((status) => {
       if (["armed", "starting", "wake"].includes(status)) return;
       if (isStandDownStatus(status)) {
-        setArmStatus("stood-down");
+        enterStandDown();
         return;
       }
       surfaceFailure(paths, client, sessionID, `watcher: FAILED - OpenCode could not launch a continuity retry (${status})`);
@@ -392,8 +402,7 @@ function spawnArm(paths, sessionID, client, predecessorArmPid = "") {
       // Terminal non-failure: away mode owns the cycle. Start no successor,
       // schedule no retry, raise no alarm, and deliver no wake. The watcher
       // still enqueues every wake durably, and the away supervisor triages it.
-      retryFailures = 0;
-      setArmStatus("stood-down");
+      enterStandDown();
       return;
     }
     if (classification.kind === "actionable") {
@@ -406,7 +415,10 @@ function spawnArm(paths, sessionID, client, predecessorArmPid = "") {
       restorationInFlight = restoration;
       void restoration.then((restored) => {
         if (restorationInFlight === restoration) restorationInFlight = null;
-        if (restored.standDown) return undefined;
+        if (restored.standDown) {
+          enterStandDown();
+          return undefined;
+        }
         const message = restored.failure ? `${classification.message}\n\n${restored.failure}` : classification.message;
         return sendPrompt(paths, client, sessionID, wakePrompt(message));
       }).catch(() => {
@@ -444,12 +456,18 @@ async function beginArm(paths, sessionID, client, predecessorArmPid) {
   if (!sessionID) return { status: "skipped", armChild: null };
   // Away mode is reported as its own terminal status rather than folded into
   // the generic not-needed result, so callers can name why they stood down.
-  if (awayModeActive(paths)) return { status: "stood-down", armChild: null };
+  if (awayModeActive(paths)) {
+    enterStandDown();
+    return { status: "stood-down", armChild: null };
+  }
   if (!(await isPrimaryRoot(paths.root, paths.home))) return { status: "not-primary", armChild: null };
   if (!(await sessionOwnsLock(paths))) return { status: "read-only", armChild: null };
   if (child) return { status: "existing", armChild: child };
   if (retryTimer) return { status: "retrying", armChild: null };
-  if (!shouldArm(paths)) return { status: "not-needed", armChild: null };
+  if (!shouldArm(paths)) {
+    enterStandDown();
+    return { status: "not-needed", armChild: null };
+  }
   return { status: "spawned", armChild: spawnArm(paths, sessionID, client, predecessorArmPid) };
 }
 

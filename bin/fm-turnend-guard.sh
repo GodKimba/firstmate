@@ -114,6 +114,14 @@ budget_reset() {
   rm -f "$BUDGET_FILE" 2>/dev/null || true
 }
 
+away_supervisor_owns_handoff() {
+  local pid
+  [ -e "$STATE/.afk" ] || return 1
+  pid=$(cat "$STATE/.supervise-daemon.lock/pid" 2>/dev/null || true)
+  fm_pid_alive "$pid" || return 1
+  fm_pid_lock_matches_pid "$STATE/.supervise-daemon.lock" "$pid"
+}
+
 fm_supervision_status "$STATE" "$GRACE"
 if [ "$CLAUDE_MODE" -eq 1 ]; then
   if [ "$FM_SUP_NEEDED" = false ]; then
@@ -127,6 +135,10 @@ else
   fi
 fi
 if fm_watcher_healthy "$STATE" "$WATCH" "$GRACE" "$FM_HOME"; then
+  budget_reset
+  exit 0
+fi
+if away_supervisor_owns_handoff; then
   budget_reset
   exit 0
 fi

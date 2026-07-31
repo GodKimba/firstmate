@@ -43,6 +43,7 @@ WATCH="$ROOT/bin/fm-watch.sh"
 CHECKPOINT="$ROOT/bin/fm-watch-checkpoint.sh"
 LAUNCH="$ROOT/bin/fm-afk-launch.sh"
 DRAIN="$ROOT/bin/fm-wake-drain.sh"
+TURNEND_GUARD="$ROOT/bin/fm-turnend-guard.sh"
 OPENCODE_PLUGIN="$ROOT/.opencode/plugins/fm-primary-watch-arm.js"
 # Node warns when these test-only dynamic imports load tracked ESM plugins from a
 # checkout with no tracked .opencode/package.json; the assertions require the
@@ -57,6 +58,15 @@ export FM_WATCH_REARM_RETRY_LIMIT=2
 make_home() {
   local home="$TMP_ROOT/$1"
   mkdir -p "$home/state" "$home/data" "$home/config"
+  printf '%s\n' "$home"
+}
+
+make_guard_home() {
+  local home
+  home=$(make_home "$1")
+  mkdir -p "$home/bin"
+  git init -q "$home"
+  : > "$home/AGENTS.md"
   printf '%s\n' "$home"
 }
 
@@ -288,6 +298,63 @@ test_daemon_owned_watcher_still_reads_healthy() {
 
   stop_reaped_bg
   pass "a daemon-owned watcher still reads healthy to every shared liveness check"
+}
+
+test_turnend_guard_accepts_exact_daemon_handoff() {
+  local home lock out status
+  home=$(make_guard_home guard-daemon-handoff)
+  lock="$home/state/.supervise-daemon.lock"
+  : > "$home/state/task.meta"
+  : > "$home/state/.afk"
+  start_reaped_bg sleep 20
+  mkdir -p "$lock"
+  printf '%s\n' "$FM_BG_PID" > "$lock/pid"
+  pid_identity_of "$home" "$FM_BG_PID" > "$lock/pid-identity"
+
+  out=$(printf '%s\n' '{"stop_hook_active":false}' \
+    | FM_ROOT_OVERRIDE="$home" FM_HOME="$home" bash "$TURNEND_GUARD" 2>&1)
+  status=$?
+  expect_code 0 "$status" "an exact live away daemon must own the watcher-start handoff: $out"
+  [ -z "$out" ] || fail "the passive guard alarmed during an exact daemon handoff: $out"
+
+  out=$(printf '%s\n' '{"stop_hook_active":false,"session_id":"afk-handoff"}' \
+    | FM_ROOT_OVERRIDE="$home" FM_HOME="$home" bash "$TURNEND_GUARD" --claude 2>&1)
+  status=$?
+  expect_code 0 "$status" "the Claude guard must accept the same exact daemon handoff: $out"
+  [ -z "$out" ] || fail "the Claude guard alarmed during an exact daemon handoff: $out"
+  assert_absent "$home/state/.turnend-claude-blocks" "the exact daemon handoff consumed Claude's block budget"
+
+  stop_reaped_bg
+  pass "the shared turn-end guard accepts an exact live away-daemon handoff"
+}
+
+test_turnend_guard_rejects_missing_or_ambiguous_daemon() {
+  local home lock out status
+  home=$(make_guard_home guard-ambiguous-daemon)
+  lock="$home/state/.supervise-daemon.lock"
+  : > "$home/state/task.meta"
+  : > "$home/state/.afk"
+  start_reaped_bg sleep 20
+  mkdir -p "$lock"
+  printf '%s\n' "$FM_BG_PID" > "$lock/pid"
+  printf '%s\n' stale-daemon-identity > "$lock/pid-identity"
+
+  out=$(printf '%s\n' '{"stop_hook_active":false}' \
+    | FM_ROOT_OVERRIDE="$home" FM_HOME="$home" bash "$TURNEND_GUARD" 2>&1)
+  status=$?
+  expect_code 2 "$status" "a stale daemon identity must retain the guard alarm"
+  assert_contains "$out" "TURN WOULD END BLIND" "the stale daemon identity did not surface the guard alarm"
+  stop_reaped_bg
+
+  home=$(make_guard_home guard-missing-daemon)
+  : > "$home/state/task.meta"
+  : > "$home/state/.afk"
+  out=$(printf '%s\n' '{"stop_hook_active":false}' \
+    | FM_ROOT_OVERRIDE="$home" FM_HOME="$home" bash "$TURNEND_GUARD" 2>&1)
+  status=$?
+  expect_code 2 "$status" "a missing daemon lock must retain the guard alarm"
+  assert_contains "$out" "TURN WOULD END BLIND" "the missing daemon did not surface the guard alarm"
+  pass "the shared turn-end guard rejects missing and ambiguous away daemons"
 }
 
 test_restart_refuses_to_evict_the_away_supervisors_watcher() {
@@ -534,6 +601,73 @@ EOF
   pass "Pi rechecks away mode at its final wake-delivery boundary"
 }
 
+test_pi_stand_down_clears_retry_state() {
+  local repo home plugin log out status
+  repo="$TMP_ROOT/pi-retry-standdown-root"
+  home=$(make_home pi-retry-standdown)
+  log="$TMP_ROOT/pi-retry-standdown.log"
+  mkdir -p "$repo/bin"
+  install_pi_watch_extension_fixture "$repo"
+  plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  : > "$home/state/task.meta"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'arm=%s\n' "$$" >> "${FM_ARM_LOG:?}"
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" \
+    FM_WATCH_REARM_RETRY_BASE_MS=500 FM_WATCH_REARM_RETRY_MAX_MS=500 \
+    FM_WATCH_REARM_RETRY_LIMIT=1 node --input-type=module 2>&1 <<'EOF'
+import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+let tool = null;
+let injections = 0;
+const pi = {
+  on() {},
+  registerCommand() {},
+  registerTool(candidate) {
+    if (candidate.name === "fm_watch_arm_pi") tool = candidate;
+  },
+  sendUserMessage: async () => {
+    injections += 1;
+  },
+};
+const rows = () => existsSync(process.env.FM_ARM_LOG)
+  ? readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n")
+  : [];
+async function waitForRows(count, message) {
+  for (let i = 0; i < 250; i += 1) {
+    if (rows().length >= count) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(message);
+}
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+await tool.execute("retry-epoch-1", {}, undefined, undefined, {});
+await waitForRows(1, "the first retry epoch did not start");
+await new Promise((resolve) => setTimeout(resolve, 150));
+writeFileSync(`${process.env.FM_HOME}/state/.afk`, "away\n");
+const stoodDown = await tool.execute("retry-standdown", {}, undefined, undefined, {});
+if (stoodDown.details?.stoodDown !== true) throw new Error("the pending retry did not enter stand-down");
+rmSync(`${process.env.FM_HOME}/state/.afk`);
+await new Promise((resolve) => setTimeout(resolve, 600));
+if (rows().length !== 1) throw new Error(`a retry timer survived stand-down: ${rows().join(" | ")}`);
+await tool.execute("retry-epoch-2", {}, undefined, undefined, {});
+await waitForRows(2, "the post-stand-down retry epoch did not start");
+await new Promise((resolve) => setTimeout(resolve, 150));
+if (injections !== 0) throw new Error(`the post-stand-down failure inherited retry exhaustion: ${injections}`);
+EOF
+  )
+  status=$?
+  expect_code 0 "$status" "Pi stand-down must cancel its retry timer and reset its retry count: $out"
+  [ -z "$out" ] || fail "Pi retry-state test printed output: $out"
+  pass "Pi stand-down cancels pending retries and resets retry exhaustion"
+}
+
 # --- OpenCode adapter -------------------------------------------------------
 
 test_opencode_stand_down_is_a_clean_break() {
@@ -691,6 +825,76 @@ EOF
   pass "OpenCode rechecks away mode at its final prompt-delivery boundary"
 }
 
+test_opencode_clean_breaks_clear_retry_state() {
+  local repo home log out status
+  repo="$TMP_ROOT/opencode-retry-standdown-root"
+  home=$(make_home opencode-retry-standdown)
+  log="$TMP_ROOT/opencode-retry-standdown.log"
+  mkdir -p "$repo/bin"
+  git init -q "$repo"
+  : > "$repo/AGENTS.md"
+  : > "$home/state/task.meta"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'arm=%s\n' "$$" >> "${FM_ARM_LOG:?}"
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+
+  out=$(PLUGIN="$OPENCODE_PLUGIN" WORKTREE="$repo" FM_HOME="$home" FM_ARM_LOG="$log" \
+    FM_WATCH_REARM_RETRY_BASE_MS=500 FM_WATCH_REARM_RETRY_MAX_MS=500 \
+    FM_WATCH_REARM_RETRY_LIMIT=1 node 2>&1 <<'EOF'
+import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+let prompts = 0;
+const client = { session: { promptAsync: async () => { prompts += 1; } } };
+const hooks = await mod.FmPrimaryWatchArm({
+  client,
+  directory: process.env.WORKTREE,
+  worktree: process.env.WORKTREE,
+});
+const rows = () => existsSync(process.env.FM_ARM_LOG)
+  ? readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n")
+  : [];
+async function waitForRows(count, message) {
+  for (let i = 0; i < 250; i += 1) {
+    if (rows().length >= count) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(message);
+}
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+await hooks.event({ event: { type: "session.idle", properties: { sessionID: "retry-epoch-1" } } });
+await waitForRows(1, "the first retry epoch did not start");
+await new Promise((resolve) => setTimeout(resolve, 150));
+writeFileSync(`${process.env.FM_HOME}/state/.afk`, "away\n");
+const stoodDown = await globalThis.__firstmateOpenCodeWatchArm.ensureArmed("retry-standdown", client);
+if (stoodDown !== "stood-down") throw new Error(`the pending retry did not enter stand-down: ${stoodDown}`);
+rmSync(`${process.env.FM_HOME}/state/.afk`);
+await new Promise((resolve) => setTimeout(resolve, 600));
+if (rows().length !== 1) throw new Error(`a retry timer survived stand-down: ${rows().join(" | ")}`);
+
+await globalThis.__firstmateOpenCodeWatchArm.ensureArmed("retry-epoch-2", client);
+await waitForRows(2, "the post-stand-down retry epoch did not start");
+await new Promise((resolve) => setTimeout(resolve, 150));
+rmSync(`${process.env.FM_HOME}/state/task.meta`);
+await new Promise((resolve) => setTimeout(resolve, 600));
+if (rows().length !== 2) throw new Error(`a not-needed clean break launched another arm: ${rows().join(" | ")}`);
+
+writeFileSync(`${process.env.FM_HOME}/state/task.meta`, "task\n");
+await globalThis.__firstmateOpenCodeWatchArm.ensureArmed("retry-epoch-3", client);
+await waitForRows(3, "the post-not-needed retry epoch did not start");
+await new Promise((resolve) => setTimeout(resolve, 150));
+if (prompts !== 0) throw new Error(`a clean break inherited retry exhaustion: ${prompts}`);
+EOF
+  )
+  status=$?
+  expect_code 0 "$status" "OpenCode clean breaks must cancel retry timers and reset retry counts: $out"
+  [ -z "$out" ] || fail "OpenCode retry-state test printed output: $out"
+  pass "OpenCode clean breaks cancel pending retries and reset retry exhaustion"
+}
+
 # --- shutdown reconciliation ------------------------------------------------
 
 stop_ticks_with() {
@@ -820,15 +1024,19 @@ test_owner_tag_requires_verified_daemon_parent
 test_owner_environment_requires_verified_daemon
 test_untagged_lock_is_conservative_only_while_away
 test_daemon_owned_watcher_still_reads_healthy
+test_turnend_guard_accepts_exact_daemon_handoff
+test_turnend_guard_rejects_missing_or_ambiguous_daemon
 test_restart_refuses_to_evict_the_away_supervisors_watcher
 test_restart_evicts_an_unverified_tagged_watcher
 test_restart_still_evicts_an_ordinary_watcher
 test_pi_extension_does_not_arm_while_away_mode_is_active
 test_pi_stand_down_is_terminal_not_a_failure
 test_pi_rechecks_away_mode_at_final_delivery
+test_pi_stand_down_clears_retry_state
 test_opencode_stand_down_is_a_clean_break
 test_opencode_not_needed_is_a_clean_break
 test_opencode_rechecks_away_mode_at_final_delivery
+test_opencode_clean_breaks_clear_retry_state
 test_stop_timeout_encodes_the_measured_shutdown_floor
 test_stop_wait_absorbs_a_deferred_shutdown_trap
 test_stop_preserves_state_for_a_genuinely_live_daemon
