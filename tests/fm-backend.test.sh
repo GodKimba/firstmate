@@ -12,7 +12,10 @@
 #      binaries and fixtures as the REFACTORED versions in this checkout, then
 #      diffs the two command logs byte-for-byte - the report's P1 checklist
 #      item "run current main scripts and refactored scripts against the same
-#      fake tools and compare command logs".
+#      fake tools and compare command logs". The teardown old-vs-new case also
+#      overlays a content-historical permissive tmux kill fixture: after the
+#      exact-selector change lands on the default branch, merge-base with main
+#      collapses to HEAD and can no longer supply that baseline.
 #   3. Asserts the `--backend`/`FM_BACKEND` selection refuses unknown backends
 #      and the blocked `codex-app` backend loudly.
 #
@@ -80,6 +83,9 @@ SH
 }
 
 # The commit this branch started from - the P1 "current main" baseline.
+# Suitable for byte-identical old-vs-new checks while a branch still diverges
+# from main. After a squash lands, merge-base(HEAD, main) collapses to HEAD, so
+# callers that need a true pre-change fixture must not rely on this alone.
 resolve_base_ref() {
   local ref base
   for ref in main refs/heads/main origin/main refs/remotes/origin/main origin/HEAD refs/remotes/origin/HEAD; do
@@ -95,6 +101,30 @@ resolve_base_ref() {
 BASE_REF=$(resolve_base_ref) \
   || fail "fm-backend baseline requires local main or origin/main; fetch the default branch before running this test"
 
+# Newest first-parent revision whose bin/backends/tmux.sh still uses the
+# pre-exact permissive kill-window target. Content-addressed from history so the
+# fixture stays historical on default-branch CI and on branches cut after the
+# exact-selector change, where merge-base with main is self-referential.
+resolve_permissive_tmux_kill_ref() {
+  local commit body
+  while IFS= read -r commit; do
+    [ -n "$commit" ] || continue
+    body=$(git -C "$ROOT" show "$commit:bin/backends/tmux.sh" 2>/dev/null) || continue
+    # shellcheck disable=SC2016
+    case "$body" in
+      *'tmux kill-window -t "=$session:=$window"'*) continue ;;
+    esac
+    # shellcheck disable=SC2016
+    case "$body" in
+      *'tmux kill-window -t "$1"'*|*'tmux kill-window -t "$target"'*)
+        printf '%s\n' "$commit"
+        return 0
+        ;;
+    esac
+  done < <(git -C "$ROOT" log --first-parent --format='%H' HEAD -- bin/backends/tmux.sh)
+  return 1
+}
+
 # --- shared: a pre-refactor bin/ shim --------------------------------------
 #
 # build_old_bin echoes a directory whose bin/ subdir holds the PRE-REFACTOR
@@ -108,11 +138,10 @@ BASE_REF=$(resolve_base_ref) \
 # fm-backend.sh (and its bin/backends/ adapters) is the dispatcher every one
 # of the five REFACTORED scripts sources; it must be a real, reachable file in
 # the old bin/ too or `. "$SCRIPT_DIR/fm-backend.sh"` aborts under set -eu -
-# hence it is a copied sibling, not an extracted-from-BASE_REF file: for a
-# tmux-only conformance run the tmux adapter's behavior is what is under test,
-# and that is unchanged by any later (e.g. non-tmux backend) addition to
-# fm-backend.sh's own dispatch surface.
-OLD_BIN_UNCHANGED_SIBLINGS="fm-gate-refuse-lib.sh fm-guard.sh fm-lock-lib.sh fm-tasks-axi-lib.sh fm-pr-lib.sh fm-tangle-lib.sh fm-tmux-lib.sh fm-composer-lib.sh fm-wake-lib.sh fm-classify-lib.sh fm-supervision-lib.sh fm-ff-lib.sh fm-config-inherit-lib.sh fm-project-mode.sh fm-harness.sh fm-crew-state.sh fm-decision-hold.sh fm-backend.sh fm-operational-input.sh"
+# hence the dispatcher is a copied sibling, while the tmux adapter is extracted
+# from BASE_REF so conformance tests retain the exact historical behavior even
+# when this branch changes tmux dispatch semantics.
+OLD_BIN_UNCHANGED_SIBLINGS="fm-gate-refuse-lib.sh fm-guard.sh fm-lock-lib.sh fm-tasks-axi-lib.sh fm-pr-lib.sh fm-tangle-lib.sh fm-tmux-lib.sh fm-composer-lib.sh fm-wake-lib.sh fm-classify-lib.sh fm-supervision-lib.sh fm-ff-lib.sh fm-config-inherit-lib.sh fm-project-mode.sh fm-harness.sh fm-crew-state.sh fm-decision-hold.sh fm-backend.sh fm-operational-input.sh fm-public-followup-lib.sh fm-x-lib.sh"
 # A pull-request merge may add a new main-only dependency that the branch's older baseline does not have yet.
 OLD_BIN_OPTIONAL_SIBLINGS="fm-pending-reply-lib.sh"
 OLD_BIN_REFACTORED="fm-send.sh fm-peek.sh fm-watch.sh fm-spawn.sh fm-teardown.sh fm-marker-lib.sh"
@@ -130,6 +159,7 @@ build_old_bin() {  # <name> -> echoes root dir (root/bin/<script> is the entry p
     cp "$ROOT/bin/$f" "$bin/$f"
   done
   cp -R "$ROOT/bin/backends" "$bin/backends"
+  git -C "$ROOT" show "$BASE_REF:bin/backends/tmux.sh" > "$bin/backends/tmux.sh"
   for f in $OLD_BIN_REFACTORED; do
     git -C "$ROOT" show "$BASE_REF:bin/$f" > "$bin/$f"
     chmod +x "$bin/$f"

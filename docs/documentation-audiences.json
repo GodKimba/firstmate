@@ -160,6 +160,10 @@
       "audience": "agent-runtime"
     },
     {
+      "path": ".agents/skills/quota-array-dispatch/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": ".agents/skills/secondmate-provisioning/SKILL.md",
       "audience": "agent-runtime"
     },
@@ -308,11 +312,23 @@
       "audience": "operator-current"
     },
     {
+      "path": "docs/verification/dispatch-auth.md",
+      "audience": "maintainer-verification"
+    },
+    {
       "path": "docs/verification/pool-account-routing.md",
       "audience": "maintainer-verification"
     },
     {
+      "path": "docs/verification/public-followup.md",
+      "audience": "maintainer-verification"
+    },
+    {
       "path": "docs/verification/runtime-backends.md",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "docs/verification/stow-memory.md",
       "audience": "maintainer-verification"
     },
     {

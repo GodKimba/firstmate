@@ -1,7 +1,16 @@
 // Firstmate primary watcher bridge for Pi.
+//
+// Session-generation ownership (stated once here):
+// Pi emits session_shutdown for ordinary same-process replacements (/new, /resume,
+// /fork, reload) as well as terminal quit. This extension binds one generation per
+// session activation. Only the active live generation may start, stop, rearm, or
+// clear the arm child. Replacement session_start (or a fresh factory bind) activates
+// a new live generation so monitoring can arm again without restarting Pi. Terminal
+// quit leaves the final generation stopped so late callbacks cannot rearm. Stale
+// callbacks from a prior generation are no-ops against the active replacement.
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ExtensionAPI, Theme } from "@earendil-works/pi-coding-agent";
@@ -17,23 +26,13 @@ import { encodeFirstmateOperationalInput } from "./lib/fm-operational-input.ts";
 type ArmResult = {
   ok: boolean;
   message: string;
-  // Away mode owns supervision, so this arm intentionally started nothing. It is
-  // a terminal non-failure: no successor, no retry, no alarm, no wake delivery.
-  stoodDown?: boolean;
 };
 
 type LockOwnership = "owned" | "missing" | "other";
 
-type ArmReadiness = "ready" | "stood-down" | "unready";
-
 type CloseClassification = {
-  kind: "actionable" | "failure" | "stood-down";
+  kind: "actionable" | "failure";
   message: string;
-};
-
-type RestoreResult = {
-  standDown: boolean;
-  failure: string;
 };
 
 type WatchToolShellState = {
@@ -45,6 +44,16 @@ type WatchToolShellState = {
 type WatchToolRenderContext = {
   isError: boolean;
   isPartial: boolean;
+};
+
+type SessionGeneration = {
+  id: number;
+  stopping: boolean;
+  child: ChildProcess | null;
+  retryTimer: ReturnType<typeof setTimeout> | null;
+  retryFailures: number;
+  restoring: boolean;
+  seq: number;
 };
 
 function refreshWatchToolShell(
@@ -79,31 +88,26 @@ const extensionVersion = `sha256:${createHash("sha256").update(readFileSync(exte
 const retryBaseMs = positiveInteger("FM_WATCH_REARM_RETRY_BASE_MS", 250);
 const retryMaxMs = positiveInteger("FM_WATCH_REARM_RETRY_MAX_MS", 4000);
 const retryLimit = positiveInteger("FM_WATCH_REARM_RETRY_LIMIT", 5);
-const armReadyTimeoutMs = positiveInteger("FM_PI_ARM_READY_TIMEOUT_MS", 12000);
+// 35s on Windows so the budget stays above arm's MSYS confirm default (30s in
+// bin/fm-watch-arm.sh): a slow but successful Git Bash cold start must not be
+// SIGTERMed mid-confirmation. Conditioned on win32 so other platforms keep 12s.
+const armReadyTimeoutMs = positiveInteger(
+  "FM_PI_ARM_READY_TIMEOUT_MS",
+  process.platform === "win32" ? 35000 : 12000,
+);
 const armRetireTimeoutMs = positiveInteger("FM_WATCH_ARM_RETIRE_TIMEOUT_MS", 1000);
-const armExitDrainMs = positiveInteger("FM_PI_ARM_EXIT_DRAIN_MS", 50);
 const repairOnlyHint = "call fm_watch_arm_pi again only after a later notification says the cycle is missing, failed, or unhealthy";
+const shuttingDownMessage = "watcher: not armed - Pi session is shutting down";
 
-let child: ChildProcess | null = null;
-let retryTimer: ReturnType<typeof setTimeout> | null = null;
-let retryFailures = 0;
-let stopping = false;
-let seq = 0;
-let restoring = false;
-const armReadiness = new WeakMap<ChildProcess, Promise<ArmReadiness>>();
-const armExit = new WeakMap<ChildProcess, Promise<void>>();
-const restorationRetiredArms = new WeakSet<ChildProcess>();
+let nextGenerationId = 0;
+let activeGeneration: SessionGeneration | null = null;
+const armReadiness = new WeakMap<ChildProcess, Promise<boolean>>();
+const armClose = new WeakMap<ChildProcess, Promise<void>>();
 
 function positiveInteger(name: string, fallback: number): number {
   const value = Number(process.env[name]);
   if (!Number.isFinite(value) || value <= 0) return fallback;
   return Math.floor(value);
-}
-
-function resetRetryState(): void {
-  if (retryTimer) clearTimeout(retryTimer);
-  retryTimer = null;
-  retryFailures = 0;
 }
 
 function parentPid(pid: string): string {
@@ -119,12 +123,6 @@ function pidAlive(pid: string): boolean {
   } catch {
     return false;
   }
-}
-
-function armChildAlive(armChild: ChildProcess): boolean {
-  if (armChild.exitCode !== null || armChild.signalCode !== null) return false;
-  if (!armChild.pid) return false;
-  return pidAlive(String(armChild.pid));
 }
 
 function lockOwnership(): LockOwnership {
@@ -150,12 +148,6 @@ function markLoaded(): void {
   writeFileSync(marker, `${extensionVersion}\n${process.pid}\n`);
 }
 
-// While the away-mode flag exists the away supervisor owns the single watcher
-// cycle as its own child, so this extension owes no continuity at all.
-function awayModeActive(): boolean {
-  return existsSync(`${state}/.afk`);
-}
-
 function actionableLine(output: string): string {
   const lines = output.split(/\r?\n/);
   return lines.find((line) => /^(signal:|stale:|check:|heartbeat($|:))/.test(line)) || "";
@@ -165,11 +157,6 @@ function classifyClose(stdout: string, stderr: string, code: number | null, sign
   const combined = `${stdout}\n${stderr}`.trim();
   const reason = actionableLine(combined);
   if (reason) return { kind: "actionable", message: reason };
-  // A stand-down is checked before every failure shape so an arm that hands
-  // supervision to the away supervisor can never be reclassified as an
-  // unexplained empty cycle and alarmed on.
-  const stoodDown = combined.split(/\r?\n/).find((line) => /^watcher: stood-down\b/.test(line));
-  if (stoodDown) return { kind: "stood-down", message: stoodDown };
   const healthy = combined.split(/\r?\n/).find((line) => /^watcher: healthy\b/.test(line));
   if (healthy) {
     return {
@@ -197,7 +184,43 @@ function classifyClose(stdout: string, stderr: string, code: number | null, sign
   };
 }
 
+function createGeneration(): SessionGeneration {
+  return {
+    id: ++nextGenerationId,
+    stopping: false,
+    child: null,
+    retryTimer: null,
+    retryFailures: 0,
+    restoring: false,
+    seq: 0,
+  };
+}
+
+function activateGeneration(generation: SessionGeneration): void {
+  activeGeneration = generation;
+}
+
+function generationIsLive(generation: SessionGeneration): boolean {
+  return activeGeneration === generation && !generation.stopping;
+}
+
+function stopGeneration(generation: SessionGeneration): void {
+  generation.stopping = true;
+  if (generation.retryTimer) clearTimeout(generation.retryTimer);
+  generation.retryTimer = null;
+  if (generation.child) generation.child.kill("SIGTERM");
+  generation.child = null;
+}
+
+const cleanupOnProcessExit = () => {
+  if (activeGeneration) stopGeneration(activeGeneration);
+};
+process.once("exit", cleanupOnProcessExit);
+
 export default function (pi: ExtensionAPI) {
+  let generation = createGeneration();
+  activateGeneration(generation);
+
   let calmPresentation: CalmPresentationState = {
     active: false,
     stockExportRendering: false,
@@ -214,32 +237,17 @@ export default function (pi: ExtensionAPI) {
     !calmPresentation.stockExportRendering &&
     !calmTranscriptClassIsVisible(itemClass);
 
-  function stopArm(): void {
-    stopping = true;
-    resetRetryState();
-    if (child) child.kill("SIGTERM");
-    child = null;
-  }
-
-  const cleanupOnProcessExit = () => {
-    stopArm();
-  };
-  process.once("exit", cleanupOnProcessExit);
-
-  async function sendWake(message: string): Promise<void> {
+  async function sendWake(owner: SessionGeneration, message: string): Promise<void> {
+    if (!generationIsLive(owner)) return;
     const content = encodeFirstmateOperationalInput(
       "watcher",
       `FIRSTMATE WATCHER WAKE: ${message}\n\nRun bin/fm-wake-drain.sh first and handle the queued wake. Watcher continuity is extension-owned.`,
     );
-    if (awayModeActive()) {
-      resetRetryState();
-      return;
-    }
     await pi.sendUserMessage(content, { deliverAs: "followUp" });
   }
 
-  function surfaceFailure(message: string): void {
-    void sendWake(message).catch(() => {
+  function surfaceFailure(owner: SessionGeneration, message: string): void {
+    void sendWake(owner, message).catch(() => {
       // Pi owns delivery errors; continuity restoration never waits on prompting.
     });
   }
@@ -255,75 +263,45 @@ export default function (pi: ExtensionAPI) {
     });
   }
 
-  function waitForReadiness(armChild: ChildProcess): Promise<ArmReadiness> {
+  function waitForReadiness(armChild: ChildProcess): Promise<boolean> {
     const readiness = armReadiness.get(armChild);
-    if (!readiness) return Promise.resolve("unready");
+    if (!readiness) return Promise.resolve(false);
     return new Promise((resolveReady) => {
-      const timer = setTimeout(() => resolveReady("unready"), armReadyTimeoutMs);
+      const timer = setTimeout(() => resolveReady(false), armReadyTimeoutMs);
       timer.unref();
-      void readiness.then((status) => {
+      void readiness.then((ready) => {
         clearTimeout(timer);
-        resolveReady(status);
+        resolveReady(ready);
       });
     });
   }
 
   async function retireArm(armChild: ChildProcess | null): Promise<boolean> {
     if (!armChild) return true;
-    const exited = armExit.get(armChild);
-    if (!exited) return false;
     armChild.kill("SIGTERM");
+    const closed = armClose.get(armChild);
+    if (!closed) return false;
     return new Promise((resolveRetired) => {
-      let retirementSettled = false;
-      const timer = setTimeout(() => {
-        retirementSettled = true;
-        resolveRetired(false);
-      }, armRetireTimeoutMs);
+      const timer = setTimeout(() => resolveRetired(false), armRetireTimeoutMs);
       timer.unref();
-      void exited.then(() => {
-        if (retirementSettled) return;
-        retirementSettled = true;
+      void closed.then(() => {
         clearTimeout(timer);
-        restorationRetiredArms.add(armChild);
         resolveRetired(true);
       });
     });
   }
 
-  async function restoreAfterActionableClose(predecessorArmPid: string): Promise<RestoreResult> {
+  async function restoreAfterActionableClose(owner: SessionGeneration, predecessorArmPid: string): Promise<string> {
     let failure = "";
     for (let attempt = 0; attempt <= retryLimit; attempt += 1) {
-      if (stopping) return { standDown: false, failure: "" };
-      const replacement = startArm(predecessorArmPid);
-      const successorChild = child;
-      if (replacement.stoodDown) {
-        resetRetryState();
-        return { standDown: true, failure: "" };
-      }
-      const readiness = replacement.ok && successorChild
-        ? await waitForReadiness(successorChild)
-        : "unready";
-      if (readiness === "ready") return { standDown: false, failure: "" };
-      if (readiness === "stood-down") {
-        resetRetryState();
-        return { standDown: true, failure: "" };
-      }
+      if (!generationIsLive(owner)) return "";
+      const replacement = startArm(owner, predecessorArmPid);
+      const successorChild = owner.child;
+      if (replacement.ok && successorChild && await waitForReadiness(successorChild)) return "";
       if (replacement.ok) {
-        // Away mode can start between the check above and the successor's own
-        // check, in which case the successor stands down instead of reporting
-        // readiness. Recognize that as the same terminal non-failure rather than
-        // burning the retry ladder on it.
-        if (awayModeActive()) {
-          resetRetryState();
-          await retireArm(successorChild);
-          return { standDown: true, failure: "" };
-        }
         failure = "watcher: FAILED - Pi extension could not verify a ready successor watcher";
         if (!(await retireArm(successorChild))) {
-          return {
-            standDown: false,
-            failure: `${failure}\nwatcher: FAILED - Pi extension could not restore watcher continuity because the unready successor arm did not exit within ${armRetireTimeoutMs}ms`,
-          };
+          return `${failure}\nwatcher: FAILED - Pi extension could not restore watcher continuity because the unready successor arm did not exit within ${armRetireTimeoutMs}ms`;
         }
       } else {
         failure = /(?:read-only|no live session)/.test(replacement.message)
@@ -334,52 +312,35 @@ export default function (pi: ExtensionAPI) {
       if (attempt === retryLimit) break;
       await waitForRetry(attempt + 1);
     }
-    return {
-      standDown: false,
-      failure: `${failure}\nwatcher: FAILED - Pi extension could not restore watcher continuity after ${retryLimit} retries`,
-    };
+    return `${failure}\nwatcher: FAILED - Pi extension could not restore watcher continuity after ${retryLimit} retries`;
   }
 
-  function scheduleRetry(message: string, predecessorArmPid: string): void {
-    if (stopping) return;
-    // A stand-down ends this extension's continuity obligation, so never open a
-    // retry ladder against the away supervisor's own watcher.
-    if (awayModeActive()) {
-      resetRetryState();
-      return;
-    }
-    if (child || retryTimer) return;
+  function scheduleRetry(owner: SessionGeneration, message: string, predecessorArmPid: string): void {
+    if (!generationIsLive(owner) || owner.child || owner.retryTimer) return;
     const ownership = lockOwnership();
     if (ownership !== "owned") {
-      surfaceFailure(`watcher: FAILED - Pi extension cannot restore continuity because this session no longer owns the lock\n${message}`);
+      surfaceFailure(owner, `watcher: FAILED - Pi extension cannot restore continuity because this session no longer owns the lock\n${message}`);
       return;
     }
-    retryFailures += 1;
-    if (retryFailures > retryLimit) {
-      surfaceFailure(`watcher: FAILED - Pi extension could not restore watcher continuity after ${retryLimit} retries\n${message}`);
+    owner.retryFailures += 1;
+    if (owner.retryFailures > retryLimit) {
+      surfaceFailure(owner, `watcher: FAILED - Pi extension could not restore watcher continuity after ${retryLimit} retries\n${message}`);
       return;
     }
     const timer = setTimeout(() => {
-      if (retryTimer === timer) retryTimer = null;
-      const result = startArm(predecessorArmPid);
+      if (owner.retryTimer === timer) owner.retryTimer = null;
+      if (!generationIsLive(owner)) return;
+      const result = startArm(owner, predecessorArmPid);
       if (!result.ok) {
-        surfaceFailure(`watcher: FAILED - Pi extension could not launch a continuity retry\n${result.message}`);
+        surfaceFailure(owner, `watcher: FAILED - Pi extension could not launch a continuity retry\n${result.message}`);
       }
-    }, retryDelay(retryFailures));
+    }, retryDelay(owner.retryFailures));
     timer.unref();
-    retryTimer = timer;
+    owner.retryTimer = timer;
   }
 
-  function startArm(predecessorArmPid = ""): ArmResult {
-    if (stopping) return { ok: false, message: "watcher: not armed - Pi session is shutting down" };
-    if (awayModeActive()) {
-      resetRetryState();
-      return {
-        ok: true,
-        stoodDown: true,
-        message: "watcher: stood-down - away mode is active; the away supervisor owns the watcher",
-      };
-    }
+  function startArm(owner: SessionGeneration, predecessorArmPid = ""): ArmResult {
+    if (!generationIsLive(owner)) return { ok: false, message: shuttingDownMessage };
     const ownership = lockOwnership();
     if (ownership === "other") return { ok: false, message: "watcher: read-only - session lock is held by another firstmate session" };
     if (ownership === "missing") {
@@ -389,20 +350,19 @@ export default function (pi: ExtensionAPI) {
       };
     }
     markLoaded();
-    if (child && !armChildAlive(child)) child = null;
-    if (child) {
+    if (owner.child) {
       return {
         ok: true,
         message: `watcher: unchanged - Pi extension already owns an arm child; no manual re-arm needed; ${repairOnlyHint}`,
       };
     }
-    if (retryTimer) {
+    if (owner.retryTimer) {
       return {
         ok: true,
         message: `watcher: unchanged - Pi extension already owns a scheduled continuity retry; no manual re-arm needed; ${repairOnlyHint}`,
       };
     }
-    const id = ++seq;
+    const id = ++owner.seq;
     const env = {
       ...process.env,
       FM_HOME: fmHome,
@@ -416,74 +376,33 @@ export default function (pi: ExtensionAPI) {
       env,
       stdio: ["ignore", "pipe", "pipe"],
     });
-    child = armChild;
+    owner.child = armChild;
     let stdout = "";
     let stderr = "";
     let settled = false;
-    let exitDrainTimer: ReturnType<typeof setTimeout> | null = null;
     let readinessSettled = false;
-    let resolveReadiness: (status: ArmReadiness) => void = () => {};
-    let resolveExited: () => void = () => {};
-    const readiness = new Promise<ArmReadiness>((resolveReady) => {
+    let resolveReadiness: (ready: boolean) => void = () => {};
+    let resolveClosed: () => void = () => {};
+    const readiness = new Promise<boolean>((resolveReady) => {
       resolveReadiness = resolveReady;
     });
     armReadiness.set(armChild, readiness);
-    const exited = new Promise<void>((resolveExitedChild) => {
-      resolveExited = resolveExitedChild;
+    const closed = new Promise<void>((resolveClosedChild) => {
+      resolveClosed = resolveClosedChild;
     });
-    armExit.set(armChild, exited);
-    const settleReadiness = (status: ArmReadiness): void => {
+    armClose.set(armChild, closed);
+    const settleReadiness = (ready: boolean): void => {
       if (readinessSettled) return;
       readinessSettled = true;
-      resolveReadiness(status);
+      resolveReadiness(ready);
     };
     const observeEstablishedArm = (): void => {
       if (/^watcher: (?:started|attached)\b/m.test(`${stdout}\n${stderr}`)) {
-        settleReadiness("ready");
+        settleReadiness(true);
       }
     };
     const releaseChild = (): void => {
-      if (child === armChild) child = null;
-    };
-    const settleArm = (code: number | null, signal: NodeJS.Signals | null): void => {
-      if (settled) return;
-      settled = true;
-      if (exitDrainTimer) clearTimeout(exitDrainTimer);
-      exitDrainTimer = null;
-      const classification = classifyClose(stdout, stderr, code, signal);
-      settleReadiness(classification.kind === "stood-down" ? "stood-down" : "unready");
-      releaseChild();
-      if (stopping) return;
-      const predecessor = String(armChild.pid ?? "");
-      if (classification.kind === "stood-down") {
-        // Terminal non-failure: away mode owns the cycle. Start no successor,
-        // schedule no retry, raise no alarm, and deliver no wake. The watcher
-        // still enqueues every wake durably, and the away supervisor triages it.
-        resetRetryState();
-        return;
-      }
-      if (classification.kind === "actionable") {
-        retryFailures = 0;
-        restoring = true;
-        void (async () => {
-          const restored = await restoreAfterActionableClose(predecessor);
-          restoring = false;
-          if (stopping) return;
-          // Delivery is suppressed on a stand-down for the same reason the arm
-          // is: the away supervisor owns wake handling while away mode is on,
-          // and the wake itself is already durable in the queue.
-          if (restored.standDown) {
-            resetRetryState();
-            return;
-          }
-          const message = restored.failure ? `${classification.message}\n\n${restored.failure}` : classification.message;
-          await sendWake(message);
-        })().catch(() => {
-        });
-        return;
-      }
-      if (restorationRetiredArms.has(armChild) || restoring) return;
-      scheduleRetry(classification.message, predecessor);
+      if (owner.child === armChild) owner.child = null;
     };
     armChild.stdout.on("data", (chunk: Buffer) => {
       stdout += chunk.toString();
@@ -493,26 +412,40 @@ export default function (pi: ExtensionAPI) {
       stderr += chunk.toString();
       observeEstablishedArm();
     });
-    armChild.on("exit", (code: number | null, signal: NodeJS.Signals | null) => {
-      resolveExited();
-      if (settled) return;
-      exitDrainTimer = setTimeout(() => settleArm(code, signal), armExitDrainMs);
-    });
     armChild.on("close", (code: number | null, signal: NodeJS.Signals | null) => {
-      settleArm(code, signal);
-    });
-    armChild.on("error", (error: Error) => {
-      if (armChildAlive(armChild)) return;
-      resolveExited();
       if (settled) return;
       settled = true;
-      if (exitDrainTimer) clearTimeout(exitDrainTimer);
-      exitDrainTimer = null;
-      settleReadiness("unready");
+      resolveClosed();
+      settleReadiness(false);
       releaseChild();
-      if (stopping) return;
-      if (restoring) return;
-      scheduleRetry(`watcher: FAILED - Pi extension arm child ${id} failed: ${error.message}`, String(armChild.pid ?? ""));
+      if (!generationIsLive(owner)) return;
+      const classification = classifyClose(stdout, stderr, code, signal);
+      const predecessor = String(armChild.pid ?? "");
+      if (classification.kind === "actionable") {
+        owner.retryFailures = 0;
+        owner.restoring = true;
+        void (async () => {
+          const failure = await restoreAfterActionableClose(owner, predecessor);
+          if (generationIsLive(owner)) owner.restoring = false;
+          if (!generationIsLive(owner)) return;
+          const message = failure ? `${classification.message}\n\n${failure}` : classification.message;
+          await sendWake(owner, message);
+        })().catch(() => {
+        });
+        return;
+      }
+      if (owner.restoring) return;
+      scheduleRetry(owner, classification.message, predecessor);
+    });
+    armChild.on("error", (error: Error) => {
+      if (settled) return;
+      settled = true;
+      resolveClosed();
+      settleReadiness(false);
+      releaseChild();
+      if (!generationIsLive(owner)) return;
+      if (owner.restoring) return;
+      scheduleRetry(owner, `watcher: FAILED - Pi extension arm child ${id} failed: ${error.message}`, String(armChild.pid ?? ""));
     });
     return {
       ok: true,
@@ -521,17 +454,18 @@ export default function (pi: ExtensionAPI) {
   }
 
   pi.on?.("session_start", () => {
+    if (generation.stopping) generation = createGeneration();
+    activateGeneration(generation);
     markLoaded();
   });
   pi.on?.("session_shutdown", () => {
-    stopArm();
-    process.off("exit", cleanupOnProcessExit);
+    stopGeneration(generation);
   });
 
   pi.registerCommand?.("fm-watch-arm-pi", {
     description: "Arm firstmate watcher supervision through the Pi extension instead of foreground bash.",
     handler: async (_args, ctx) => {
-      const result = startArm();
+      const result = startArm(generation);
       ctx.ui.notify(result.message, result.ok ? "info" : "warning");
     },
   });
@@ -572,7 +506,7 @@ export default function (pi: ExtensionAPI) {
       return new Container();
     },
     execute: async () => {
-      const result = startArm();
+      const result = startArm(generation);
       return {
         content: [{ type: "text", text: result.message }],
         details: result,

@@ -17,7 +17,7 @@ That same file is the single owner of the launch identity separating a coordinat
 A non-empty value is the identity, so the explicit empty assignment a secondmate coordinator carries preserves its own primary standing.
 That worker refusal never depends on paths, prompts, lock outcomes, or pane names, which is what keeps these tracked primary adapters inert when the worker's own project is this repository and its checkout is trusted.
 
-Before printing, the wrapper reads `state/.lock` and walks at most eight parents from its own pid, matching `bin/fm-lock.sh` and Pi's `lockOwnership()` ancestry depth.
+Before printing, the wrapper reads `state/.lock` and walks at most eight parents from its own pid in its own separate, hard-coded loop, independent of `bin/fm-lock.sh`'s ancestry walk (`fm_harness_ancestry_pid()` in `bin/fm-session-lock-lib.sh`, which now walks up to sixteen parents and can extend past a claude-named match to a still-more-ancestral one) and of Pi's `lockOwnership()`.
 If the lock names a live pid in that ancestry, session start already ran in this harness session and the wrapper stays silent.
 Every path exits 0, including malformed state and adapter errors, because a Claude SessionStart exit 2 blocks session initialization.
 
@@ -49,7 +49,6 @@ It proves wrapper silence for a stamped crewmate in a primary-shaped checkout, w
 It drives the real Pi `session_start` handler for all three reasons to prove a crewmate never spawns the wrapper while a coordinator spawns it every time.
 It also verifies every tracked transport registration listed above.
 `tests/fm-spawn-dispatch-profile.test.sh` proves the stamping side across harnesses for ship and scout dispatch and the explicit clear for a secondmate launch.
-`tests/fm-captain-translation-contract.test.sh` proves Ahoy's current marker rule, narrow legacy compatibility exclusions, genuine captain-message near misses, and the shared marker on supported user-role operational injections.
 `tests/fm-pi-primary-live-e2e.test.sh` and `tests/fm-opencode-primary-live-e2e.test.sh` exercise native startup paths with first-message and later-message Ahoy regressions.
 `tests/fm-turnend-guard.test.sh`, `tests/fm-pi-watch-extension.test.sh`, and `tests/fm-daemon.test.sh` cover marked guard, monitoring, and away-mode delivery.
 

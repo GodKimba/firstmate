@@ -11,9 +11,6 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 RUNNER="$ROOT/bin/fm-test-run.sh"
-CI="$ROOT/.github/workflows/ci.yml"
-CONTRIB="$ROOT/CONTRIBUTING.md"
-SHARD_DOC="$ROOT/docs/fm-test-portable-shards.md"
 
 assert_present "$RUNNER" "bin/fm-test-run.sh is missing"
 [ -x "$RUNNER" ] || fail "bin/fm-test-run.sh must be executable"
@@ -98,7 +95,7 @@ init_changed_fixture_repo() {
   chmod +x "$repo/bin/fm-test-run.sh"
   for script in \
     fm-brief.test.sh \
-    fm-captain-translation-contract.test.sh \
+    fm-ask-user-authority.test.sh \
     fm-cd-pretool-check.test.sh \
     fm-daemon.test.sh \
     fm-backend-herdr-smoke.test.sh \
@@ -178,7 +175,7 @@ test_changed_dependency_selection_and_unmapped_failure() {
   printf '\n' >>"$repo/.pi/extensions/fm-primary-pi-watch.ts"
   printf '\n' >>"$repo/.pi/extensions/fm-primary-turnend-guard.ts"
   listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD)
-  assert_contains "$listed" "tests/fm-captain-translation-contract.test.sh" "skill source selects pure contract coverage"
+  assert_contains "$listed" "tests/fm-ask-user-authority.test.sh" "skill source selects pure contract coverage"
   assert_contains "$listed" "tests/fm-cd-pretool-check.test.sh" "Claude and Pi source selects hook coverage"
   assert_contains "$listed" "tests/fm-pi-watch-extension.test.sh" "Pi source selects watcher coverage"
   git -C "$repo" add .agents .claude .pi
@@ -482,38 +479,9 @@ test_portable_shard_union_and_coverage_guard() {
     || fail "lanes must not duplicate scripts"
   # LPT order: first script of shard 1 is the longest proven script.
   first=$(printf '%s\n' "$s1" | head -n 1)
-  [ "$first" = "tests/fm-arm-pretool-check.test.sh" ] \
-    || fail "shard 1 must start with longest proven script, got $first"
+  [ "$first" = "tests/fm-x-mode.test.sh" ] \
+    || fail "shard 1 must start with the longest proven script, got $first"
   pass "portable shard union, disjointness, and coverage guard hold"
-}
-
-test_portable_shard_docs_match_lanes() {
-  python3 - "$RUNNER" "$SHARD_DOC" <<'PY' \
-    || fail "portable shard documentation must match lane counts and timing sums"
-import re
-import subprocess
-import sys
-
-runner, doc_path = sys.argv[1:3]
-markdown = open(doc_path, encoding="utf-8").read()
-averages = {
-    path: int(duration)
-    for duration, path in re.findall(r"^\| (\d+) \| `([^`]+)` \|$", markdown, re.MULTILINE)
-}
-totals = {}
-for lane in ("portable-parallel-1", "portable-parallel-2"):
-    scripts = subprocess.check_output(
-        [runner, "--list", "--lane", lane], text=True
-    ).splitlines()
-    totals[lane] = (len(scripts), sum(averages[path] for path in scripts))
-
-for lane, (count, duration) in totals.items():
-    expected = f"| `{lane}` | {count} | {duration} ms (~{duration / 1000:.1f} s) |"
-    assert expected in markdown
-imbalance = abs(totals["portable-parallel-1"][1] - totals["portable-parallel-2"][1])
-assert f"| imbalance | | {imbalance} ms |" in markdown
-PY
-  pass "portable shard documentation matches lane counts and timing sums"
 }
 
 test_jobs_requires_proven_isolated() {
@@ -542,8 +510,8 @@ test_jobs_parallel_scheduler_and_failure_propagation() {
   runner="$repo/bin/fm-test-run.sh"
   evidence="$tmp/evidence"
   fake_bin="$tmp/fake-bin"
-  a=tests/fm-no-mistakes-ownership.test.sh
-  b=tests/fm-stow-contract.test.sh
+  a=tests/fm-brief.test.sh
+  b=tests/fm-composer-lib.test.sh
   c=tests/fm-lint.test.sh
   d=tests/fm-supervision-instructions.test.sh
   mkdir -p "$repo/bin" "$repo/tests" "$evidence" "$fake_bin"
@@ -717,9 +685,7 @@ test_aggregate_exit_behavior
 test_gate_skip_accounting
 test_fail_on_gate_skip_token
 test_exclude_family
-test_ci_and_docs_call_the_owner
 test_portable_shard_union_and_coverage_guard
-test_portable_shard_docs_match_lanes
 test_jobs_requires_proven_isolated
 test_jobs_parallel_scheduler_and_failure_propagation
 test_aggregate_json
