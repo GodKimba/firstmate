@@ -85,6 +85,31 @@ fm_watcher_lock_matches_pid() {
   [ "$current_identity" = "$lock_identity" ]
 }
 
+# Is this home's watcher lock held on behalf of the away supervisor?
+#
+# The away supervisor runs the watcher as its own child and reaps it during
+# shutdown, so evicting that lock from an arm path removes the only live
+# supervision cycle. A lock written by a daemon-started watcher carries the
+# owner tag and answers directly.
+#
+# A lock written before owner tagging carries no tag, and an untagged lock is
+# deliberately NOT assumed ordinary: while away mode is active the daemon is the
+# only legitimate watcher owner in this home, so that evidence decides instead
+# of defaulting to claimable. Outside away mode an untagged lock is an ordinary
+# watcher and stays evictable, which keeps normal --restart recovery working.
+fm_watcher_lock_away_supervised() {
+  local state=$1 lock_owner
+  lock_owner=$(cat "$state/.watch.lock/owner" 2>/dev/null || true)
+  case "$lock_owner" in
+    away-supervisor) return 0 ;;
+    '')
+      if [ -e "$state/.afk" ]; then return 0; fi
+      return 1
+      ;;
+    *) return 1 ;;
+  esac
+}
+
 FM_WATCHER_HEALTHY_PID=
 fm_watcher_healthy() {
   local state=$1 watch_path=$2 grace=${3:-${FM_GUARD_GRACE:-300}} home=${4:-$FM_HOME} lockdir beat pid age
@@ -108,6 +133,7 @@ fm_lock_clean_known_files() {
     "$lockdir/fm-home" \
     "$lockdir/pid-identity" \
     "$lockdir/watcher-path" \
+    "$lockdir/owner" \
     2>/dev/null || true
 }
 

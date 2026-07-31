@@ -96,8 +96,14 @@ async function isPrimaryRoot(root, home) {
   return gitDir.stdout.trim() === commonDir.stdout.trim();
 }
 
+// While the away-mode flag exists the away supervisor owns the single watcher
+// cycle as its own child, so this plugin owes no continuity at all.
+function awayModeActive(paths) {
+  return existsSync(`${paths.state}/.afk`);
+}
+
 function shouldArm(paths) {
-  if (existsSync(`${paths.state}/.afk`)) return false;
+  if (awayModeActive(paths)) return false;
   if (existsSync(`${paths.config}/x-mode.env`)) return true;
   try {
     return readdirSync(paths.state).some((name) => name.endsWith(".meta"));
@@ -129,6 +135,11 @@ function classifyArmClose(stdout, stderr, code, signal) {
   const combined = `${stdout}\n${stderr}`;
   const reason = combined.split(/\r?\n/).find((line) => /^(signal:|stale:|check:|heartbeat($|:))/.test(line));
   if (reason) return { kind: "actionable", message: reason };
+  // A stand-down is checked before every failure shape so an arm that hands
+  // supervision to the away supervisor can never be reclassified as an
+  // unexplained empty cycle and alarmed on.
+  const stoodDown = combined.split(/\r?\n/).find((line) => /^watcher: stood-down\b/.test(line));
+  if (stoodDown) return { kind: "stood-down", message: stoodDown };
   const healthy = combined.split(/\r?\n/).find((line) => /^watcher: healthy\b/.test(line));
   if (healthy) {
     return {
@@ -166,6 +177,11 @@ function observeArmOutput(stdout, stderr, settleReadiness) {
   if (combined.split(/\r?\n/).some((line) => /^watcher: (?:started|attached)\b/.test(line))) {
     setArmStatus("armed");
     settleReadiness("armed");
+    return;
+  }
+  if (combined.split(/\r?\n/).some((line) => /^watcher: stood-down\b/.test(line))) {
+    setArmStatus("stood-down");
+    settleReadiness("stood-down");
     return;
   }
   if (combined.split(/\r?\n/).some((line) => /^watcher: healthy\b/.test(line))) {
@@ -231,29 +247,63 @@ function restorationFailure(status) {
   return `watcher: FAILED - OpenCode could not verify a ready successor watcher (${status || "idle"})`;
 }
 
+// A clean break ends this plugin's continuity obligation without a failure:
+// away mode hands the cycle to the away supervisor, and a home with nothing left
+// to supervise has no cycle to restore. Both also suppress wake delivery,
+// because in neither case is this session the supervisor that should handle it,
+// and the watcher already enqueued the wake durably.
+function isStandDownStatus(status) {
+  return status === "stood-down" || status === "not-needed";
+}
+
 async function restoreAfterActionableClose(paths, sessionID, client, predecessorArmPid) {
   let failure = "";
   for (let attempt = 0; attempt <= REARM_RETRY_LIMIT; attempt += 1) {
     const { status, armChild } = await ensureArm(paths, sessionID, client, predecessorArmPid, true);
-    if (status === "armed") return "";
+    if (status === "armed") return { standDown: false, failure: "" };
     // An actionable line belongs to this arm's close handler.
     // Do not retire it before that handler can start the successor cycle.
-    if (status === "wake") return "";
+    if (status === "wake") return { standDown: false, failure: "" };
+    if (isStandDownStatus(status)) {
+      setArmStatus("stood-down");
+      await retireArm(armChild);
+      return { standDown: true, failure: "" };
+    }
     failure = restorationFailure(status);
     if (!(await retireArm(armChild))) {
       setArmStatus("failed");
-      return `${failure}\nwatcher: FAILED - OpenCode could not restore watcher continuity because the unready successor arm did not exit within ${ARM_RETIRE_TIMEOUT_MS}ms`;
+      return {
+        standDown: false,
+        failure: `${failure}\nwatcher: FAILED - OpenCode could not restore watcher continuity because the unready successor arm did not exit within ${ARM_RETIRE_TIMEOUT_MS}ms`,
+      };
+    }
+    // Away mode can start between the check above and the successor's own
+    // check, in which case the successor stands down instead of reporting
+    // readiness. Recognize that as the same clean break rather than burning the
+    // retry ladder on it.
+    if (awayModeActive(paths)) {
+      setArmStatus("stood-down");
+      return { standDown: true, failure: "" };
     }
     if (status === "read-only" || status === "not-primary" || status === "skipped") break;
     if (attempt === REARM_RETRY_LIMIT) break;
     await waitForRetry(attempt + 1);
   }
   setArmStatus("failed");
-  return `${failure}\nwatcher: FAILED - OpenCode could not restore watcher continuity after ${REARM_RETRY_LIMIT} retries`;
+  return {
+    standDown: false,
+    failure: `${failure}\nwatcher: FAILED - OpenCode could not restore watcher continuity after ${REARM_RETRY_LIMIT} retries`,
+  };
 }
 
 async function scheduleRetry(paths, sessionID, client, reason, predecessorArmPid) {
   if (child || retryTimer) return;
+  // A stand-down ends this plugin's continuity obligation, so never open a retry
+  // ladder against the away supervisor's own watcher.
+  if (awayModeActive(paths)) {
+    setArmStatus("stood-down");
+    return;
+  }
   if (!(await sessionOwnsLock(paths))) {
     setArmStatus("failed");
     surfaceFailure(paths, client, sessionID, `watcher: FAILED - OpenCode cannot restore continuity because this session no longer owns the lock\n${reason}`);
@@ -270,6 +320,10 @@ async function scheduleRetry(paths, sessionID, client, reason, predecessorArmPid
     if (retryTimer === timer) retryTimer = null;
     void ensureArm(paths, sessionID, client, predecessorArmPid).then((status) => {
       if (["armed", "starting", "wake"].includes(status)) return;
+      if (isStandDownStatus(status)) {
+        setArmStatus("stood-down");
+        return;
+      }
       surfaceFailure(paths, client, sessionID, `watcher: FAILED - OpenCode could not launch a continuity retry (${status})`);
     });
   }, retryDelay(retryFailures));
@@ -328,8 +382,19 @@ function spawnArm(paths, sessionID, client, predecessorArmPid = "") {
     resolveClosed();
     releaseChild();
     const classification = classifyArmClose(stdout, stderr, code, signal);
-    settleReadiness(classification.kind === "actionable" ? "wake" : "failed");
+    let readinessStatus = "failed";
+    if (classification.kind === "actionable") readinessStatus = "wake";
+    else if (classification.kind === "stood-down") readinessStatus = "stood-down";
+    settleReadiness(readinessStatus);
     const predecessor = String(armChild.pid ?? "");
+    if (classification.kind === "stood-down") {
+      // Terminal non-failure: away mode owns the cycle. Start no successor,
+      // schedule no retry, raise no alarm, and deliver no wake. The watcher
+      // still enqueues every wake durably, and the away supervisor triages it.
+      retryFailures = 0;
+      setArmStatus("stood-down");
+      return;
+    }
     if (classification.kind === "actionable") {
       retryFailures = 0;
       setArmStatus("wake");
@@ -338,9 +403,10 @@ function spawnArm(paths, sessionID, client, predecessorArmPid = "") {
         ? previousRestoration.catch(() => "").then(() => restoreAfterActionableClose(paths, sessionID, client, predecessor))
         : restoreAfterActionableClose(paths, sessionID, client, predecessor);
       restorationInFlight = restoration;
-      void restoration.then((failure) => {
+      void restoration.then((restored) => {
         if (restorationInFlight === restoration) restorationInFlight = null;
-        const message = failure ? `${classification.message}\n\n${failure}` : classification.message;
+        if (restored.standDown) return undefined;
+        const message = restored.failure ? `${classification.message}\n\n${restored.failure}` : classification.message;
         return sendPrompt(paths, client, sessionID, wakePrompt(message));
       }).catch(() => {
       });
@@ -375,6 +441,9 @@ function spawnArm(paths, sessionID, client, predecessorArmPid = "") {
 
 async function beginArm(paths, sessionID, client, predecessorArmPid) {
   if (!sessionID) return { status: "skipped", armChild: null };
+  // Away mode is reported as its own terminal status rather than folded into
+  // the generic not-needed result, so callers can name why they stood down.
+  if (awayModeActive(paths)) return { status: "stood-down", armChild: null };
   if (!(await isPrimaryRoot(paths.root, paths.home))) return { status: "not-primary", armChild: null };
   if (!(await sessionOwnsLock(paths))) return { status: "read-only", armChild: null };
   if (child) return { status: "existing", armChild: child };

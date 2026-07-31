@@ -132,6 +132,7 @@ family_for_basename() {
     fm-test-run.test.sh|fm-test-isolation-proof.test.sh)
       printf '%s\n' pure-contract-unit
       ;;
+    fm-afk-standdown.test.sh|\
     fm-daemon.test.sh|fm-guard-stale-banner.test.sh|fm-pi-watch-extension.test.sh|\
     fm-supervision-events.test.sh|fm-turnend-guard.test.sh|fm-wake-daemon-lifecycle-e2e.test.sh|\
     fm-wake-queue.test.sh|fm-watch-checkpoint.test.sh|fm-watch-triage.test.sh|\
@@ -658,9 +659,14 @@ families_for_changed_path() {
       printf '%s\n' afk
       printf '%s\n' backend-dispatch
       ;;
+    # The away-mode stand-down contract straddles both sides: the lifecycle
+    # scripts here own the flag and the shutdown wait, while the arm layer, the
+    # adapters and the owner-tagged watcher lock that read them are covered by
+    # the watcher family.
     bin/fm-afk*)
       printf '%s\n' afk
       printf '%s\n' real-herdr-gated
+      printf '%s\n' watcher-wake-lock
       ;;
     bin/fm-supervisor-target-lib.sh)
       printf '%s\n' watcher-wake-lock

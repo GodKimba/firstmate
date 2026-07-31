@@ -156,6 +156,10 @@ repair_line() {
 }
 
 ordinary_wake_line() {
+  if [ "$AFK" -eq 1 ]; then
+    printf '%s\n' '- Ordinary wake: away mode owns supervision; the away supervisor handles the wake and every arm path stands down, so do not arm, re-arm, or checkpoint here.'
+    return 0
+  fi
   case "$HARNESS" in
     claude)
       printf '%s\n' '- Ordinary wake: the Stop-owned auto-arm (bin/fm-claude-stop-autoarm.sh) already owns watcher continuity; drain and handle the wake, and do not arm another cycle yourself.'

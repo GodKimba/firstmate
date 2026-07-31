@@ -676,6 +676,12 @@ WATCHER_PID=${BASHPID:-$$}
 printf '%s\n' "$FM_HOME" > "$WATCH_LOCK/fm-home" || true
 printf '%s\n' "$WATCH_PATH" > "$WATCH_LOCK/watcher-path" || true
 fm_pid_identity "$WATCHER_PID" > "$WATCH_LOCK/pid-identity" 2>/dev/null || true
+# Record who started this cycle so an arm path can tell a daemon-owned watcher
+# from an ordinary one. Only the away supervisor sets FM_WATCH_OWNER; any other
+# value is ignored so an arbitrary caller cannot claim daemon protection.
+if [ "${FM_WATCH_OWNER:-}" = away-supervisor ]; then
+  printf '%s\n' away-supervisor > "$WATCH_LOCK/owner" || true
+fi
 
 [ -e "$STATE/.last-heartbeat" ] || touch "$STATE/.last-heartbeat"
 

@@ -12,6 +12,8 @@ When this session owns supervision and away mode is not active:
 5. `watcher: started ...` or `watcher: attached ...` means a live cycle exists.
    On attach, the background task follows verified identity-matched successors instead of exiting when the first cycle ends.
 6. Failure or missing cycle only: `watcher: FAILED ...` means supervision is down; fix and re-arm.
+   `watcher: stood-down ...` is the opposite: away mode became active and the away supervisor now owns the watcher.
+   Treat it as terminal and correct - do not re-arm, do not retry, do not report a failure - and load `/afk` instead.
 7. After a successful start or attach status, end the turn.
    The background arm remains the live wait until it returns an actionable wake or failure.
 8. Waiting is silent.

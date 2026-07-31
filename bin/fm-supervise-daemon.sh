@@ -1578,6 +1578,11 @@ fm_super_main() {
   migrate_watcher_pause_markers "$STATE"
 
   # --- shutdown: flush buffered escalations, reap child, release lock -------
+  # The child reap is deliberately unbounded. The watcher can be mid-enqueue when
+  # the signal lands, and enqueue-before-suppress is what guarantees no wake is
+  # lost across a restart, so killing it harder to shave seconds off shutdown
+  # would trade a durability invariant for latency. The stop path absorbs the
+  # latency by reconciling instead of by shortening this wait.
   local WATCHER_PID="" CUR_TMP=""
   cleanup() {
     trap - TERM INT
@@ -1619,7 +1624,9 @@ fm_super_main() {
 
   start_watcher() {
     CUR_TMP=$(mktemp "${TMPDIR:-/tmp}/fm-watch.XXXXXX") || { log "error: mktemp failed; retrying in 5s"; sleep 5; return 1; }
-    "$WATCH" >"$CUR_TMP" 2>>"$WATCH_ERR" &
+    # Tag the singleton lock with this owner so an arm path can recognize a
+    # daemon-managed watcher and refuse to evict the only live cycle.
+    FM_WATCH_OWNER=away-supervisor "$WATCH" >"$CUR_TMP" 2>>"$WATCH_ERR" &
     WATCHER_PID=$!
   }
 
