@@ -53,6 +53,35 @@ The file is size-capped through `FM_WATCH_CYCLE_LOG_MAX_BYTES` and `FM_WATCH_CYC
 The default 300-second grace is unchanged.
 Only the watcher process touches `state/.last-watcher-beat`; no helper process can make a wedged watcher appear healthy.
 
+## Away-mode stand-down
+
+While `state/.afk` exists the away supervisor owns the single watcher cycle as its own child, so no continuity adapter owes one.
+Every arm path in this home stands down instead of arming: `bin/fm-watch-arm.sh` prints `watcher: stood-down - <why>` and exits 0 without starting anything, and `bin/fm-watch-checkpoint.sh` prints `checkpoint: stood-down - <why>` and exits 3 without running a watcher.
+Codex uses a distinct code rather than the quiet-checkpoint 124 because a stand-down returns immediately, so a protocol that starts the next checkpoint would spin.
+
+A stand-down is terminal and is not a failure.
+The caller starts no successor, schedules no retry, raises no failure alarm, and delivers no wake.
+Suppressing delivery is deliberate: the away supervisor is the supervisor while away mode is on, the watcher still enqueues every wake to `state/.wake-queue` before advancing its suppression markers, and `bin/fm-afk-return.sh` replays that queue on return.
+
+The gate lives in each adapter's own arm and deliver path, not only in the arm layer.
+An arm-layer gate alone is unsound: an adapter that does not classify the stand-down reclassifies the clean exit as an unexplained empty cycle, burns its retry ladder, and injects a spurious `watcher: FAILED` wake anyway.
+Pi and OpenCode therefore both check the flag before spawning, classify a `stood-down` arm line ahead of every failure shape, and recheck the flag when a successor fails readiness so a flag set mid-cycle is still a clean break rather than a retry.
+OpenCode also treats its pre-existing `not-needed` restoration result as the same clean break because no remaining supervision need justifies a successor or delivery.
+Claude's Stop auto-arm already exits before arming while the flag exists and is unchanged.
+Codex and Grok are model-issued paths with no adapter of their own, so the script-level gate is their protection and their protocols name the stand-down explicitly.
+The shared turn-end guard accepts the watcher-start handoff only when `state/.afk` coincides with an exact live daemon identity; a missing or ambiguous daemon keeps the ordinary blind-turn alarm.
+
+The away supervisor's watcher tags its singleton lock with `owner=away-supervisor` only after its live parent matches the exact identity in this home's daemon lock.
+`bin/fm-watch-arm.sh --restart` honors that tag only when the watcher itself still matches the lock's exact identity, its live parent still matches the recorded owner identity, and that owner still matches the daemon lock.
+This protects the daemon's child during the window where the flag is already cleared but the daemon has not finished reaping it, without letting an environment variable, stale tag, or recycled PID claim protection.
+A lock written before owner tagging carries no tag and is not assumed ordinary: after exact watcher-identity validation, it is treated as daemon-owned while away mode is active and stays evictable outside away mode so normal restart recovery is unchanged.
+
+`bin/fm-afk-launch.sh stop` bounds its shutdown wait with `FM_AFK_STOP_TIMEOUT` (default 45 seconds), derived from the daemon's measured shutdown floor rather than a round number: the deferred TERM trap in the idle branch, the escalation flush's submit-confirm retries, and the watcher child's own poll sleep together put that floor near 30 seconds on a busy home.
+Expiry is not a verdict.
+The stop path then reconciles once by exact process identity: a live PID whose identity no longer matches the one recorded before the signal is a recycled PID, which proves the signalled daemon exited.
+Every other outcome preserves lifecycle state, so an unreadable identity stays ambiguous and a daemon still running under its original identity keeps `state/.afk`, the terminal record, and the catch-up evidence even when its lock is already gone.
+The daemon's own reap stays unbounded on purpose: the watcher can be mid-enqueue when the signal lands, and enqueue-before-suppress is what keeps a wake from being lost across a restart.
+
 ## Regression coverage
 
 `tests/fm-pi-watch-extension.test.sh` checks Pi's first-cycle-or-explicit-repair tool metadata and ownership-based redundant-call no-ops, then simulates actionable and empty arm settlements against the actual Pi and OpenCode handlers, blocks prompt delivery to prove the successor launches first, verifies single-flight behavior, changes the session lock before settlement to prove ownership is rechecked, and hangs each successor arm to prove bounded fallback delivery includes the typed restoration failure.
