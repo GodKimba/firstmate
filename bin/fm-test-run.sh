@@ -733,22 +733,14 @@ families_for_changed_path() {
       # A fixture belongs to whichever suite reads its directory, found by the
       # same reference scan used for shared helpers. Keyed on the directory
       # rather than the file so adding a fixture selects the same suite.
-      # A removed fixture directory has no consuming suite left to select.
       fixture_ref=${path#tests/fixtures/}
       fixture_ref=${fixture_ref%%/*}
-      if [ -d "tests/fixtures/$fixture_ref" ]; then
-        families_for_test_reference "fixtures/$fixture_ref" \
-          || printf '%s\n' "__unmapped__:$path"
-      fi
+      families_for_test_reference "fixtures/$fixture_ref" \
+        || { [ ! -d "tests/fixtures/$fixture_ref" ] || printf '%s\n' "__unmapped__:$path"; }
       ;;
     bin/*)
-      # A deleted script has no consuming suite left to select, the same rule
-      # the fixture case above applies. Refusing on its absent mapping would
-      # make every retirement branch unable to select its changed tests.
-      if [ -e "$path" ]; then
-        families_for_test_reference "$(basename "$path")" \
-          || printf '%s\n' "__unmapped__:$path"
-      fi
+      families_for_test_reference "$(basename "$path")" \
+        || { [ ! -e "$path" ] || printf '%s\n' "__unmapped__:$path"; }
       ;;
     tests/*)
       printf '%s\n' "__unmapped__:$path"

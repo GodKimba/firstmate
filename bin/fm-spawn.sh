@@ -348,7 +348,13 @@ spawn_abort_cleanup() {
             echo "backend=orca"
             echo "orca_worktree_id=$ORCA_WORKTREE_ID"
             [ -z "${ORCA_TERMINAL:-}" ] || echo "terminal=$ORCA_TERMINAL"
-            [ -n "${ORCA_TERMINAL:-}" ] || echo "orca_recovery=worktree-only"
+            if [ -z "${ORCA_TERMINAL:-}" ]; then
+              if [ -n "${WT:-}" ]; then
+                echo "orca_recovery=worktree-only"
+              else
+                echo "orca_recovery=id-only"
+              fi
+            fi
           } > "$STATE/$ID.meta" 2>/dev/null || true
         fi
       fi

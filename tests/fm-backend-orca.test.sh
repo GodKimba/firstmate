@@ -466,6 +466,8 @@ test_spawn_preserves_orca_metadata_when_pathless_worktree_cleanup_fails() {
   assert_grep "backend=orca" "$state/$id.meta" "preserved pathless metadata missing backend=orca"
   assert_grep "orca_worktree_id=wt-pathless-cleanup" "$state/$id.meta" "preserved pathless metadata missing Orca worktree id"
   assert_no_grep "terminal=" "$state/$id.meta" "preserved pathless metadata should not invent a terminal handle"
+  assert_grep "endpoint_task_id=$id" "$state/$id.meta" "preserved pathless metadata missing exact task binding"
+  assert_grep "orca_recovery=id-only" "$state/$id.meta" "preserved pathless metadata missing its id-only recovery marker"
   pass "fm-spawn.sh --backend orca: preserves metadata when pathless cleanup fails"
 }
 
@@ -1181,6 +1183,68 @@ test_teardown_accepts_valid_orca_worktree_only_recovery() {
   pass "fm-teardown.sh backend=orca: validates and removes worktree-only recovery records"
 }
 
+test_teardown_accepts_valid_orca_id_only_recovery_with_force() {
+  local proj data state config id out rc neutral
+  id="orcaidrecoveryz8"
+  proj="$TMP_ROOT/id-recovery-project"
+  data="$TMP_ROOT/id-recovery-data"
+  state="$TMP_ROOT/id-recovery-state"
+  config="$TMP_ROOT/id-recovery-config"
+  fm_git_init_commit "$proj"
+  mkdir -p "$data/$id" "$state" "$config"
+  touch "$state/.last-watcher-beat"
+  fm_write_meta "$state/$id.meta" \
+    "window=fm-$id" "endpoint_task_id=$id" "worktree=" "project=$proj" \
+    "harness=claude" "kind=scout" "mode=no-mistakes" "yolo=off" \
+    "backend=orca" "orca_worktree_id=wt-id-recovery" "orca_recovery=id-only"
+  orca_case id-only-recovery
+  printf '{"ok":true,"result":{}}\n' > "$RESP/1.out"
+  neutral=$(neutral_fm_root "$CASE_DIR/neutral")
+  rc=0
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    FM_ROOT_OVERRIDE="$neutral" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
+    "$ROOT/bin/fm-teardown.sh" "$id" --force 2>&1 ) || rc=$?
+  expect_code 0 "$rc" "validated id-only Orca recovery should teardown successfully with force"$'\n'"$out"
+  assert_not_contains "$(cat "$LOG")" $'orca\x1f''terminal'$'\x1f''close' \
+    "id-only recovery attempted to close an invented terminal"
+  assert_not_contains "$(cat "$LOG")" $'orca\x1f''worktree'$'\x1f''show' \
+    "id-only recovery attempted to resolve an invented worktree path"
+  assert_contains "$(cat "$LOG")" $'orca\x1f''worktree'$'\x1f''rm'$'\x1f''--worktree'$'\x1f''id:wt-id-recovery'$'\x1f''--force'$'\x1f''--json' \
+    "id-only recovery did not remove the exact Orca worktree"
+  assert_absent "$state/$id.meta" "successful id-only recovery retained metadata"
+  pass "fm-teardown.sh backend=orca: forced cleanup accepts exact id-only recovery records"
+}
+
+test_teardown_refuses_inconsistent_orca_id_only_recovery() {
+  local proj wt data state config id out rc neutral
+  id="orcaidbadz9"
+  proj="$TMP_ROOT/id-bad-project"
+  wt="$TMP_ROOT/id-bad-worktree"
+  data="$TMP_ROOT/id-bad-data"
+  state="$TMP_ROOT/id-bad-state"
+  config="$TMP_ROOT/id-bad-config"
+  fm_git_worktree "$proj" "$wt" "fm/$id"
+  mkdir -p "$data/$id" "$state" "$config"
+  touch "$state/.last-watcher-beat"
+  fm_write_meta "$state/$id.meta" \
+    "window=fm-$id" "endpoint_task_id=$id" "worktree=$wt" "project=$proj" \
+    "harness=claude" "kind=scout" "mode=no-mistakes" "yolo=off" \
+    "backend=orca" "orca_worktree_id=wt-id-bad" "orca_recovery=id-only"
+  orca_case inconsistent-id-only-recovery
+  neutral=$(neutral_fm_root "$CASE_DIR/neutral")
+  set +e
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    FM_ROOT_OVERRIDE="$neutral" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
+    "$ROOT/bin/fm-teardown.sh" "$id" --force 2>&1 )
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "Orca teardown accepted id-only recovery metadata with a worktree path"
+  assert_contains "$out" "malformed or inconsistent" "id-only recovery mismatch refusal was not actionable"
+  [ ! -s "$LOG" ] || fail "inconsistent id-only recovery dispatched to Orca before validation"
+  assert_present "$state/$id.meta" "inconsistent id-only recovery removed task metadata"
+  pass "fm-teardown.sh backend=orca: id-only recovery rejects invented path identity"
+}
+
 test_secondmate_force_teardown_removes_orca_child_via_orca() {
   local home subhome childproj childwt child_id neutral out rc
   home="$TMP_ROOT/orca-child-parent"
@@ -1360,6 +1424,8 @@ test_ship_teardown_refuses_orca_id_path_mismatch
 test_teardown_refuses_orca_missing_worktree_id
 test_teardown_refuses_orca_worktree_without_terminal_handle
 test_teardown_accepts_valid_orca_worktree_only_recovery
+test_teardown_accepts_valid_orca_id_only_recovery_with_force
+test_teardown_refuses_inconsistent_orca_id_only_recovery
 test_secondmate_force_teardown_removes_orca_child_via_orca
 test_secondmate_force_teardown_refuses_orca_child_id_path_mismatch
 test_secondmate_force_teardown_refuses_partial_orca_child

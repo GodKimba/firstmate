@@ -118,15 +118,21 @@ init_changed_fixture_repo() {
   : >"$repo/bin/fm-classify-lib.sh"
   : >"$repo/bin/fm-supervisor-target-lib.sh"
   : >"$repo/bin/unmapped-source.sh"
+  : >"$repo/bin/retired-referenced.sh"
+  : >"$repo/bin/retired-unreferenced.sh"
   printf '# .claude/settings.json\n# .pi/extensions/fm-primary-turnend-guard.ts\n' \
     >>"$repo/tests/fm-cd-pretool-check.test.sh"
   printf '# .pi/extensions/fm-primary-pi-watch.ts\n' >>"$repo/tests/fm-pi-watch-extension.test.sh"
-  mkdir -p "$repo/.agents/skills/example" "$repo/.claude" "$repo/.pi/extensions" "$repo/src"
+  printf '# retired-referenced.sh\n# tests/fixtures/retired-referenced\n' >>"$repo/tests/fm-brief.test.sh"
+  mkdir -p "$repo/.agents/skills/example" "$repo/.claude" "$repo/.pi/extensions" "$repo/src" \
+    "$repo/tests/fixtures/retired-referenced" "$repo/tests/fixtures/retired-unreferenced"
   : >"$repo/.agents/skills/example/SKILL.md"
   : >"$repo/.claude/settings.json"
   : >"$repo/.pi/extensions/fm-primary-pi-watch.ts"
   : >"$repo/.pi/extensions/fm-primary-turnend-guard.ts"
   : >"$repo/src/unmapped.ts"
+  : >"$repo/tests/fixtures/retired-referenced/data.json"
+  : >"$repo/tests/fixtures/retired-unreferenced/data.json"
   git -C "$repo" init -q
   git -C "$repo" add .
   git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm baseline
@@ -191,6 +197,25 @@ test_changed_dependency_selection_and_unmapped_failure() {
     || fail "unmapped changed source failure is not actionable: $(cat "$tmp/err")"
   rm -rf "$tmp"
   pass "changed selection covers dependents and fails closed for unmapped source"
+}
+
+test_changed_deletion_selection_scans_surviving_tests() {
+  local tmp repo listed
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-deleted.XXXXXX")
+  repo="$tmp/repo"
+  init_changed_fixture_repo "$repo"
+
+  git -C "$repo" rm -q bin/retired-referenced.sh tests/fixtures/retired-referenced/data.json
+  listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD)
+  assert_contains "$listed" "tests/fm-brief.test.sh" "deleted referenced source and fixture select surviving consumers"
+  git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm referenced-retirement
+
+  git -C "$repo" rm -q bin/retired-unreferenced.sh tests/fixtures/retired-unreferenced/data.json
+  listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD)
+  [ -z "$listed" ] || fail "unreferenced source and fixture retirements selected tests: $listed"
+
+  rm -rf "$tmp"
+  pass "changed deletion selection keeps referenced coverage and ignores unreferenced retirements"
 }
 
 test_empty_selection_emits_summary() {
@@ -679,6 +704,7 @@ test_family_selection
 test_single_script_selection
 test_changed_file_selection_is_conservative
 test_changed_dependency_selection_and_unmapped_failure
+test_changed_deletion_selection_scans_surviving_tests
 test_empty_selection_emits_summary
 test_timing_markers_and_json
 test_aggregate_exit_behavior

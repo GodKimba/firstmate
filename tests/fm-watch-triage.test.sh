@@ -1329,6 +1329,40 @@ test_fresh_busy_transition_outranks_old_turn_end_age() {
   pass "a fresh semantic busy transition resets the busy-duration age"
 }
 
+test_recordless_native_busy_does_not_inherit_old_turn_end_age() {
+  local dir state fakebin out capture_file window key sig pid
+  dir=$(make_case recordless-native-busy); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="lab:w1:p2"
+  printf 'Working...' > "$capture_file"
+  cat > "$fakebin/herdr" <<'SH'
+#!/usr/bin/env bash
+case " $* " in
+  *" status --json "*) printf '{"server":{"running":true},"client":{"protocol":16}}\n' ;;
+  *" pane read "*) cat "${FM_FAKE_HERDR_CAPTURE:?}" ;;
+  *" agent get "*) printf '{"result":{"agent":{"agent_status":"working"}}}\n' ;;
+  *) exit 1 ;;
+esac
+SH
+  chmod +x "$fakebin/herdr"
+  printf 'window=%s\nkind=ship\nharness=grok\nbackend=herdr\n' "$window" > "$state/native-busy.meta"
+  set_mtime $(( $(date +%s) - 4000 )) "$state/native-busy.turn-ended"
+  prime_turnend_seen "$state/native-busy.turn-ended"
+  printf 'working: fresh native turn\n' > "$state/native-busy.status"
+  sig=$(seen_sig "$state/native-busy.status"); printf '%s' "$sig" > "$state/.seen-native-busy_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+
+  PATH="$fakebin:$PATH" FM_FAKE_HERDR_CAPTURE="$capture_file" FM_BACKEND_HERDR_EVENTS_FORCE=0 \
+    FM_STATE_OVERRIDE="$state" FM_BUSY_TURN_MAX_SECS=1 FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_live "$pid" 30; then
+    reap "$pid"; fail "recordless native busy surfaced from an old completed turn: $(cat "$out")"
+  fi
+  [ ! -e "$state/.stale-since-$key" ] || fail "recordless native busy inherited the previous completed-turn age"
+  reap "$pid"
+  pass "recordless native busy waits for a valid busy-interval start before duration escalation"
+}
+
 test_busy_pane_stable_hash_escalates_past_turn_age_bound() {
   local dir state fakebin out capture_file window key pane_hash sig pid
   dir=$(make_case busy-stable-hash-turn-age); state="$dir/state"; fakebin="$dir/fakebin"
@@ -1963,6 +1997,7 @@ test_wedge_escalation_marks_demand_deep_inspection_after_threshold
 test_wedge_escalation_resets_when_pane_becomes_active
 test_busy_pane_below_turn_age_bound_is_absorbed
 test_fresh_busy_transition_outranks_old_turn_end_age
+test_recordless_native_busy_does_not_inherit_old_turn_end_age
 test_busy_pane_stable_hash_escalates_past_turn_age_bound
 test_busy_pane_changing_hash_escalates_past_turn_age_bound
 test_busy_pane_turn_end_touch_resets_age
