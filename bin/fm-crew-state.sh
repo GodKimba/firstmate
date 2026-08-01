@@ -9,7 +9,7 @@
 # re-validates), the log's last line stays stale. This helper never infers the
 # current state from a tail of the log: it reads the authoritative source (a
 # no-mistakes run-step attributed to this crew's branch and current code
-# identity, else the pane busy-signature) and reconciles the possibly-stale log
+# identity, else the per-task semantic busy-state contract) and reconciles the possibly-stale log
 # against it.
 #
 # The determinism lives entirely here - only run-step / pane / log reads plus
@@ -50,9 +50,11 @@
 #      is flagged superseded. A genuinely parked run plus a needs-decision log
 #      agree, and are reported as parked.
 #   4. No run for this crew (pre-validation, or kind=scout): fall back to the
-#      recorded backend's pane busy state, then the status log's last line only
-#      when its verb maps to a recognized run-state. Decision-only events such as
-#      `resolved` never become current state or detail.
+#      per-task semantic busy state. Exact busy reports working; exact idle
+#      permits the ordinary recognized status-log fallback. Unknown state
+#      preserves only a corroborated green-ready report or a durable
+#      needs-decision/blocked/paused event; every other log event stays unknown.
+#      Decision-only events such as `resolved` never become current state or detail.
 #   5. Missing meta or torn-down worktree: report unknown · none. If no run is
 #      attributed to this crew, a dead endpoint also reports unknown · none rather
 #      than trusting a stale status log.
@@ -780,9 +782,10 @@ fi
 
 # Secondmates idle on their own watcher (idle pane = healthy), so the busy
 # state is not meaningful for them; read their state from the status log only.
-# Only an exact busy verdict reports working here, and only an exact idle
-# verdict permits the status-log fallback below. Missing, malformed, stale, or
-# unverified semantic state remains unknown.
+# An exact busy verdict already reported working above, and exact idle permits
+# the ordinary status-log fallback below. Missing, malformed, stale, or
+# unverified semantic state remains unknown except for the corroborated
+# green-ready path above and the durable captain-actionable states below.
 if [ "$KIND" != secondmate ]; then
   case "${BUSY_VERDICT%% *}" in
     idle) ;;

@@ -75,7 +75,8 @@ Scout promotion creates and records the exact ship branch before handing the pre
 A new tmux task additionally records `tmux_window_id=` so teardown can close and confirm the stable exact window; legacy metadata without that field uses exact session and window-name targeting.
 A herdr task additionally records `herdr_session=`, `herdr_workspace_id=`, `herdr_tab_id=`, and `herdr_pane_id=`.
 A zellij task additionally records `zellij_session=`, `zellij_tab_id=`, and `zellij_pane_id=`.
-An Orca task additionally records `orca_worktree_id=` and `terminal=`, with `window=fm-<id>` kept as the shared firstmate alias; a failed spawn that created no terminal but could not remove its worktree records `orca_recovery=worktree-only` instead of `terminal=`.
+A successfully spawned Orca task additionally records `orca_worktree_id=` and `terminal=`, with `window=fm-<id>` kept as the shared firstmate alias.
+A failed spawn that created no terminal and could not remove its worktree omits `terminal=` and records `orca_recovery=worktree-only` when the absolute worktree path is known, or `orca_recovery=id-only` with an empty `worktree=` when Orca returned only the worktree id.
 A cmux task additionally records `cmux_workspace_id=` and `cmux_surface_id=`.
 Task selectors for `fm-peek.sh`, `fm-send.sh`, and `fm-crew-state.sh` resolve centrally through `fm_backend_resolve_selector`.
 A selector containing `:` is passed through as an explicit backend endpoint escape hatch.

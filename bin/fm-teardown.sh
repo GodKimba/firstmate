@@ -37,9 +37,11 @@
 # device. It refuses and preserves task state when that proof fails; otherwise
 # it removes the task's check, trust record, PR sidecar, publication record, and
 # quarantine entries with the rest of the volatile state.
-# Orca tasks use the same safety checks, then close the recorded terminal and
-# remove the recorded worktree through `orca worktree rm`; teardown never guesses
-# an Orca target from ambient CLI state.
+# Orca tasks use the same safety checks and metadata-only endpoint validation,
+# close the recorded terminal when one exists, and remove only the recorded
+# worktree id through `orca worktree rm`. Valid failed-spawn recovery records may
+# intentionally omit the terminal or absolute worktree path; teardown never
+# guesses either value from ambient CLI state.
 # A Herdr presentation journal never authorizes cleanup. Teardown still closes
 # only the exact task pane from ordinary endpoint metadata and never calls
 # `workspace close`. It retires the non-authoritative journal only when a
