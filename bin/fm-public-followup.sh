@@ -57,9 +57,9 @@
 #   fm-public-followup.sh deliver <obligation-id> [--text-file <path>]
 #       Post the final public reply into the ORIGINAL thread and close the
 #       obligation. Uses the stored platform and opaque context binding, so the
-#       destination is never guessed. Without --text-file the accepted terminal
-#       event's bounded public-safe outcome is reused exactly, which keeps the
-#       common path deterministic. The sequence is begin-delivery with the
+#       destination is never guessed. Without --text-file every accepted
+#       terminal event's bounded public-safe outcome is joined in stable
+#       relation/event order. The sequence is begin-delivery with the
 #       payload hash, post, then record the posted receipt or a typed error.
 #       A validated receipt also clears any bound legacy X link before the
 #       registration is removed.
@@ -111,6 +111,12 @@ usage() {
 help() { sed -n '2,/^set -u$/p' "$0" | sed '$d; s/^# \{0,1\}//'; }
 
 die() { printf 'fm-public-followup: %s\n' "$1" >&2; exit "${2:-2}"; }
+
+shell_quote() {
+  printf "'"
+  printf '%s' "$1" | sed "s/'/'\\\\''/g"
+  printf "'"
+}
 
 PF_TEMP_FILES=()
 pf_cleanup_temp_files() {
@@ -250,7 +256,7 @@ cmd_register() {
 # --- subcommand: brief ------------------------------------------------------
 
 cmd_brief() {
-  local id=${1:-} relation='' work_home work_id generation relations relation_count
+  local id=${1:-} relation='' work_home work_id generation relations relation_count emit_command home_q
   [ -n "$id" ] || { usage; exit 2; }
   shift
   while [ "$#" -gt 0 ]; do
@@ -278,13 +284,15 @@ cmd_brief() {
   work_home=$(fm_pf_registry_get "$STATE" "$id" "$relation" work_home)
   work_id=$(fm_pf_registry_get "$STATE" "$id" "$relation" work_id)
   generation=$(fm_pf_registry_get "$STATE" "$id" "$relation" generation)
+  emit_command=$(shell_quote "$FM_ROOT/bin/fm-public-followup-emit.sh")
+  home_q=$(shell_quote "$FM_HOME")
 
   cat <<EOF
 When this work reaches its promised terminal outcome, report it as typed data
 (never as a sentence for someone to parse) by running exactly:
 
-  $FM_ROOT/bin/fm-public-followup-emit.sh \\
-    --home $FM_HOME \\
+  $emit_command \\
+    --home $home_q \\
     --obligation $id \\
     --relation $relation \\
     --source-home $work_home \\
@@ -725,12 +733,12 @@ cmd_deliver() {
     [ -f "$text_file" ] || die "reply text file not found: $text_file"
     text=$(cat "$text_file")
   else
-    # Deterministic default: reuse the accepted terminal event's bounded
-    # public-safe outcome exactly rather than paraphrasing a landed result.
+    # Deterministic default: reuse accepted terminal events' bounded public-safe
+    # outcomes exactly rather than paraphrasing landed results.
     text=$(printf '%s' "$payload" | jq -r '
       [(.public_followup.work_relations // [])[]
         | (.accepted_events // [])[]
-        | .public_safe_outcome // empty] | last // empty' 2>/dev/null)
+        | .public_safe_outcome // empty] | join("\n")' 2>/dev/null)
     [ -n "$text" ] \
       || die "obligation '$id' carries no accepted public-safe outcome to reuse; pass --text-file with the reply you composed" 1
   fi

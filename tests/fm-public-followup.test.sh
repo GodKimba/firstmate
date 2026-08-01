@@ -268,8 +268,8 @@ test_registration_rejects_mismatched_generation() {
 }
 
 test_multiple_relation_registrations_remain_independent() {
-  local home log brief_a brief_b
-  home=$(make_home multiple-relations)
+  local home log brief_a brief_b root_alias default_text override_text override_file
+  home=$(make_home 'multiple relations')
   log="$home/curl.log"; : > "$log"
   seed_commitment "$home" pf-multi req-multi x main work-a
   bind_relation "$home" pf-multi rel-doc main work-b 1
@@ -282,29 +282,63 @@ test_multiple_relation_registrations_remain_independent() {
     run_pf "$home" brief pf-multi
   assert_contains "$EXPECT_OUT" "multiple registered relations" \
     "ambiguous brief did not require a relation"
-  brief_a=$(run_pf "$home" brief pf-multi --relation rel-code)
+  root_alias="$TMP_ROOT/First Mate Root"
+  ln -s "$ROOT" "$root_alias"
+  brief_a=$(PATH="$home/fakebin:$PATH" FM_ROOT_OVERRIDE="$root_alias" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" "$PF" brief pf-multi --relation rel-code)
   brief_b=$(run_pf "$home" brief pf-multi --relation rel-doc)
   assert_contains "$brief_a" "--work-id work-a" "relation A brief used the wrong work binding"
   assert_contains "$brief_b" "--work-id work-b" "relation B brief used the wrong work binding"
+  assert_contains "$brief_a" "'$root_alias/bin/fm-public-followup-emit.sh' \\" \
+    "the generated reporting command did not shell-quote FM_ROOT"
+  assert_contains "$brief_a" "--home '$home' \\" \
+    "the generated reporting command did not shell-quote FM_HOME"
 
   fm_write_meta "$home/state/work-a.meta" \
     "x_request=req-multi" "x_request_ts=1700000000" "x_followups=1"
   fm_write_meta "$home/state/work-b.meta" \
     "x_request=req-multi" "x_request_ts=1700000000" "x_followups=1"
-  emit_terminal "$home" "$home" pf-multi main work-a >/dev/null || fail "relation A emit failed"
   "$EMIT" --home "$home" --obligation pf-multi --relation rel-doc \
     --source-home main --work-id work-b --generation 1 --outcome pr-merged \
     --deliverable pr_url=https://github.com/example/repo/pull/8 \
     --outcome-text 'Documentation work completed.' >/dev/null || fail "relation B emit failed"
+  emit_terminal "$home" "$home" pf-multi main work-a >/dev/null || fail "relation A emit failed"
   run_pf "$home" consume >/dev/null || fail "multi-relation consume failed"
   FAKE_CURL_LOG="$log" run_pf "$home" deliver pf-multi >/dev/null \
     || fail "multi-relation delivery failed"
+  default_text=$(sed -n 's/^data=//p' "$log" | jq -sr '.[-1].text') \
+    || fail "could not read the multi-relation reply payload"
+  [ "$default_text" = $'Fixed: workers now land in the launching workspace even when two spaces share a name.\nDocumentation work completed.' ] \
+    || fail "default delivery did not combine outcomes in stable relation/event order: '$default_text'"
   assert_no_grep '^x_request=' "$home/state/work-a.meta" \
     "delivery did not clear relation A's legacy link"
   assert_no_grep '^x_request=' "$home/state/work-b.meta" \
     "delivery did not clear relation B's legacy link"
   assert_absent "$home/state/public-followup/registry/pf-multi" \
     "delivered obligation retained relation registrations"
+
+  seed_commitment "$home" pf-override req-override discord main work-c
+  bind_relation "$home" pf-override rel-doc main work-d 1
+  fm_write_meta "$home/state/work-c.meta" \
+    "x_request=req-override" "x_request_ts=1700000000" "x_followups=1"
+  fm_write_meta "$home/state/work-d.meta" \
+    "x_request=req-override" "x_request_ts=1700000000" "x_followups=1"
+  emit_terminal "$home" "$home" pf-override main work-c >/dev/null || fail "override relation A emit failed"
+  "$EMIT" --home "$home" --obligation pf-override --relation rel-doc \
+    --source-home main --work-id work-d --generation 1 --outcome pr-merged \
+    --deliverable pr_url=https://github.com/example/repo/pull/9 \
+    --outcome-text 'This default outcome must be overridden.' >/dev/null \
+    || fail "override relation B emit failed"
+  run_pf "$home" consume >/dev/null || fail "override consume failed"
+  override_file="$home/explicit reply.txt"
+  printf 'Captain-approved explicit summary.' > "$override_file"
+  : > "$log"
+  FAKE_CURL_LOG="$log" run_pf "$home" deliver pf-override --text-file "$override_file" >/dev/null \
+    || fail "explicit multi-relation delivery failed"
+  override_text=$(sed -n 's/^data=//p' "$log" | jq -sr '.[-1].text') \
+    || fail "could not read the explicit reply payload"
+  [ "$override_text" = 'Captain-approved explicit summary.' ] \
+    || fail "--text-file did not override combined outcomes: '$override_text'"
   pass "multiple work relations retain independent bindings through delivery cleanup"
 }
 
