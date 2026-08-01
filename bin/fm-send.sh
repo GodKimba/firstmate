@@ -424,6 +424,7 @@ fm_send_recover_claude_vim() {
     echo "error: Claude Vim recovery sent two targeted Escapes without fresh Interrupted proof; composer remains '$initial' and no Enter was sent" >&2
     return 1
   }
+  fm_send_record_interrupt Escape || return 1
 
   if [ "$initial" = pending ]; then
     retries=${FM_SEND_RETRIES:-3}

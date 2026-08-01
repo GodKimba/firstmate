@@ -54,8 +54,8 @@
 # SAFETY: the event is published through the shared private-artifact primitive -
 # atomic rename into place, single link, mode 0600 (never executable), inside a
 # 0700 directory this script refuses to create. The owning home must already have
-# registered the obligation, so a home that never opted into the relay can never
-# be given public-followup artifacts by a child.
+# registered the exact obligation and relation, so a home that never opted into
+# the relay can never be given public-followup artifacts by a child.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -166,14 +166,20 @@ esac
 [ -d "$HOME_DIR" ] && [ ! -L "$HOME_DIR" ] \
   || die "--home must name an existing directory, got '$HOME_DIR'"
 
-fm_pf_relay_active "$HOME_DIR" || exit 0
-command -v jq >/dev/null 2>&1 || die "jq is required to build a typed terminal event" 1
-
 STATE="$HOME_DIR/state"
-REGISTRY="$(fm_pf_registry_dir "$STATE")/$OBLIGATION"
-if [ ! -f "$REGISTRY" ] || [ -L "$REGISTRY" ]; then
-  die "home '$HOME_DIR' has no public-followup registration for '$OBLIGATION'; the owning home registers a commitment before its work can report one" 1
+REGISTRY_DIR=$(fm_pf_registry_obligation_dir "$STATE" "$OBLIGATION") \
+  || die "could not resolve the public-followup registration directory" 1
+REGISTRY=$(fm_pf_registry_file "$STATE" "$OBLIGATION" "$RELATION") \
+  || die "could not resolve the public-followup registration path" 1
+if [ ! -d "$REGISTRY_DIR" ] || [ -L "$REGISTRY_DIR" ] \
+    || [ ! -f "$REGISTRY" ] || [ -L "$REGISTRY" ]; then
+  if ! fm_pf_has_registrations "$STATE" && ! fm_pf_has_events "$STATE" \
+      && ! fm_pf_relay_active "$HOME_DIR"; then
+    exit 0
+  fi
+  die "home '$HOME_DIR' has no public-followup registration for '$OBLIGATION' relation '$RELATION'; the owning home registers a commitment before its work can report one" 1
 fi
+command -v jq >/dev/null 2>&1 || die "jq is required to build a typed terminal event" 1
 
 # The registration is the owning home's own record of what it bound, so checking
 # the identity tuple against it catches a mis-briefed worker at the edge with a
@@ -184,10 +190,10 @@ reg_mismatch() {
   [ -z "$expected" ] || [ "$expected" = "$got" ] \
     || die "event $field '$got' does not match this home's registration ('$expected')"
 }
-reg_mismatch relation   "$(fm_pf_registry_get "$STATE" "$OBLIGATION" relation_id)" "$RELATION"
-reg_mismatch source-home "$(fm_pf_registry_get "$STATE" "$OBLIGATION" work_home)"  "$SOURCE_HOME"
-reg_mismatch work-id    "$(fm_pf_registry_get "$STATE" "$OBLIGATION" work_id)"     "$WORK_ID"
-reg_mismatch generation "$(fm_pf_registry_get "$STATE" "$OBLIGATION" generation)"  "$GENERATION"
+reg_mismatch relation   "$(fm_pf_registry_get "$STATE" "$OBLIGATION" "$RELATION" relation_id)" "$RELATION"
+reg_mismatch source-home "$(fm_pf_registry_get "$STATE" "$OBLIGATION" "$RELATION" work_home)"  "$SOURCE_HOME"
+reg_mismatch work-id    "$(fm_pf_registry_get "$STATE" "$OBLIGATION" "$RELATION" work_id)"     "$WORK_ID"
+reg_mismatch generation "$(fm_pf_registry_get "$STATE" "$OBLIGATION" "$RELATION" generation)"  "$GENERATION"
 
 case "$TEXT_MODE" in
   inline) OUTCOME_TEXT=$(printf '%s' "$TEXT_SOURCE" | fm_pf_clean_outcome_text) ;;

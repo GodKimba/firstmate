@@ -769,6 +769,25 @@ test_no_run_direct_pr_mode_keeps_its_ready_signal() {
   pass "no-run direct-PR keeps its ready signal and makes no forge call"
 }
 
+test_no_run_current_busy_supersedes_old_ready_signal() {
+  reset_fakes
+  local d gen out; d=$(new_case no-run-busy-after-ready)
+  make_repo_on_branch "$d/wt" fm/feat-norunbusyready
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-norunbusyready.meta" \
+    "window=fm:fm-feat-norunbusyready" "worktree=$d/wt" "kind=ship" \
+    "mode=direct-PR" "harness=claude"
+  printf 'done: PR https://github.com/o/r/pull/5 checks green\n' > "$d/state/feat-norunbusyready.status"
+  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$d/state" feat-norunbusyready)
+  "$ROOT/bin/fm-busy-event.sh" apply "$d/state" feat-norunbusyready busy --gen "$gen" \
+    --source claude-hook --event user-prompt-submit
+  out=$(run_crew_state "$d" feat-norunbusyready)
+  assert_contains "$out" "state: working" "current semantic busy state -> working"
+  assert_contains "$out" "source: pane" "current semantic busy state remains the source"
+  assert_not_contains "$out" "state: done" "old ready report must not supersede current busy state"
+  pass "a current exact busy transition supersedes an old ready report"
+}
+
 # The pipeline's own terminal "validated, CI green, not merged yet" outcome is
 # set from that same monitor reading, so it is corroborated too.
 test_checks_passed_outcome_with_zero_check_runs_stays_working() {
@@ -1848,6 +1867,7 @@ test_coarse_ci_ready_done_log_with_zero_check_runs_stays_working
 test_no_run_ci_ready_done_log_with_zero_check_runs_stays_working
 test_cross_branch_no_run_ci_ready_uses_task_pr
 test_no_run_direct_pr_mode_keeps_its_ready_signal
+test_no_run_current_busy_supersedes_old_ready_signal
 test_checks_passed_outcome_with_zero_check_runs_stays_working
 test_checks_passed_outcome_with_green_checks_surfaces_done
 test_direct_pr_mode_keeps_its_ready_signal

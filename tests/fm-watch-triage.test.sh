@@ -109,6 +109,13 @@ record_pi_busy() {  # <state-dir> <id>
     --source pi-ext --event agent-start
 }
 
+set_busy_record_ts() {  # <state-dir> <id> <epoch>
+  local state=$1 id=$2 epoch=$3 file tmp
+  file="$state/$id.busy-state"
+  tmp="$file.tmp"
+  sed -E "s/ ts=[0-9]+$/ ts=$epoch/" "$file" > "$tmp" && mv "$tmp" "$file"
+}
+
 reap() { kill "$1" 2>/dev/null || true; wait "$1" 2>/dev/null || true; }
 
 # --- pure classifier predicates (fm-classify-lib.sh) ------------------------
@@ -1297,6 +1304,31 @@ test_busy_pane_below_turn_age_bound_is_absorbed() {
   pass "a busy worker below the turn-age bound remains working with no escalation"
 }
 
+test_fresh_busy_transition_outranks_old_turn_end_age() {
+  local dir state fakebin out capture_file window key sig pid
+  dir=$(make_case fresh-busy-after-idle); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-busy-resumed"
+  printf 'Working...' > "$capture_file"
+  printf 'window=%s\nkind=ship\nharness=pi\n' "$window" > "$state/busy-resumed.meta"
+  set_mtime $(( $(date +%s) - 4000 )) "$state/busy-resumed.turn-ended"
+  prime_turnend_seen "$state/busy-resumed.turn-ended"
+  record_pi_busy "$state" busy-resumed
+  printf 'working: fresh turn\n' > "$state/busy-resumed.status"
+  sig=$(seen_sig "$state/busy-resumed.status"); printf '%s' "$sig" > "$state/.seen-busy-resumed_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_BUSY_TURN_MAX_SECS=999 FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_live "$pid" 30; then
+    reap "$pid"; fail "a fresh busy transition inherited the previous idle age: $(cat "$out")"
+  fi
+  [ ! -e "$state/.stale-since-$key" ] || fail "a fresh busy transition started a wedge timer from an old completion"
+  reap "$pid"
+  pass "a fresh semantic busy transition resets the busy-duration age"
+}
+
 test_busy_pane_stable_hash_escalates_past_turn_age_bound() {
   local dir state fakebin out capture_file window key pane_hash sig pid
   dir=$(make_case busy-stable-hash-turn-age); state="$dir/state"; fakebin="$dir/fakebin"
@@ -1304,6 +1336,7 @@ test_busy_pane_stable_hash_escalates_past_turn_age_bound() {
   printf 'Working...' > "$capture_file"
   printf 'window=%s\nkind=ship\nharness=pi\n' "$window" > "$state/busy-stable.meta"
   record_pi_busy "$state" busy-stable
+  set_busy_record_ts "$state" busy-stable $(( $(date +%s) - 500 ))
   printf 'working: setup complete\n' > "$state/busy-stable.status"
   sig=$(seen_sig "$state/busy-stable.status"); printf '%s' "$sig" > "$state/.seen-busy-stable_status"
   key=$(printf '%s' "$window" | tr ':/.' '___')
@@ -1348,6 +1381,7 @@ test_busy_pane_changing_hash_escalates_past_turn_age_bound() {
   printf 'Working... (3600.1s)' > "$capture_file"
   printf 'window=%s\nkind=ship\nharness=pi\n' "$window" > "$state/busy-ticking.meta"
   record_pi_busy "$state" busy-ticking
+  set_busy_record_ts "$state" busy-ticking $(( $(date +%s) - 500 ))
   printf 'working: setup complete\n' > "$state/busy-ticking.status"
   sig=$(seen_sig "$state/busy-ticking.status"); printf '%s' "$sig" > "$state/.seen-busy-ticking_status"
   key=$(printf '%s' "$window" | tr ':/.' '___')
@@ -1423,6 +1457,7 @@ test_busy_pane_repeated_escalation_reaches_demand_deep_inspection() {
   printf 'Working...' > "$capture_file"
   printf 'window=%s\nkind=ship\nharness=pi\n' "$window" > "$state/busy-demand.meta"
   record_pi_busy "$state" busy-demand
+  set_busy_record_ts "$state" busy-demand $(( $(date +%s) - 500 ))
   printf 'working: setup complete\n' > "$state/busy-demand.status"
   sig=$(seen_sig "$state/busy-demand.status"); printf '%s' "$sig" > "$state/.seen-busy-demand_status"
   key=$(printf '%s' "$window" | tr ':/.' '___')
@@ -1495,6 +1530,7 @@ test_busy_pane_default_turn_age_bound_is_3600s() {
   reap "$pid"
 
   set_mtime $(( $(date +%s) - 4000 )) "$state/busy-default.turn-ended"
+  set_busy_record_ts "$state" busy-default $(( $(date +%s) - 4000 ))
   prime_turnend_seen "$state/busy-default.turn-ended"
   : > "$out"
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
@@ -1926,6 +1962,7 @@ test_nonterminal_stale_provably_working_absorbed_then_escalated
 test_wedge_escalation_marks_demand_deep_inspection_after_threshold
 test_wedge_escalation_resets_when_pane_becomes_active
 test_busy_pane_below_turn_age_bound_is_absorbed
+test_fresh_busy_transition_outranks_old_turn_end_age
 test_busy_pane_stable_hash_escalates_past_turn_age_bound
 test_busy_pane_changing_hash_escalates_past_turn_age_bound
 test_busy_pane_turn_end_touch_resets_age

@@ -162,6 +162,19 @@ seed_commitment() {
     || fail "could not register the public commitment"
 }
 
+bind_relation() {  # <home> <obligation> <relation> <work-home> <work-id> <generation>
+  local home=$1 obligation=$2 relation=$3 work_home=$4 work_id=$5 generation=$6
+  jq -n --arg r "$relation" --arg h "$work_home" --arg w "$work_id" --argjson g "$generation" \
+    '{relation_id:$r, work_ref:{home_id:$h, task_id:$w},
+      role:"fulfills", required:true, generation:$g}' > "$home/relation-$relation.json"
+  tasks_in "$home" public-followup bind-work "$obligation" \
+    --relation-file "$home/relation-$relation.json" >/dev/null \
+    || fail "could not bind relation $relation"
+  run_pf "$home" register "$obligation" --relation "$relation" \
+    --work-home "$work_home" --work-id "$work_id" --generation "$generation" >/dev/null \
+    || fail "could not register relation $relation"
+}
+
 emit_terminal() {  # <child-run-dir> <owning-home> <obligation> <work-home> <work-id> [pr-url] [outcome]
   local owning=$2 obligation=$3 work_home=$4 work_id=$5
   local pr=${6:-https://github.com/example/repo/pull/7} outcome=${7:-pr-merged}
@@ -238,6 +251,90 @@ test_outcome_text_is_bounded_without_corrupting_characters() {
     *[!é]*) fail "codepoint bounding split a multi-byte character" ;;
   esac
   pass "outcome text is collapsed to one line, bounded by codepoint, and never corrupts characters"
+}
+
+test_registration_rejects_mismatched_generation() {
+  local home
+  home=$(make_home generation-mismatch)
+  seed_commitment "$home" pf-generation req-generation discord main work-generation
+  expect_failure "a mismatched relation generation must be rejected at registration" \
+    run_pf "$home" register pf-generation --relation rel-code \
+      --work-home main --work-id work-generation --generation 2
+  assert_contains "$EXPECT_OUT" "has no bound relation 'rel-code'" \
+    "generation mismatch did not fail at the initial binding check"
+  assert_grep 'generation=1' "$home/state/public-followup/registry/pf-generation/rel-code" \
+    "generation refusal replaced the valid registration"
+  pass "registration validates the exact work-relation generation"
+}
+
+test_multiple_relation_registrations_remain_independent() {
+  local home log brief_a brief_b
+  home=$(make_home multiple-relations)
+  log="$home/curl.log"; : > "$log"
+  seed_commitment "$home" pf-multi req-multi x main work-a
+  bind_relation "$home" pf-multi rel-doc main work-b 1
+  assert_present "$home/state/public-followup/registry/pf-multi/rel-code" \
+    "registering relation B replaced relation A"
+  assert_present "$home/state/public-followup/registry/pf-multi/rel-doc" \
+    "relation B was not stored independently"
+
+  expect_failure "brief without a relation must refuse an ambiguous obligation" \
+    run_pf "$home" brief pf-multi
+  assert_contains "$EXPECT_OUT" "multiple registered relations" \
+    "ambiguous brief did not require a relation"
+  brief_a=$(run_pf "$home" brief pf-multi --relation rel-code)
+  brief_b=$(run_pf "$home" brief pf-multi --relation rel-doc)
+  assert_contains "$brief_a" "--work-id work-a" "relation A brief used the wrong work binding"
+  assert_contains "$brief_b" "--work-id work-b" "relation B brief used the wrong work binding"
+
+  fm_write_meta "$home/state/work-a.meta" \
+    "x_request=req-multi" "x_request_ts=1700000000" "x_followups=1"
+  fm_write_meta "$home/state/work-b.meta" \
+    "x_request=req-multi" "x_request_ts=1700000000" "x_followups=1"
+  emit_terminal "$home" "$home" pf-multi main work-a >/dev/null || fail "relation A emit failed"
+  "$EMIT" --home "$home" --obligation pf-multi --relation rel-doc \
+    --source-home main --work-id work-b --generation 1 --outcome pr-merged \
+    --deliverable pr_url=https://github.com/example/repo/pull/8 \
+    --outcome-text 'Documentation work completed.' >/dev/null || fail "relation B emit failed"
+  run_pf "$home" consume >/dev/null || fail "multi-relation consume failed"
+  FAKE_CURL_LOG="$log" run_pf "$home" deliver pf-multi >/dev/null \
+    || fail "multi-relation delivery failed"
+  assert_no_grep '^x_request=' "$home/state/work-a.meta" \
+    "delivery did not clear relation A's legacy link"
+  assert_no_grep '^x_request=' "$home/state/work-b.meta" \
+    "delivery did not clear relation B's legacy link"
+  assert_absent "$home/state/public-followup/registry/pf-multi" \
+    "delivered obligation retained relation registrations"
+  pass "multiple work relations retain independent bindings through delivery cleanup"
+}
+
+test_registered_commitment_survives_relay_token_loss() {
+  local home out
+  home=$(make_home token-loss)
+  seed_commitment "$home" pf-token req-token discord main work-token
+  rm -f "$home/.env"
+  FMX_PAIRING_TOKEN='' emit_terminal "$home" "$home" pf-token main work-token >/dev/null \
+    || fail "terminal emission failed after relay token loss"
+  assert_grep '"obligation_id":"pf-token"' "$home/state/public-followup/events/"*.json \
+    "terminal result was not recorded after relay token loss"
+  out=$(FMX_PAIRING_TOKEN='' run_pf "$home" pending) || fail "pending failed after relay token loss"
+  assert_contains "$out" "relay authorization unavailable" \
+    "token loss did not remain visible while the commitment stayed open"
+
+  fm_write_meta "$home/state/work-token.meta" \
+    "window=firstmate:fm-work-token" "endpoint_task_id=work-token" \
+    "worktree=$home/projects/gone" "project=$home/projects/sample" \
+    "harness=codex" "kind=ship" "mode=no-mistakes"
+  PATH="$home/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_CONFIG_OVERRIDE="$home/config" FMX_PAIRING_TOKEN='' \
+    expect_failure "cleanup must remain guarded after relay token loss" \
+    "$TEARDOWN" work-token
+  assert_contains "$EXPECT_OUT" "still owes a public reply" \
+    "token loss bypassed the durable cleanup guard"
+  assert_present "$home/state/work-token.meta" \
+    "token loss allowed guarded work records to be removed"
+  pass "registered commitments remain durable when relay authorization disappears"
 }
 
 # --- 1. the restart end-to-end -------------------------------------------------
@@ -582,7 +679,8 @@ test_delivery_requires_registration_before_posting() {
     "x_request=req-missing" "x_request_ts=1700000000" "x_followups=1"
   emit_terminal "$home" "$home" pf-missing main work-missing >/dev/null || fail "emit failed"
   run_pf "$home" consume >/dev/null || fail "consume failed"
-  rm -f "$home/state/public-followup/registry/pf-missing"
+  rm -f "$home/state/public-followup/registry/pf-missing/rel-code"
+  rmdir "$home/state/public-followup/registry/pf-missing"
 
   FAKE_CURL_LOG="$log" expect_failure "delivery without a registration must refuse" \
     run_pf "$home" deliver pf-missing
@@ -743,8 +841,8 @@ test_traversal_registration_is_refused_before_delivery() {
   emit_terminal "$home" "$home" pf-traversal main work-traversal >/dev/null \
     || fail "emit failed for traversal registration"
   sed -i.bak 's/^work_home=.*/work_home=secondmate:..\/..\/x/' \
-    "$home/state/public-followup/registry/pf-traversal"
-  rm -f "$home/state/public-followup/registry/pf-traversal.bak"
+    "$home/state/public-followup/registry/pf-traversal/rel-code"
+  rm -f "$home/state/public-followup/registry/pf-traversal/rel-code.bak"
   run_pf "$home" consume >/dev/null || fail "consume failed for traversal registration"
 
   out=$(FAKE_CURL_LOG="$log" run_pf "$home" deliver pf-traversal 2>&1) && \
@@ -1020,6 +1118,9 @@ test_typed_records_exclude_raw_public_material() {
 }
 
 test_outcome_text_is_bounded_without_corrupting_characters
+test_registration_rejects_mismatched_generation
+test_multiple_relation_registrations_remain_independent
+test_registered_commitment_survives_relay_token_loss
 test_restart_e2e_delivers_exactly_once
 test_duplicate_event_and_replay_are_noops
 test_invalid_events_are_refused_and_quarantined

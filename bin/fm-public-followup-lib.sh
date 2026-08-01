@@ -13,24 +13,20 @@
 # is what keeps a relay-disabled home free of public-followup artifacts.
 # set -u / set -e safe.
 #
-# GATE ORDER - the acceptance criterion for relay-disabled homes:
-#   1. fm_pf_relay_active <home>     the authoritative myfirstmate activation
-#                                    contract, a non-empty FMX_PAIRING_TOKEN in
-#                                    <home>/.env. There is no second flag. When
-#                                    <home>/.env is absent this is a single
-#                                    [ -f ] test and nothing else runs.
-#   2. fm_pf_has_registrations       O(1) presence check on the registry created
-#      / fm_pf_has_events            only by the relay path (fm-public-followup.sh
-#                                    register). Relay-enabled homes with no
-#                                    public commitments stop here, so no
-#                                    tasks-axi call and no backlog scan happens.
+# GATES:
+#   fm_pf_relay_active <home>        outward posting authorization, required to
+#                                    register or deliver but not to preserve an
+#                                    existing durable commitment.
+#   fm_pf_has_registrations          O(1) presence checks on relay-path-created
+#   fm_pf_has_events                 durable state. Homes with no commitments
+#                                    stop here with no tasks-axi call or scan.
 #
 # Private transport layout, all under <home>/state/public-followup (mode 0700,
 # created only by `fm-public-followup.sh register`):
-#   registry/<obligation-id>   registration record: the bounded public-safe
-#                              binding (obligation, relation, work ref,
-#                              generation, platform, request id). Presence hint
-#                              and reverse work->obligation index only; the
+#   registry/<obligation-id>/<relation-id>
+#                              relation-scoped registration records containing
+#                              the bounded public-safe work binding. Presence
+#                              hint and reverse work->obligation index only; the
 #                              obligation itself always remains tasks-axi truth.
 #   events/<event-id>.json     inbound typed terminal events awaiting
 #                              reconciliation, one file per event id.
@@ -108,10 +104,8 @@ fm_pf_dir_has_entry() {
 fm_pf_has_registrations() { fm_pf_dir_has_entry "$(fm_pf_registry_dir "$1")"; }
 fm_pf_has_events()        { fm_pf_dir_has_entry "$(fm_pf_events_dir "$1")"; }
 
-# fm_pf_active <home> <state>: both gates, in order. The single predicate every
-# caller outside the relay path should use before doing any public-followup work.
+# fm_pf_active <home> <state>: durable public-followup work exists locally.
 fm_pf_active() {
-  fm_pf_relay_active "$1" || return 1
   fm_pf_has_registrations "$2" || fm_pf_has_events "$2"
 }
 
@@ -184,27 +178,58 @@ fm_pf_bound_bytes() {
 
 # --- registry records -------------------------------------------------------
 
-# fm_pf_registry_get <state> <obligation-id> <key>: read one key=value line from
-# a registration record. Prints nothing and succeeds when absent.
+# fm_pf_registry_obligation_dir <state> <obligation-id>: the directory holding
+# one file per relation bound to an obligation.
+fm_pf_registry_obligation_dir() {
+  fm_pf_slug_valid "$2" || return 1
+  printf '%s/%s\n' "$(fm_pf_registry_dir "$1")" "$2"
+}
+
+# fm_pf_registry_file <state> <obligation-id> <relation-id>: one exact binding.
+fm_pf_registry_file() {
+  fm_pf_slug_valid "$2" || return 1
+  fm_pf_slug_valid "$3" || return 1
+  printf '%s/%s\n' "$(fm_pf_registry_obligation_dir "$1" "$2")" "$3"
+}
+
+# fm_pf_registry_get <state> <obligation-id> <relation-id> <key>: read one
+# key=value line from a registration record. Prints nothing when absent.
 fm_pf_registry_get() {
-  local state=$1 id=$2 key=$3 file line
-  fm_pf_slug_valid "$id" || return 1
-  file="$(fm_pf_registry_dir "$state")/$id"
+  local state=$1 id=$2 relation=$3 key=$4 file line
+  file=$(fm_pf_registry_file "$state" "$id" "$relation") || return 1
   [ -f "$file" ] && [ ! -L "$file" ] || return 0
   line=$(grep -E "^${key}=" "$file" 2>/dev/null | tail -n1) || return 0
   printf '%s' "${line#*=}"
+}
+
+# fm_pf_registry_relations <state> <obligation-id>: every registered relation.
+fm_pf_registry_relations() {
+  local dir entry relation
+  dir=$(fm_pf_registry_obligation_dir "$1" "$2") || return 1
+  [ -d "$dir" ] && [ ! -L "$dir" ] || return 0
+  for entry in "$dir"/*; do
+    [ -e "$entry" ] || continue
+    [ -f "$entry" ] && [ ! -L "$entry" ] || return 1
+    relation=$(basename "$entry")
+    fm_pf_slug_valid "$relation" || return 1
+    printf '%s\n' "$relation"
+  done
 }
 
 # fm_pf_registry_ids <state>: every registered obligation id, one per line.
 # The registry only ever holds this home's live public commitments, so this stays
 # a bounded listing rather than a backlog scan.
 fm_pf_registry_ids() {
-  local dir entry
+  local dir entry id
   dir=$(fm_pf_registry_dir "$1")
   [ -d "$dir" ] && [ ! -L "$dir" ] || return 0
   for entry in "$dir"/*; do
-    [ -f "$entry" ] && [ ! -L "$entry" ] || continue
-    basename "$entry"
+    [ -e "$entry" ] || continue
+    [ -d "$entry" ] && [ ! -L "$entry" ] || return 1
+    id=$(basename "$entry")
+    fm_pf_slug_valid "$id" || return 1
+    fm_pf_dir_has_entry "$entry" || return 1
+    printf '%s\n' "$id"
   done
 }
 
@@ -213,15 +238,32 @@ fm_pf_registry_ids() {
 # guard so cleanup cannot declare bound work finished while its public promise is
 # still open.
 fm_pf_registry_ids_for_work() {
-  local state=$1 home_id=$2 work_id=$3 id
-  while IFS= read -r id; do
-    [ -n "$id" ] || continue
-    [ "$(fm_pf_registry_get "$state" "$id" work_home)" = "$home_id" ] || continue
-    [ "$(fm_pf_registry_get "$state" "$id" work_id)" = "$work_id" ] || continue
-    printf '%s\n' "$id"
-  done <<EOF
-$(fm_pf_registry_ids "$state")
-EOF
+  local state=$1 home_id=$2 work_id=$3 id relation matched ids relations
+  ids=$(fm_pf_registry_ids "$state") || return 1
+  for id in $ids; do
+    matched=0
+    relations=$(fm_pf_registry_relations "$state" "$id") || return 1
+    for relation in $relations; do
+      [ "$(fm_pf_registry_get "$state" "$id" "$relation" work_home)" = "$home_id" ] || continue
+      [ "$(fm_pf_registry_get "$state" "$id" "$relation" work_id)" = "$work_id" ] || continue
+      matched=1
+      break
+    done
+    [ "$matched" -eq 0 ] || printf '%s\n' "$id"
+  done
+}
+
+fm_pf_registry_remove() {
+  local dir entry
+  dir=$(fm_pf_registry_obligation_dir "$1" "$2") || return 1
+  [ -e "$dir" ] || return 0
+  [ -d "$dir" ] && [ ! -L "$dir" ] || return 1
+  for entry in "$dir"/*; do
+    [ -e "$entry" ] || continue
+    [ -f "$entry" ] && [ ! -L "$entry" ] || return 1
+    rm -f -- "$entry" || return 1
+  done
+  rmdir "$dir"
 }
 
 # --- pending-event signature ------------------------------------------------

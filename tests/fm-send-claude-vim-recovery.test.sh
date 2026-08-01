@@ -80,6 +80,9 @@ case "$cmd" in
         fi
         ;;
       enter)
+        if [ -n "${FM_FAKE_BUSY_RECORD:-}" ]; then
+          grep -q ' state=idle source=fm-interrupt event=interrupt ' "$FM_FAKE_BUSY_RECORD" || exit 88
+        fi
         if [ "${FM_FAKE_ENTER_STAYS_PENDING:-0}" != 1 ]; then
           printf '%s\n' empty > "$state/composer"
           printf '%s\n' working > "$state/agent"
@@ -155,6 +158,9 @@ case "${1:-}" in
           fi
           ;;
         Enter)
+          if [ -n "${FM_FAKE_BUSY_RECORD:-}" ]; then
+            grep -q ' state=idle source=fm-interrupt event=interrupt ' "$FM_FAKE_BUSY_RECORD" || exit 88
+          fi
           if [ "${FM_FAKE_TMUX_ENTER_STAYS_PENDING:-0}" != 1 ]; then
             printf '%s\n' empty > "$state/composer"
             printf '%s\n' working > "$state/agent"
@@ -196,7 +202,7 @@ EOF
 }
 
 run_recovery() {
-  PATH="$FAKEBIN:$PATH" FM_HOME="$HOME_DIR" FM_ROOT_OVERRIDE="$HOME_DIR" \
+  PATH="$FAKEBIN:$PATH" FM_HOME="$HOME_DIR" FM_ROOT_OVERRIDE="$ROOT" \
     FM_STATE_OVERRIDE="$HOME_DIR/state" FM_GATE_REFUSE_BYPASS=1 \
     FM_FAKE_CLAUDE_STATE="$STATE_DIR" FM_FAKE_CLAUDE_LOG="$LOG" \
     FM_SEND_INTERRUPT_SLEEP=0 FM_SEND_SLEEP=0 FM_SEND_RETRIES="${FM_TEST_RETRIES:-3}" \
@@ -207,6 +213,7 @@ run_recovery() {
     FM_FAKE_I_STAYS_NORMAL="${FM_FAKE_I_STAYS_NORMAL:-0}" \
     FM_FAKE_TMUX_BUSY="${FM_FAKE_TMUX_BUSY:-0}" \
     FM_FAKE_TMUX_ENTER_STAYS_PENDING="${FM_FAKE_TMUX_ENTER_STAYS_PENDING:-0}" \
+    FM_FAKE_BUSY_RECORD="${FM_FAKE_BUSY_RECORD:-}" \
     "$SEND" task --recover-claude-vim
 }
 
@@ -250,6 +257,19 @@ test_normal_mode_needs_one_escape_then_enter_only() {
   [ "$(key_count enter)" -eq 1 ] || fail "Normal-mode pending recovery must submit with Enter only"
   [ "$(text_count)" -eq 0 ] || fail "Normal-mode recovery retyped the instruction"
   pass "fm-send Claude Vim recovery: Normal -> fresh Interrupted with one Escape and Enter-only continuation"
+}
+
+test_interruption_is_recorded_before_pending_continuation() {
+  local gen out
+  make_case interruption-record normal pending
+  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$HOME_DIR/state" task)
+  printf 'busy_gen=%s\n' "$gen" >> "$HOME_DIR/state/task.meta"
+  out=$(FM_FAKE_BUSY_RECORD="$HOME_DIR/state/task.busy-state" run_recovery 2> "$CASE_DIR/err") \
+    || fail "recovery did not record interruption before continuation: $(cat "$CASE_DIR/err")"
+  [ "$out" = submitted-pending ] || fail "interruption-record recovery returned '$out'"
+  assert_grep ' state=idle source=fm-interrupt event=interrupt ' "$HOME_DIR/state/task.busy-state" \
+    "recovery did not persist the interruption lifecycle edge"
+  pass "fm-send Claude Vim recovery records interruption before Enter-only continuation"
 }
 
 test_empty_composer_interrupts_without_enter_or_redirect_typing() {
@@ -390,6 +410,7 @@ test_ordinary_send_path_remains_unchanged() {
 test_insert_mode_needs_two_targeted_escapes_then_enter_only
 test_tmux_uses_the_same_proof_and_enter_only_contract
 test_normal_mode_needs_one_escape_then_enter_only
+test_interruption_is_recorded_before_pending_continuation
 test_empty_composer_interrupts_without_enter_or_redirect_typing
 test_empty_normal_or_non_vim_shape_refuses_before_keys
 test_stale_insert_marker_cannot_prove_current_mode

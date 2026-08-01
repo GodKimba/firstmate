@@ -760,6 +760,14 @@ fi
 [ -n "$BACKEND_TARGET" ] || emit unknown none "no backend target recorded"
 pane_readable "$BACKEND_TARGET" || emit unknown none "backend target gone: $BACKEND_TARGET"
 
+BUSY_VERDICT=
+if [ "$KIND" != secondmate ]; then
+  BUSY_VERDICT=$(crew_busy_verdict "$BACKEND_TARGET")
+  case "${BUSY_VERDICT%% *}" in
+    busy) emit working pane "harness busy (${BUSY_VERDICT#* })" ;;
+  esac
+fi
+
 # A worker's own green-ready report still carries a concrete CI wait even when
 # the converted harness has no readable semantic busy record. Apply the fork's
 # forge corroboration before that unrelated ambiguity can mask the report.
@@ -776,9 +784,7 @@ fi
 # verdict permits the status-log fallback below. Missing, malformed, stale, or
 # unverified semantic state remains unknown.
 if [ "$KIND" != secondmate ]; then
-  BUSY_VERDICT=$(crew_busy_verdict "$BACKEND_TARGET")
   case "${BUSY_VERDICT%% *}" in
-    busy) emit working pane "harness busy (${BUSY_VERDICT#* })" ;;
     idle) ;;
     *)
       # Durable captain-actionable states remain authoritative even when a

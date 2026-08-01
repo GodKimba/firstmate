@@ -33,9 +33,10 @@
 #                          closer look instead of another routine supervision
 #                          resume. Unless afk is active. A genuinely busy pane
 #                          (window_is_busy true) is exempt from the above, but
-#                          only up to BUSY_TURN_MAX_SECS with no completed turn
-#                          (state/<id>.turn-ended, or the spawn record before any
-#                          turn completes); past that bound busy_turn_over_age
+#                          only up to BUSY_TURN_MAX_SECS since the later of the
+#                          current busy transition and the last completed turn
+#                          (or spawn before any turn completes); past that bound
+#                          busy_turn_over_age
 #                          routes it through the same wedge timer, so it surfaces
 #                          with the identical "stale: ..." reason, escalation
 #                          count, and demand-deep-inspection marker, for human
@@ -139,9 +140,9 @@ STALE_ESCALATE_SECS=${FM_STALE_ESCALATE_SECS:-240}  # idle secs before a provabl
 # A busy pane is unconditional proof of liveness with no built-in duration bound,
 # so a hung foreground call can remain hidden even while its rendered busy
 # footer changes every poll. BUSY_TURN_MAX_SECS bounds how long any busy pane
-# may go with no completed turn: once its task's
-# state/<id>.turn-ended marker (or, before any turn has completed, the task's
-# spawn record) is this old, busy_turn_over_age routes the pane through the
+# may go with no completed turn: once the later of its current validated busy
+# transition and state/<id>.turn-ended marker (or the spawn record before any
+# turn has completed) is this old, busy_turn_over_age routes the pane through the
 # same STALE_ESCALATE_SECS-paced wedge_timer_check used for a provably-working
 # non-busy stale, so it escalates via the existing stale reason, escalation
 # counter, and demand-deep-inspection marker for human inspection only - never
@@ -298,18 +299,29 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
   esac
 }
 
-# busy_turn_over_age: 0 iff <task>'s latest completed-turn marker is at least
-# BUSY_TURN_MAX_SECS old. Ages the per-task turn-ended marker, the harness-neutral
-# signal every verified harness's turn-end hook touches; before any turn has
-# completed, ages the task's spawn record instead so a fresh task still gets a
-# bound. The caller checks that the pane is busy and routes a crossed bound
-# through the existing wedge_timer_check, never anything that touches the
-# worker itself.
+# busy_turn_over_age: 0 iff the later of <task>'s current validated semantic busy
+# transition and latest completed-turn marker is at least BUSY_TURN_MAX_SECS old.
+# Before any turn has completed, the spawn record supplies the baseline. The
+# caller checks that the pane is busy and routes a crossed bound through the
+# existing wedge_timer_check, never anything that touches the worker itself.
 busy_turn_over_age() {  # <task>
-  local task=$1 f
+  local task=$1 f meta anchor now record r_state r_source _event _seq r_ts harness
   f="$STATE/$task.turn-ended"
-  [ -e "$f" ] || f="$STATE/$task.meta"
-  [ "$(age_of "$f")" -ge "$BUSY_TURN_MAX_SECS" ]
+  meta="$STATE/$task.meta"
+  [ -e "$f" ] || f=$meta
+  anchor=$(stat_mtime "$f" 2>/dev/null || echo 0)
+  now=$(date +%s)
+  if record=$(fm_busy_record_read "$STATE" "$task" 2>/dev/null); then
+    read -r r_state r_source _event _seq r_ts <<EOF
+$record
+EOF
+    harness=$(fm_meta_get "$meta" harness)
+    if [ "$r_state" = busy ] && fm_busy_source_trusted "$harness" "$r_source"; then
+      [ "$r_ts" -le "$now" ] || r_ts=$now
+      [ "$r_ts" -le "$anchor" ] || anchor=$r_ts
+    fi
+  fi
+  [ $((now - anchor)) -ge "$BUSY_TURN_MAX_SECS" ]
 }
 
 # Absorb a stale pane under a declared external-wait pause (paused:) or a

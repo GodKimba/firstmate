@@ -382,7 +382,8 @@ fm_backend_endpoint_atom_valid() {  # <value>
 
 fm_backend_validate_task_endpoint() {  # <meta-file> <task-id>
   local meta=$1 id=$2 backend_count backend window worktree project binding_count binding
-  local session pane recorded_session workspace tab terminal worktree_id surface
+  local session pane recorded_session workspace tab terminal terminal_count worktree_id surface
+  local recovery recovery_count
   FM_BACKEND_VALIDATED_BACKEND=
   FM_BACKEND_VALIDATED_TARGET=
   [ -f "$meta" ] && [ ! -L "$meta" ] || {
@@ -488,23 +489,39 @@ fm_backend_validate_task_endpoint() {  # <meta-file> <task-id>
         echo "REFUSED: legacy Orca endpoint metadata for task $id lacks an exact task binding; preserving task state." >&2
         return 1
       }
-      terminal=$(fm_backend_meta_exact_value "$meta" terminal) || terminal=
+      terminal_count=$(grep -c '^terminal=' "$meta" 2>/dev/null || true)
+      case "$terminal_count" in
+        0) terminal= ;;
+        1) terminal=$(fm_backend_meta_exact_value "$meta" terminal) || terminal= ;;
+        *) terminal= ;;
+      esac
+      recovery_count=$(grep -c '^orca_recovery=' "$meta" 2>/dev/null || true)
+      case "$recovery_count" in
+        0) recovery= ;;
+        1) recovery=$(fm_backend_meta_exact_value "$meta" orca_recovery) || recovery=invalid ;;
+        *) recovery=invalid ;;
+      esac
       worktree_id=$(fm_backend_meta_exact_value "$meta" orca_worktree_id) || worktree_id=
-      [ -n "$terminal" ] || {
+      if [ "$terminal_count" -eq 0 ] && [ -z "$recovery" ]; then
         echo "REFUSED: missing terminal in $meta; cannot close Orca endpoint; preserving task state." >&2
         return 1
-      }
+      fi
+      if { [ -n "$terminal" ] && { [ "$terminal_count" -ne 1 ] || [ "$recovery_count" -ne 0 ]; }; } \
+        || { [ -z "$terminal" ] && { [ "$terminal_count" -ne 0 ] || [ "$recovery" != worktree-only ]; }; }; then
+        echo "REFUSED: Orca recovery metadata for task $id is malformed or inconsistent; preserving task state." >&2
+        return 1
+      fi
       [ -n "$worktree_id" ] || {
         echo "REFUSED: missing orca_worktree_id in $meta; cannot remove Orca worktree; preserving task state." >&2
         return 1
       }
       if [ "$window" != "fm-$id" ] \
-        || ! fm_backend_endpoint_atom_valid "$terminal" \
+        || { [ -n "$terminal" ] && ! fm_backend_endpoint_atom_valid "$terminal"; } \
         || ! fm_backend_endpoint_atom_valid "$worktree_id"; then
         echo "REFUSED: Orca endpoint metadata for task $id is malformed or inconsistent; preserving task state." >&2
         return 1
       fi
-      window=$terminal
+      [ -z "$terminal" ] || window=$terminal
       ;;
     cmux)
       [ "$binding" = "$id" ] || {

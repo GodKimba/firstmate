@@ -658,9 +658,12 @@ test_spawn_preserves_orca_metadata_when_abort_cleanup_fails() {
     "Orca spawn should attempt helper cleanup before preserving metadata"
   assert_present "$state/$id.meta" "failed Orca abort cleanup should preserve metadata"
   assert_grep "window=fm-$id" "$state/$id.meta" "preserved metadata missing stable window alias"
+  assert_grep "endpoint_task_id=$id" "$state/$id.meta" "preserved metadata missing exact task binding"
   assert_grep "backend=orca" "$state/$id.meta" "preserved metadata missing backend=orca"
   assert_grep "orca_worktree_id=wt-cleanup-fail" "$state/$id.meta" "preserved metadata missing Orca worktree id"
   assert_no_grep "terminal=" "$state/$id.meta" "preserved metadata should not invent a terminal handle"
+  assert_grep "orca_recovery=worktree-only" "$state/$id.meta" \
+    "preserved metadata missing its worktree-only recovery marker"
   pass "fm-spawn.sh --backend orca: preserves metadata when abort cleanup fails"
 }
 
@@ -1145,6 +1148,39 @@ test_teardown_refuses_orca_worktree_without_terminal_handle() {
   pass "fm-teardown.sh backend=orca: refuses incomplete worktree-only endpoint metadata before runtime dispatch"
 }
 
+test_teardown_accepts_valid_orca_worktree_only_recovery() {
+  local proj wt data state config id out rc neutral
+  id="orcarecoveryz7"
+  proj="$TMP_ROOT/recovery-project"
+  wt="$TMP_ROOT/recovery-wt"
+  data="$TMP_ROOT/recovery-data"
+  state="$TMP_ROOT/recovery-state"
+  config="$TMP_ROOT/recovery-config"
+  fm_git_worktree "$proj" "$wt" "fm/$id"
+  mkdir -p "$data/$id" "$state" "$config"
+  printf 'report\n' > "$data/$id/report.md"
+  touch "$state/.last-watcher-beat"
+  fm_write_meta "$state/$id.meta" \
+    "window=fm-$id" "endpoint_task_id=$id" "worktree=$wt" "project=$proj" \
+    "harness=claude" "kind=scout" "mode=no-mistakes" "yolo=off" \
+    "backend=orca" "orca_worktree_id=wt-recovery" "orca_recovery=worktree-only" \
+    "decisions_reviewed=1" "decision_keys="
+  orca_case worktree-only-recovery
+  printf '{"ok":true,"result":{"worktree":{"id":"wt-recovery","path":"%s"}}}\n' "$wt" > "$RESP/1.out"
+  neutral=$(neutral_fm_root "$CASE_DIR/neutral")
+  rc=0
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    FM_ROOT_OVERRIDE="$neutral" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
+    "$ROOT/bin/fm-teardown.sh" "$id" 2>&1 ) || rc=$?
+  expect_code 0 "$rc" "validated worktree-only Orca recovery should teardown successfully"$'\n'"$out"
+  assert_not_contains "$(cat "$LOG")" $'orca\x1f''terminal'$'\x1f''close' \
+    "worktree-only recovery attempted to close a nonexistent terminal"
+  assert_contains "$(cat "$LOG")" $'orca\x1f''worktree'$'\x1f''rm'$'\x1f''--worktree'$'\x1f''id:wt-recovery'$'\x1f''--force'$'\x1f''--json' \
+    "worktree-only recovery did not remove the exact Orca worktree"
+  assert_absent "$state/$id.meta" "successful worktree-only recovery retained metadata"
+  pass "fm-teardown.sh backend=orca: validates and removes worktree-only recovery records"
+}
+
 test_secondmate_force_teardown_removes_orca_child_via_orca() {
   local home subhome childproj childwt child_id neutral out rc
   home="$TMP_ROOT/orca-child-parent"
@@ -1323,6 +1359,7 @@ test_ship_teardown_refuses_orca_unresolvable_worktree_id
 test_ship_teardown_refuses_orca_id_path_mismatch
 test_teardown_refuses_orca_missing_worktree_id
 test_teardown_refuses_orca_worktree_without_terminal_handle
+test_teardown_accepts_valid_orca_worktree_only_recovery
 test_secondmate_force_teardown_removes_orca_child_via_orca
 test_secondmate_force_teardown_refuses_orca_child_id_path_mismatch
 test_secondmate_force_teardown_refuses_partial_orca_child

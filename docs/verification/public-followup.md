@@ -2,10 +2,12 @@
 
 Audience: maintainer verification.
 
-This record supports two active guarantees for promised public replies made through the myfirstmate relay:
+This record supports four active guarantees for promised public replies made through the myfirstmate relay:
 
 1. A promised final reply survives compaction and restart, reconciles from disk alone, and lands in the original thread exactly once.
 2. A home that never opted into the relay pays nothing for any of it.
+3. Multiple work relations retain independent registrations through terminal emission and legacy-link cleanup.
+4. An existing commitment remains locally visible and cleanup-guarded when relay authorization is unavailable.
 
 [`docs/configuration.md`](../configuration.md#promised-public-replies-statepublic-followup) owns the operator-facing contract, [`docs/architecture.md`](../architecture.md#optional-x-mode) owns the mechanism boundary, and `tasks-axi public-followup --help` owns the typed obligation schema.
 Task chronology and delivery evidence stay outside this record.
@@ -23,6 +25,9 @@ bash tests/fm-public-followup.test.sh
 
 ```
 ok - outcome text is collapsed to one line, bounded by codepoint, and never corrupts characters
+ok - registration validates the exact work-relation generation
+ok - multiple work relations retain independent bindings through delivery cleanup
+ok - registered commitments remain durable when relay authorization disappears
 ok - restart end-to-end: typed result reconciles from disk and delivers one reply to the original thread
 ok - duplicate terminal results, restart replay, and repeated delivery are all no-ops
 ok - wrong source, wrong work id, stale generation, malformed, unsupported deliverable, and forged identity are all refused
@@ -78,18 +83,7 @@ diff state-before.txt state-after.txt | grep '^>'
 No `tasks-axi public-followup` invocation, no public-commitments output, and no `state/public-followup` directory.
 The four created paths are session-start's pre-existing session lock, PR-check migration markers, and wake queue, none of which this work touches.
 
-The whole added cost in that home is the activation predicate, measured over 1000 in-process calls including loop overhead:
-
-```sh
-. bin/fm-public-followup-lib.sh
-for i in $(seq 1 1000); do fm_pf_relay_active "$HOME_DIR" || true; done
-```
-
-```
-total_ns=69694000 per_call_us=69
-```
-
-Roughly 0.07 ms per session start, from a single `[ -f "$FM_HOME/.env" ]` test that returns false before anything else runs.
+The registration presence check remains an O(1) directory predicate and reaches no backlog command when absent.
 
 ## Compatibility axes reviewed
 

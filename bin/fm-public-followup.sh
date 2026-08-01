@@ -14,15 +14,11 @@
 #   bin/fm-public-followup-lib.sh  the activation gate and private transport.
 # This script composes them; it never restates their contracts or schemas.
 #
-# ZERO OVERHEAD FOR HOMES THAT DO NOT USE THE RELAY: every subcommand gates
-# first on the authoritative activation contract (a non-empty FMX_PAIRING_TOKEN
-# in $FM_HOME/.env). Read-side and cleanup paths then use an O(1) presence check
-# for registrations this home actually created. A relay-disabled home therefore
-# runs one [ -f ] test before any backlog work: no tasks-axi call, no backlog scan,
-# and no file created. Silent read-side commands return without output; commands
-# that require an active relay report their configuration error after the same
-# gate. A relay-enabled home with no live commitments stops at the second gate
-# for the same cost.
+# ZERO OVERHEAD FOR HOMES THAT DO NOT USE THE RELAY: read-side and cleanup paths
+# use an O(1) presence check for registrations this home actually created. A home
+# with no durable commitments performs no tasks-axi call, no backlog scan, and
+# creates no file. Once a registration exists it remains authoritative even if
+# outward relay authorization is temporarily unavailable.
 #
 # Usage:
 #   fm-public-followup.sh active
@@ -39,7 +35,7 @@
 #       later makes the presence checks O(1) and lets bound work report a typed
 #       terminal result. Refuses when the relay is not active for this home.
 #
-#   fm-public-followup.sh brief <obligation-id>
+#   fm-public-followup.sh brief <obligation-id> [--relation <relation-id>]
 #       Print the exact fm-public-followup-emit.sh command line the bound worker
 #       must run when its work reaches the promised terminal outcome, so the
 #       binding is copied into a brief instead of hand-assembled.
@@ -167,14 +163,12 @@ pf_field() { printf '%s' "$1" | jq -r "$2 // empty" 2>/dev/null; }
 # with no output when this home has no public-followup work, so callers can
 # invoke unconditionally without a relay-disabled home paying anything.
 gate_or_exit() {
-  fm_pf_relay_active "$FM_HOME" || exit 0
   fm_pf_has_registrations "$STATE" || fm_pf_has_events "$STATE" || exit 0
 }
 
 # --- subcommand: active -----------------------------------------------------
 
 cmd_active() {
-  fm_pf_relay_active "$FM_HOME" || exit 1
   fm_pf_has_registrations "$STATE" || fm_pf_has_events "$STATE" || exit 1
   exit 0
 }
@@ -222,8 +216,10 @@ cmd_register() {
   # The relation must already be bound, so a registration can never describe a
   # binding tasks-axi does not have.
   printf '%s' "$payload" | jq -e --arg r "$relation" --arg h "$work_home" --arg w "$work_id" \
+    --argjson g "$generation" \
     '(.public_followup.work_relations // [])
-       | map(select(.relation_id == $r and .work_ref.home_id == $h and .work_ref.task_id == $w))
+       | map(select(.relation_id == $r and .work_ref.home_id == $h
+                    and .work_ref.task_id == $w and .generation == $g))
        | length > 0' >/dev/null 2>&1 \
     || die "obligation '$id' has no bound relation '$relation' for $work_home/$work_id; run tasks-axi public-followup bind-work first" 1
 
@@ -231,16 +227,20 @@ cmd_register() {
   [ -n "$request" ] || request=$(pf_field "$payload" '.public_followup.request.request_id')
   [ -z "$request" ] || fm_pf_slug_valid "$request" || die "unsafe request id: $request"
 
-  local mkdir_target
+  local mkdir_target obligation_dir
   for mkdir_target in "$(fm_pf_registry_dir "$STATE")" "$(fm_pf_events_dir "$STATE")" \
                       "$(fm_pf_consumed_dir "$STATE")" "$(fm_pf_rejected_dir "$STATE")"; do
     fmx_private_artifact_dir_prepare "$mkdir_target" >/dev/null \
       || die "could not prepare $mkdir_target" 1
   done
+  obligation_dir=$(fm_pf_registry_obligation_dir "$STATE" "$id") \
+    || die "could not resolve the registration directory" 1
+  fmx_private_artifact_dir_prepare "$obligation_dir" >/dev/null \
+    || die "could not prepare $obligation_dir" 1
 
   printf 'obligation_id=%s\nrelation_id=%s\nwork_home=%s\nwork_id=%s\ngeneration=%s\nplatform=%s\nrequest_id=%s\n' \
     "$id" "$relation" "$work_home" "$work_id" "$generation" "$platform" "$request" \
-    | fmx_private_artifact_publish_stdin "$(fm_pf_registry_dir "$STATE")" "$id" 600 \
+    | fmx_private_artifact_publish_stdin "$obligation_dir" "$relation" 600 \
     || die "could not write the registration record" 1
 
   printf 'registered %s %s/%s generation=%s platform=%s\n' \
@@ -250,17 +250,34 @@ cmd_register() {
 # --- subcommand: brief ------------------------------------------------------
 
 cmd_brief() {
-  local id=${1:-} relation work_home work_id generation
+  local id=${1:-} relation='' work_home work_id generation relations relation_count
   [ -n "$id" ] || { usage; exit 2; }
+  shift
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --relation) shift; relation=${1:-} ;;
+      *) die "unknown argument '$1'" ;;
+    esac
+    shift || true
+  done
   fm_pf_slug_valid "$id" || die "unsafe obligation id: $id"
-  fm_pf_relay_active "$FM_HOME" || die "the relay is not active for this home" 1
-  [ -f "$(fm_pf_registry_dir "$STATE")/$id" ] \
-    || die "no registration for '$id' in this home" 1
+  [ -z "$relation" ] || fm_pf_slug_valid "$relation" || die "unsafe relation id: $relation"
+  if [ -z "$relation" ]; then
+    relations=$(fm_pf_registry_relations "$STATE" "$id") \
+      || die "registration records for '$id' are invalid" 1
+    relation_count=$(printf '%s\n' "$relations" | grep -c . || true)
+    case "$relation_count" in
+      0) die "no registration for '$id' in this home" 1 ;;
+      1) relation=$relations ;;
+      *) die "obligation '$id' has multiple registered relations; pass --relation <relation-id>" 1 ;;
+    esac
+  fi
+  [ -f "$(fm_pf_registry_file "$STATE" "$id" "$relation")" ] \
+    || die "no registration for '$id' relation '$relation' in this home" 1
 
-  relation=$(fm_pf_registry_get "$STATE" "$id" relation_id)
-  work_home=$(fm_pf_registry_get "$STATE" "$id" work_home)
-  work_id=$(fm_pf_registry_get "$STATE" "$id" work_id)
-  generation=$(fm_pf_registry_get "$STATE" "$id" generation)
+  work_home=$(fm_pf_registry_get "$STATE" "$id" "$relation" work_home)
+  work_id=$(fm_pf_registry_get "$STATE" "$id" "$relation" work_id)
+  generation=$(fm_pf_registry_get "$STATE" "$id" "$relation" generation)
 
   cat <<EOF
 When this work reaches its promised terminal outcome, report it as typed data
@@ -427,7 +444,15 @@ cmd_consume() {
 cmd_pending() {
   gate_or_exit
 
-  local listing id payload delivery task_state summary platform request printed=0
+  local listing registry_ids id payload delivery task_state summary platform request printed=0
+  if fm_pf_has_registrations "$STATE" && ! fm_pf_relay_active "$FM_HOME"; then
+    printf 'relay authorization unavailable; existing public commitments remain open\n'
+    printed=1
+  fi
+  if ! registry_ids=$(fm_pf_registry_ids "$STATE"); then
+    printf 'cannot read this home'\''s public commitment registrations; durable records were retained for reconciliation\n'
+    return 0
+  fi
   # An unreadable backlog with registrations present is exactly the silence this
   # whole path exists to prevent, so say so rather than printing nothing.
   if ! command -v jq >/dev/null 2>&1 || ! command -v tasks-axi >/dev/null 2>&1 \
@@ -443,7 +468,7 @@ cmd_pending() {
       ' >/dev/null 2>&1; then
     if fm_pf_has_registrations "$STATE"; then
       printf 'cannot read this home'\''s public commitments through tasks-axi; %s registration(s) are still recorded under state/%s/registry\n' \
-        "$(fm_pf_registry_ids "$STATE" | grep -c . || true)" "$FM_PF_DIRNAME"
+        "$(printf '%s\n' "$registry_ids" | grep -c . || true)" "$FM_PF_DIRNAME"
       printed=1
     fi
     if fm_pf_has_events "$STATE"; then
@@ -461,23 +486,23 @@ cmd_pending() {
     if [ -z "$payload" ]; then
       # The obligation is gone from the backlog (pruned after Done): the
       # registration is stale bookkeeping, not evidence, so drop it.
-      if ! clear_public_followup_link "$id"; then
+      if ! clear_public_followup_links "$id"; then
         printf 'cannot clear the legacy X link for closed public commitment %s; registration retained for reconciliation\n' "$id"
         printed=1
         continue
       fi
-      rm -f -- "$(fm_pf_registry_dir "$STATE")/$id" 2>/dev/null || true
+      fm_pf_registry_remove "$STATE" "$id" 2>/dev/null || true
       continue
     fi
     delivery=$(pf_field "$payload" '.public_followup.delivery.state')
     task_state=$(pf_field "$payload" '.state')
     if [ "$task_state" = 'done' ] || [ "$delivery" = 'posted' ] || [ "$delivery" = 'waived' ]; then
-      if ! clear_public_followup_link "$id"; then
+      if ! clear_public_followup_links "$id"; then
         printf 'cannot clear the legacy X link for closed public commitment %s; registration retained for reconciliation\n' "$id"
         printed=1
         continue
       fi
-      rm -f -- "$(fm_pf_registry_dir "$STATE")/$id" 2>/dev/null || true
+      fm_pf_registry_remove "$STATE" "$id" 2>/dev/null || true
       continue
     fi
     summary=$(pf_field "$payload" '.public_followup.request.public_safe_summary' | fm_pf_clean_outcome_text)
@@ -487,7 +512,7 @@ cmd_pending() {
       "$id" "${delivery:-unknown}" "${platform:-unknown}" "${request:-unknown}" "$summary"
     printed=1
   done <<EOF
-$(fm_pf_registry_ids "$STATE")
+$registry_ids
 EOF
 
   # Events that arrived while no agent was present are actionable on their own,
@@ -502,17 +527,27 @@ EOF
 # --- subcommand: deliver ----------------------------------------------------
 
 public_followup_registration_valid() {
-  local id=$1 file relation work_home work_id generation
-  file="$(fm_pf_registry_dir "$STATE")/$id"
-  [ -f "$file" ] && [ ! -L "$file" ] || return 1
-  relation=$(fm_pf_registry_get "$STATE" "$id" relation_id)
-  work_home=$(fm_pf_registry_get "$STATE" "$id" work_home)
-  work_id=$(fm_pf_registry_get "$STATE" "$id" work_id)
-  generation=$(fm_pf_registry_get "$STATE" "$id" generation)
-  [ -n "$relation" ] && [ -n "$work_id" ] || return 1
-  fm_pf_home_id_valid "$work_home" || return 1
-  fm_pf_slug_valid "$work_id" || return 1
-  case "$generation" in ''|*[!0-9]*) return 1 ;; esac
+  local id=$1 relations relation file obligation work_home work_id generation count=0
+  relations=$(fm_pf_registry_relations "$STATE" "$id") || return 1
+  while IFS= read -r relation; do
+    [ -n "$relation" ] || continue
+    count=$((count + 1))
+    file=$(fm_pf_registry_file "$STATE" "$id" "$relation") || return 1
+    [ -f "$file" ] && [ ! -L "$file" ] || return 1
+    obligation=$(fm_pf_registry_get "$STATE" "$id" "$relation" obligation_id)
+    [ "$obligation" = "$id" ] || return 1
+    [ "$(fm_pf_registry_get "$STATE" "$id" "$relation" relation_id)" = "$relation" ] || return 1
+    work_home=$(fm_pf_registry_get "$STATE" "$id" "$relation" work_home)
+    work_id=$(fm_pf_registry_get "$STATE" "$id" "$relation" work_id)
+    generation=$(fm_pf_registry_get "$STATE" "$id" "$relation" generation)
+    fm_pf_home_id_valid "$work_home" || return 1
+    fm_pf_slug_valid "$work_id" || return 1
+    case "$generation" in ''|*[!0-9]*) return 1 ;; esac
+    [ "$generation" -ge 1 ] || return 1
+  done <<EOF
+$relations
+EOF
+  [ "$count" -ge 1 ]
 }
 
 public_followup_secondmate_home() {
@@ -533,25 +568,30 @@ public_followup_secondmate_home() {
   printf '%s\n' "$home"
 }
 
-clear_public_followup_link() {
-  local id=$1 work_home work_id home state
+clear_public_followup_links() {
+  local id=$1 relations relation work_home work_id home state
   public_followup_registration_valid "$id" || return 1
-  work_home=$(fm_pf_registry_get "$STATE" "$id" work_home)
-  work_id=$(fm_pf_registry_get "$STATE" "$id" work_id)
-  [ -n "$work_home" ] && [ -n "$work_id" ] || return 1
-  case "$work_home" in
-    main)
-      home=$FM_HOME
-      state=$STATE
-      ;;
-    secondmate:*)
-      home=$(public_followup_secondmate_home "${work_home#secondmate:}") || return 1
-      state="$home/state"
-      ;;
-    *) return 1 ;;
-  esac
-  FM_HOME="$home" FM_STATE_OVERRIDE="$state" FM_ROOT_OVERRIDE="$FM_ROOT" \
-    "$FM_ROOT/bin/fm-x-followup.sh" --clear "$work_id" >/dev/null
+  relations=$(fm_pf_registry_relations "$STATE" "$id") || return 1
+  while IFS= read -r relation; do
+    [ -n "$relation" ] || continue
+    work_home=$(fm_pf_registry_get "$STATE" "$id" "$relation" work_home)
+    work_id=$(fm_pf_registry_get "$STATE" "$id" "$relation" work_id)
+    case "$work_home" in
+      main)
+        home=$FM_HOME
+        state=$STATE
+        ;;
+      secondmate:*)
+        home=$(public_followup_secondmate_home "${work_home#secondmate:}") || return 1
+        state="$home/state"
+        ;;
+      *) return 1 ;;
+    esac
+    FM_HOME="$home" FM_STATE_OVERRIDE="$state" FM_ROOT_OVERRIDE="$FM_ROOT" \
+      "$FM_ROOT/bin/fm-x-followup.sh" --clear "$work_id" >/dev/null || return 1
+  done <<EOF
+$relations
+EOF
 }
 
 public_followup_legacy_link_status() {
@@ -648,7 +688,7 @@ cmd_deliver() {
   case "$delivery" in
     posted|waived)
       if public_followup_registration_valid "$id"; then
-        if ! clear_public_followup_link "$id"; then
+        if ! clear_public_followup_links "$id"; then
           die "obligation '$id' is already $delivery, but its legacy X link could not be cleared; the registration was retained for reconciliation" 1
         fi
       else
@@ -660,7 +700,7 @@ cmd_deliver() {
           *) die "obligation '$id' is already $delivery, but its registration is missing or invalid and the legacy X link cannot be verified; reconcile it before any later terminal follow-up" 1 ;;
         esac
       fi
-      rm -f -- "$(fm_pf_registry_dir "$STATE")/$id" 2>/dev/null || true
+      fm_pf_registry_remove "$STATE" "$id" 2>/dev/null || true
       printf 'already delivered %s state=%s\n' "$id" "$delivery"
       return 0
       ;;
@@ -739,10 +779,10 @@ EOF
       die "dry-run for '$id' did not post; recorded as retryable and left the obligation open" 1
     fi
     if record_posted "$id" "$attempt" "$request" "$platform" "$chunks"; then
-      if ! clear_public_followup_link "$id"; then
+      if ! clear_public_followup_links "$id"; then
         die "the public reply for '$id' POSTED and its receipt was recorded, but its legacy X link could not be cleared; the registration was retained for reconciliation" 1
       fi
-      rm -f -- "$(fm_pf_registry_dir "$STATE")/$id" 2>/dev/null || true
+      fm_pf_registry_remove "$STATE" "$id" 2>/dev/null || true
       printf 'delivered %s request=%s platform=%s chunks=%s\n' "$id" "$request" "$platform" "$chunks"
       return 0
     fi
@@ -783,7 +823,6 @@ cmd_record_posted() {
   case "$attempt" in ''|*[!0-9]*) die "--attempt <n> is required and must be an integer" ;; esac
   case "$chunks" in ''|*[!0-9]*) die "--chunks <n> is required and must be a positive integer" ;; esac
   [ "$chunks" -ge 1 ] 2>/dev/null || die "--chunks <n> is required and must be a positive integer"
-  fm_pf_relay_active "$FM_HOME" || die "the relay is not active for this home" 1
   public_followup_registration_valid "$id" \
     || die "public-followup registration for '$id' is missing or invalid; reconcile it before recording a receipt so any legacy X link can be cleared" 1
   require_tools
@@ -796,10 +835,10 @@ cmd_record_posted() {
 
   record_posted "$id" "$attempt" "$request" "$platform" "$chunks" \
     || die "tasks-axi refused the receipt for '$id' attempt $attempt; the recorded attempt must match exactly" 1
-  if ! clear_public_followup_link "$id"; then
+  if ! clear_public_followup_links "$id"; then
     die "the receipt for '$id' was recorded, but its legacy X link could not be cleared; the registration was retained for reconciliation" 1
   fi
-  rm -f -- "$(fm_pf_registry_dir "$STATE")/$id" 2>/dev/null || true
+  fm_pf_registry_remove "$STATE" "$id" 2>/dev/null || true
   printf 'recorded %s attempt=%s request=%s\n' "$id" "$attempt" "$request"
 }
 
@@ -808,12 +847,14 @@ cmd_record_posted() {
 cmd_guard_work() {
   local work_home=${1:-} work_id=${2:-} bound id payload delivery task_state blocked=0
   [ -n "$work_home" ] && [ -n "$work_id" ] || { usage; exit 2; }
-  fm_pf_relay_active "$FM_HOME" || exit 0
   fm_pf_has_registrations "$STATE" || exit 0
 
   # Reading the registration records needs no tools, so establish whether this
   # work is bound to any commitment before deciding anything else.
-  bound=$(fm_pf_registry_ids_for_work "$STATE" "$work_home" "$work_id")
+  if ! bound=$(fm_pf_registry_ids_for_work "$STATE" "$work_home" "$work_id"); then
+    printf 'cannot verify the public commitment registrations for %s/%s\n' "$work_home" "$work_id"
+    exit 3
+  fi
   [ -n "$bound" ] || exit 0
 
   # From here the work IS bound to a public promise, so an unreadable state is a
@@ -860,7 +901,7 @@ cmd_retire() {
     shift || true
   done
   fm_pf_slug_valid "$id" || die "unsafe obligation id: $id"
-  fm_pf_relay_active "$FM_HOME" || exit 0
+  fm_pf_has_registrations "$STATE" || exit 0
   require_tools
 
   payload=$(obligation_json "$id") || die "could not read the backlog through tasks-axi" 1
@@ -875,10 +916,10 @@ cmd_retire() {
         ;;
     esac
   fi
-  if ! clear_public_followup_link "$id"; then
+  if ! clear_public_followup_links "$id"; then
     die "could not clear the legacy X link for '$id'; its registration was retained for reconciliation" 1
   fi
-  rm -f -- "$(fm_pf_registry_dir "$STATE")/$id" 2>/dev/null || true
+  fm_pf_registry_remove "$STATE" "$id" 2>/dev/null || true
   printf 'retired %s\n' "$id"
 }
 

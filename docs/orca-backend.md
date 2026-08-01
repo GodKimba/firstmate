@@ -28,13 +28,14 @@ Enter and Ctrl-C are supported; Escape is not.
 
 ## Task shape and metadata
 
-Each task has one Orca-managed git worktree and one Orca terminal.
+Each successfully spawned task has one Orca-managed git worktree and one Orca terminal.
 `fm-spawn.sh` does not call Treehouse for Orca tasks.
 The normal isolation and unlanded-work refusal rules still apply.
 
 ```text
 backend=orca
 window=fm-<id>
+endpoint_task_id=<id>
 terminal=<orca terminal handle>
 orca_worktree_id=<orca worktree id>
 worktree=<absolute Orca worktree path>
@@ -42,6 +43,7 @@ worktree=<absolute Orca worktree path>
 
 `window=` remains the caller-facing Firstmate alias.
 `terminal=` and `orca_worktree_id=` are the backend authority used by operation and cleanup paths.
+If terminal creation failed and abort cleanup could not remove the worktree, the preserved record has no `terminal=` and carries `orca_recovery=worktree-only` instead.
 
 ## Current lifecycle and safety
 
@@ -60,6 +62,7 @@ A ship still refuses dirty or unlanded work.
 Before release, cleanup resolves the recorded Orca worktree id and verifies its path matches the recorded worktree path.
 A missing, unreadable, or mismatched identity preserves metadata and stops rather than deleting anything.
 After those checks, Firstmate closes the exact terminal and releases the exact worktree with Orca's worktree command.
+A validated `orca_recovery=worktree-only` record skips terminal closure and releases only the exact worktree.
 It never raw-deletes an Orca worktree.
 
 ## Active limits
