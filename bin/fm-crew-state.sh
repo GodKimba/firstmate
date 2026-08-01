@@ -9,7 +9,7 @@
 # re-validates), the log's last line stays stale. This helper never infers the
 # current state from a tail of the log: it reads the authoritative source (a
 # no-mistakes run-step attributed to this crew's branch and current code
-# identity, else the pane busy-signature) and reconciles the possibly-stale log
+# identity, else the per-task semantic busy-state contract) and reconciles the possibly-stale log
 # against it.
 #
 # The determinism lives entirely here - only run-step / pane / log reads plus
@@ -50,9 +50,11 @@
 #      is flagged superseded. A genuinely parked run plus a needs-decision log
 #      agree, and are reported as parked.
 #   4. No run for this crew (pre-validation, or kind=scout): fall back to the
-#      recorded backend's pane busy state, then the status log's last line only
-#      when its verb maps to a recognized run-state. Decision-only events such as
-#      `resolved` never become current state or detail.
+#      per-task semantic busy state. Exact busy reports working; exact idle
+#      permits the ordinary recognized status-log fallback. Unknown state
+#      preserves only a corroborated green-ready report or a durable
+#      needs-decision/blocked/paused event; every other log event stays unknown.
+#      Decision-only events such as `resolved` never become current state or detail.
 #   5. Missing meta or torn-down worktree: report unknown · none. If no run is
 #      attributed to this crew, a dead endpoint also reports unknown · none rather
 #      than trusting a stale status log.
@@ -74,6 +76,8 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 . "$SCRIPT_DIR/fm-classify-lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
+# shellcheck source=bin/fm-busy-lib.sh
+. "$SCRIPT_DIR/fm-busy-lib.sh"
 
 ID=${1:-}
 [ -n "$ID" ] || { echo "usage: fm-crew-state.sh <id>" >&2; exit 2; }
@@ -168,46 +172,19 @@ pane_readable() {  # <target>
     *) fm_backend_capture "$TASK_BACKEND" "$1" 1 "$EXPECTED_LABEL" >/dev/null 2>&1 ;;
   esac
 }
-# crew_pane_is_busy: the busy-signature fallback, backend-aware the same way -
-# fm_backend_busy_state's native semantic state (herdr's agent.get) when
-# available, else the shared harness-scoped pane-regex reader
-# (fm_pane_is_busy, bin/fm-tmux-lib.sh).
-#
-# `busy` alone is trusted outright. Both `idle` and unknown/unparseable fall
-# through to the shared tail-regex corroboration, NOT just unknown: herdr's
-# agent.get reports generation state ("working" while the model is streaming
-# a turn, "done"/"idle" once it is not - docs/herdr-backend.md "Busy state"),
-# which is a narrower signal than "this crew's turn/tool call is still in
-# progress". A crew blocked on its own long-running foreground tool call (e.g.
-# `no-mistakes axi run` without --yes, which blocks synchronously until a gate
-# or outcome - AGENTS.md section 7) is not generating for that whole span, so
-# agent.get can read idle/blocked (bin/backends/herdr.sh maps both to `idle`)
-# while the pane's own rendered text still shows that recorded harness's busy
-# signature for the entire tool call, exactly like tmux's regex-only reader
-# would correctly report. Trusting herdr's `idle`
-# outright (skipping that corroboration) is what let a still-working crew read
-# as not-busy here, and - combined with a no-mistakes run-step lookup that also
-# missed attribution (see nm_runs_status_for_branch) - as not provably working in
-# fm-classify-lib.sh, triggering an immediate (non-wedge) stale wake instead of
-# the absorb-then-escalate path. A genuinely human-blocked agent (a permission
-# dialog, not mid-tool-call) does not render the busy banner, so this
-# corroboration does not mask that case: it stays correctly not-busy.
-crew_pane_is_busy() {  # <target>
-  case "$TASK_BACKEND" in
-    tmux) fm_pane_is_busy "$1" "$HARNESS" ;;
-    *)
-      local bs tail40
-      bs=$(fm_backend_busy_state "$TASK_BACKEND" "$1" 2>/dev/null)
-      case "$bs" in
-        busy) return 0 ;;
-        *)
-          tail40=$(fm_backend_capture "$TASK_BACKEND" "$1" 40 "$EXPECTED_LABEL" 2>/dev/null) || return 1
-          printf '%s' "$tail40" | grep -v '^[[:space:]]*$' | tail -12 \
-            | fm_busy_lines_match "$HARNESS"
-          ;;
-      esac
-      ;;
+# crew_busy_verdict: the crew's semantic busy state from the one contract
+# owner (bin/fm-busy-lib.sh), as "<busy|idle|unknown> <source>". A converted
+# adapter answers from its own lifecycle record; Grok answers from its
+# isolated rendered-tail fallback; a herdr crew's native `busy` is accepted
+# when no record exists, but its native `idle` is NOT, because agent.get
+# reports generation state (idle while a crew blocks on its own long-running
+# foreground tool call) rather than turn state.
+crew_busy_verdict() {  # <target>
+  local tail40=''
+  case "$HARNESS" in
+    grok*) tail40=$(fm_backend_capture "$TASK_BACKEND" "$1" 40 "$EXPECTED_LABEL" 2>/dev/null) || tail40='' ;;
   esac
+  fm_busy_classify "$TASK_BACKEND" "$1" "$HARNESS" "$ID" "$STATE" "$tail40"
 }
 
 # --- no-mistakes run lookup (authoritative when a run matches this branch) --
@@ -785,10 +762,43 @@ fi
 [ -n "$BACKEND_TARGET" ] || emit unknown none "no backend target recorded"
 pane_readable "$BACKEND_TARGET" || emit unknown none "backend target gone: $BACKEND_TARGET"
 
+BUSY_VERDICT=
+if [ "$KIND" != secondmate ]; then
+  BUSY_VERDICT=$(crew_busy_verdict "$BACKEND_TARGET")
+  case "${BUSY_VERDICT%% *}" in
+    busy) emit working pane "harness busy (${BUSY_VERDICT#* })" ;;
+  esac
+fi
+
+# A worker's own green-ready report still carries a concrete CI wait even when
+# the converted harness has no readable semantic busy record. Apply the fork's
+# forge corroboration before that unrelated ambiguity can mask the report.
+if [ "$KIND" != secondmate ] && [ "$LOG_VERB" = "done" ] && log_reports_ci_ready; then
+  if ci_ready_log_allowed; then
+    emit "done" status-log "$CI_READY_LOG_DETAIL"
+  fi
+  emit working ci-withheld "$CI_READY_LOG_DETAIL"
+fi
+
 # Secondmates idle on their own watcher (idle pane = healthy), so the busy
-# signature is not meaningful for them; read their state from the status log only.
-if [ "$KIND" != secondmate ] && crew_pane_is_busy "$BACKEND_TARGET"; then
-  emit working pane "harness busy"
+# state is not meaningful for them; read their state from the status log only.
+# An exact busy verdict already reported working above, and exact idle permits
+# the ordinary status-log fallback below. Missing, malformed, stale, or
+# unverified semantic state remains unknown except for the corroborated
+# green-ready path above and the durable captain-actionable states below.
+if [ "$KIND" != secondmate ]; then
+  case "${BUSY_VERDICT%% *}" in
+    idle) ;;
+    *)
+      # Durable captain-actionable states remain authoritative even when a
+      # converted adapter's semantic busy record is absent or unreadable.
+      # Ambiguous progress and completion events still stay unknown below.
+      case "$LOG_VERB" in
+        needs-decision|blocked|paused) ;;
+        *) emit unknown pane "harness state unavailable ($BUSY_VERDICT)" ;;
+      esac
+      ;;
+  esac
 fi
 
 # Fall back to the status log's last line, but ONLY when its verb maps to a real
@@ -804,12 +814,6 @@ fi
 if [ -n "$LOG_VERB" ]; then
   LOG_STATE=$(map_log_state "$LOG_LINE")
   if [ "$LOG_STATE" != unknown ]; then
-    if [ "$LOG_STATE" = "done" ] && log_reports_ci_ready; then
-      if ci_ready_log_allowed; then
-        emit "done" status-log "$CI_READY_LOG_DETAIL"
-      fi
-      emit working ci-withheld "$CI_READY_LOG_DETAIL"
-    fi
     emit "$LOG_STATE" status-log "$(status_line_note "$LOG_LINE")"
   fi
 fi
