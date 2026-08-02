@@ -648,6 +648,8 @@ test_local_only_fork_remote_allows() {
   write_meta "$case_dir" local-only ship
   wt_commit "$case_dir" "fix the thing"
   add_fork_with_pushed_branch "$case_dir"
+  printf 'terminal\tstatus:I1\t1\n' > "$case_dir/state/task-x1.lifecycle"
+  printf 'status:I1\t1\n' > "$case_dir/state/task-x1.surfaced"
 
   set +e
   run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
@@ -656,7 +658,9 @@ test_local_only_fork_remote_allows() {
 
   expect_code 0 "$rc" "fork-allow: teardown should succeed when HEAD is on a fork remote"
   ! grep -q REFUSED "$case_dir/stderr" || fail "fork-allow: teardown printed a REFUSED line"
-  pass "local-only worktree with HEAD on a fork remote is torn down (fix holds)"
+  [ ! -e "$case_dir/state/task-x1.lifecycle" ] || fail "T21 teardown retained the lifecycle memo"
+  [ ! -e "$case_dir/state/task-x1.surfaced" ] || fail "T21 teardown retained the surfaced ledger"
+  pass "T21 cleanup removes both lifecycle files after landed local-only work"
 }
 
 test_teardown_prompts_tasks_axi_done_when_compatible() {

@@ -18,6 +18,12 @@ When a canonical validated PR poll returns exactly `merged`, the watcher appends
 The receipt makes retirement safely retryable across restarts: fixed-path recovery revalidates the same evidence, removes the runnable check first, removes its registration and data sidecars, removes the receipt last, and preserves task metadata including `pr=`, `pr_head=`, and optional `pr_required_ancestor=`.
 A concurrent replacement remains armed, every non-merged or invalid observation remains unchanged, and retirement never performs task or persistent-secondmate cleanup.
 `bin/fm-pr-lib.sh` owns the receipt format and strict identity mechanics, while `bin/fm-watch.sh` owns queue-before-retirement ordering.
+`bin/fm-lifecycle-lib.sh` is the shared owner for closed lifecycle occurrence identity and whether that occurrence has already surfaced.
+It writes a short-lived `state/<id>.lifecycle` memo containing `working`, `paused`, `parked`, `terminal`, or `unknown`, and a mode-free, endpoint-free `state/<id>.surfaced` occurrence ledger.
+Open keyed decisions and blockers retain precedence through the durable status fold, while structural no-mistakes identity comes from the separate `fm-crew-state.sh --supervision` channel and excludes volatile findings, elapsed prose, URLs, pane captures, and endpoint names.
+Watcher signals, turn-end handling, stale polling, heartbeats, native Herdr transitions, and away-mode rechecks all consult that owner, append the durable notification before recording the occurrence, and clear inherited wedge timing when the lifecycle is no longer working.
+During the first migration phase, the watcher and daemon still dual-write and consult the legacy per-emitter suppressors so rollback remains safe; those legacy files are not additional lifecycle authority.
+Guarded task cleanup removes both lifecycle files only after all existing landed-work and clean-copy proofs succeed.
 No-verb wakes, such as `working:` notes and bare turn-ended signals, are benign only when `bin/fm-crew-state.sh` reports positive evidence that the crew is still working: an actively running no-mistakes step attributed to that crew's current code, an exact busy verdict from the semantic busy-state contract, or its dedicated withheld-CI source.
 A `paused:` declaration enters the longer pause cadence only while authoritative current state still reports paused and the backend confirms a live endpoint.
 Open keyed `needs-decision` and `blocked` occurrences outrank a later unrelated pause.
@@ -28,7 +34,7 @@ Its initial normal-mode status signal still surfaces through the no-verb path, w
 Fresh stale panes use the same current-state read before trusting ordinary terminal or blocker lines, so an active run or exact busy verdict outranks stale non-decision evidence left behind before validation.
 A folded open keyed decision or blocker is the exception to last-event-wins status: a later unrelated pause cannot hide it.
 An open token-era `needs-decision` remains actionable until a correlated resolution or verified captain-held transfer closes it.
-`bin/fm-classify-lib.sh` owns that fold, occurrence deduplication, and the precedence across structured status, authoritative current state, and endpoint liveness.
+`bin/fm-classify-lib.sh` owns the keyed status fold and the precedence across structured status, authoritative current state, and endpoint liveness, while `bin/fm-lifecycle-lib.sh` owns cross-emitter occurrence deduplication.
 Streams whose files predate that protection stay on legacy authority, because the scaffold marks a stream only when it creates it; `bin/fm-decision-cutover-migrate.sh` is the explicitly invoked, one-home-at-a-time path that upgrades the eligible ones by appending the marker, and its header owns which histories it refuses and why.
 No-change heartbeats are also benign.
 Absorbed wakes advance their suppression markers, log to `state/.watch-triage.log`, and keep the watcher blocking without a queue record or LLM turn.

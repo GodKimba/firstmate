@@ -117,6 +117,24 @@ test_daemon_state_root_uses_fm_home() {
   pass "supervise daemon state root is scoped by FM_HOME"
 }
 
+test_daemon_wake_append_is_scoped_to_explicit_state() {
+  local dir ambient target
+  dir=$(make_supercase daemon-wake-scope)
+  ambient="$dir/ambient/state"
+  target="$dir/target/state"
+  mkdir -p "$ambient" "$target"
+
+  FM_HOME="${ambient%/state}" \
+    FM_WAKE_QUEUE="$ambient/.wake-queue" \
+    FM_WAKE_QUEUE_LOCK="$ambient/.wake-queue.lock" \
+    daemon_wake_append "$target" stale sess:fm-test 'stale: sess:fm-test' \
+    || fail "daemon_wake_append rejected the explicit scratch state"
+
+  [ -s "$target/.wake-queue" ] || fail "daemon_wake_append did not write the explicit scratch queue"
+  [ ! -e "$ambient/.wake-queue" ] || fail "daemon_wake_append leaked into the ambient home queue"
+  pass "daemon housekeeping wake appends stay inside the explicit state fixture"
+}
+
 test_classify_routine_signal_self() {
   local dir state out
   dir=$(make_supercase classify-routine)
@@ -801,7 +819,7 @@ test_retained_decision_signal_and_scan_dedup() {
   FM_STATE_OVERRIDE="$state" housekeeping "$state"
   [ ! -s "$state/.subsuper-escalations" ] \
     || fail "daemon catch-all re-fired a retained decision already surfaced by signal"
-  rm -f "$marker" "$state/.subsuper-last-scan"
+  rm -f "$marker" "$state/retained.surfaced" "$state/.subsuper-last-scan"
   FM_STATE_OVERRIDE="$state" housekeeping "$state"
   grep -F "occurrence=$instance" "$state/.subsuper-escalations" >/dev/null \
     || fail "daemon catch-all omitted an unsurfaced retained decision occurrence"
@@ -836,7 +854,7 @@ test_retained_blocker_signal_and_scan_dedup() {
   FM_STATE_OVERRIDE="$state" housekeeping "$state"
   [ ! -s "$state/.subsuper-escalations" ] \
     || fail "daemon catch-all re-fired a retained blocker already surfaced by signal"
-  rm -f "$marker" "$state/.subsuper-last-scan"
+  rm -f "$marker" "$state/retained-blocker.surfaced" "$state/.subsuper-last-scan"
   FM_STATE_OVERRIDE="$state" housekeeping "$state"
   grep -F "open blocked" "$state/.subsuper-escalations" | grep -F "occurrence=$instance" >/dev/null \
     || fail "daemon catch-all omitted an unsurfaced retained blocker occurrence"
@@ -1172,8 +1190,9 @@ test_classify_signal_dedup_against_scan() {
   printf 'done: PR https://x/y/pull/9' > "$state/.subsuper-seen-status-$key"
   out=$(FM_STATE_OVERRIDE="$state" classify_signal "$state/dup-s9.status" "$state")
   case "$out" in self\|*) ;; *) fail "signal not deduped against scan: $out" ;; esac
-  # Without the seen marker, it should escalate.
-  rm -f "$state/.subsuper-seen-status-$key"
+  [ -s "$state/dup-s9.surfaced" ] || fail "legacy signal suppression was not backfilled into the shared ledger"
+  # Simulate a fresh pre-surface state by removing both PR-1 records.
+  rm -f "$state/.subsuper-seen-status-$key" "$state/dup-s9.surfaced" "$state/dup-s9.lifecycle"
   out=$(FM_STATE_OVERRIDE="$state" classify_signal "$state/dup-s9.status" "$state")
   case "$out" in escalate\|*) ;; *) fail "signal should escalate when not seen: $out" ;; esac
   pass "classify_signal dedupes against the catch-all scan seen marker"
@@ -1190,8 +1209,9 @@ test_classify_stale_dedup_against_signal() {
   printf 'done: PR https://x/y/pull/10' > "$state/.subsuper-seen-status-$key"
   out=$(FM_STATE_OVERRIDE="$state" classify_stale "sess:fm-dup-s10" "$state")
   case "$out" in self\|*) ;; *) fail "stale not deduped against signal: $out" ;; esac
-  # Without the seen marker, it should escalate.
-  rm -f "$state/.subsuper-seen-status-$key"
+  [ -s "$state/dup-s10.surfaced" ] || fail "legacy stale suppression was not backfilled into the shared ledger"
+  # Simulate a fresh pre-surface state by removing both PR-1 records.
+  rm -f "$state/.subsuper-seen-status-$key" "$state/dup-s10.surfaced" "$state/dup-s10.lifecycle"
   out=$(FM_STATE_OVERRIDE="$state" classify_stale "sess:fm-dup-s10" "$state")
   case "$out" in escalate\|*) ;; *) fail "stale should escalate when not seen: $out" ;; esac
   pass "classify_stale dedupes against the signal path seen marker"
@@ -2029,6 +2049,7 @@ test_afk_start_refuses_when_flag_cannot_be_written
 test_afk_start_ignores_stale_pidfile_without_lock
 test_afk_start_reclaims_stale_daemon_lock_reused_pid
 test_daemon_state_root_uses_fm_home
+test_daemon_wake_append_is_scoped_to_explicit_state
 test_classify_routine_signal_self
 test_classify_terminal_signal_escalates
 test_classify_check_and_unknown_escalate

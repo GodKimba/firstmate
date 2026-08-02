@@ -167,8 +167,8 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 # window_to_task, scan_captain_relevant_statuses). The SAME library backs the
 # always-on watcher's triage, so the captain-relevant verb set and the
 # classification predicates have exactly one definition.
-# shellcheck source=bin/fm-classify-lib.sh
-. "$FM_DAEMON_DIR/fm-classify-lib.sh"
+# shellcheck source=bin/fm-lifecycle-lib.sh
+. "$FM_DAEMON_DIR/fm-lifecycle-lib.sh"
 
 # Supervisor-pane discovery (FM_SUPERVISOR_TARGET_DEFAULT,
 # FM_SUPERVISOR_BACKEND_DEFAULT, discover_supervisor_target,
@@ -229,6 +229,18 @@ AFK_FLAG_NAME=".afk"
 # $FM_HOME/state. Kept as a function so the pure
 # classifiers can take an explicit state arg without depending on globals.
 _state_root() { printf '%s' "${FM_STATE_OVERRIDE:-$FM_HOME/state}"; }
+
+# Append a daemon-owned housekeeping wake to the explicit state fixture or home.
+# The wake library resolves queue paths at source time, so isolate that resolution
+# in a child shell instead of letting sourced unit tests inherit the real home.
+daemon_wake_append() {  # <state> <kind> <key> <payload>
+  local state=$1
+  shift
+  # shellcheck disable=SC2016 # The child shell expands its own positional parameters.
+  env -u FM_WAKE_QUEUE -u FM_WAKE_QUEUE_LOCK FM_STATE_OVERRIDE="$state" \
+    bash -c '. "$1"; shift; fm_wake_append "$@"' \
+    _ "$FM_DAEMON_DIR/fm-wake-lib.sh" "$@"
+}
 
 # --- portable stat (same trap as fm-watch.sh: no `stat -f || stat -c`) -------
 if [ "$(uname)" = Darwin ]; then
@@ -342,11 +354,17 @@ daemon_pause_recheck_path() {  # <state> <task>
 }
 
 daemon_pause_state_class() {  # <window> <state> <task>
-  local win=$1 state=$2 task=$3 backend endpoint current verdict recheck last seen
+  local win=$1 state=$2 task=$3 backend endpoint current verdict recheck last seen lifecycle class
   backend=$(task_window_backend "$win" "$state")
   endpoint=$(fm_backend_agent_alive "$backend" "$win" 2>/dev/null) || endpoint=unknown
   recheck=$(daemon_pause_recheck_path "$state" "$task")
-  current=$(crew_absorb_class "$task")
+  lifecycle=$(fm_lifecycle_read "$task" force "$state") || true
+  class=${lifecycle%%$'\t'*}
+  case "$class" in
+    working|paused) current=$class ;;
+    unknown) current=$(crew_absorb_class "$task") ;;
+    *) current=none ;;
+  esac
   verdict=$(crew_supervision_precedence "$state/$task.status" "$current" "$endpoint")
   if [ "$verdict" = paused ]; then
     _now > "$recheck"
@@ -360,55 +378,80 @@ daemon_pause_state_class() {  # <window> <state> <task>
   printf '%s' "$verdict"
 }
 
+daemon_legacy_occurrence_surfaced() {  # <task> <identity> <state>
+  local task=$1 identity=$2 state=$3 occurrence last
+  case "$identity" in
+    decision:*)
+      occurrence=${identity#decision:}
+      [ "$(cat "$state/.subsuper-seen-decision-$occurrence" 2>/dev/null || true)" = "$occurrence" ]
+      ;;
+    status:*)
+      last=$(last_status_line "$state/$task.status")
+      [ -n "$last" ] && [ "$(cat "$state/.subsuper-seen-status-$(_stale_key "$task")" 2>/dev/null || true)" = "$last" ]
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+daemon_lifecycle_summary() {  # <task> <class> <identity> <state>
+  local task=$1 class=$2 identity=$3 state=$4 wanted key verb instance summary last
+  case "$identity" in
+    decision:*)
+      wanted=${identity#decision:}
+      while IFS=$'\t' read -r key verb instance summary || [ -n "$key" ]; do
+        [ "$instance" = "$wanted" ] || continue
+        printf 'open %s [key=%s] [occurrence=%s]: %s' "$verb" "$key" "$instance" "$summary"
+        return
+      done <<EOF
+$(status_open_supervision_decisions "$state/$task.status")
+EOF
+      ;;
+  esac
+  last=$(last_status_line "$state/$task.status")
+  printf '%s' "${last:-$class lifecycle}"
+}
+
 classify_signal() {  # <reason-after-colon> <state>
-  local reason=$1 state=$2 f last distilled="" rel="" all_seen=1 task seen
-  local key verb instance summary file_open precedence
+  local reason=$1 state=$2 f base task mode lifecycle class identity last distilled="" precedence win summary
   for f in $reason; do
     [ -e "$f" ] || continue
-    last=$(last_status_line "$f")
-    [ -n "$last" ] || continue
-    distilled="${distilled}$(basename "$f"): ${last} | "
-    task=$(basename "$f"); task="${task%.status}"
-    file_open=
-    while IFS=$'\t' read -r key verb instance summary || [ -n "$key" ]; do
-      [ -n "$key" ] || continue
-      file_open=1
-      rel=1
-      distilled="${distilled}$(basename "$f"): open $verb [key=$key] [occurrence=$instance]: $summary | "
-      seen="$state/.subsuper-seen-decision-$instance"
-      [ "$(cat "$seen" 2>/dev/null || true)" = "$instance" ] || all_seen=0
-    done <<EOF
-$(status_open_supervision_decisions "$f")
-EOF
-    if status_is_captain_relevant "$last"; then
-      if ! status_latest_decision_is_open_occurrence "$f"; then
-        rel=1
-        seen="$state/.subsuper-seen-status-$(_stale_key "$task")"
-        [ "$(cat "$seen" 2>/dev/null || true)" = "$last" ] || all_seen=0
+    base=$(basename "$f")
+    case "$base" in
+      *.status) task=${base%.status}; mode=force ;;
+      *.turn-ended) task=${base%.turn-ended}; mode=cached ;;
+      *) continue ;;
+    esac
+    lifecycle=$(fm_lifecycle_read "$task" "$mode" "$state") || true
+    class=${lifecycle%%$'\t'*}
+    identity=${lifecycle#*$'\t'}
+    if [ "$identity" != none ]; then
+      [ "$(fm_surfaced_state "$task" "$identity" "$state")" = pending ] || continue
+      if daemon_legacy_occurrence_surfaced "$task" "$identity" "$state"; then
+        fm_mark_surfaced "$task" "$identity" "$state" || return 1
+        continue
       fi
-    elif status_is_paused "$last" && [ -z "$file_open" ]; then
-      precedence=$(daemon_pause_state_class "$(window_for_task "$(_stale_key "$task")" "$state" 2>/dev/null || true)" "$state" "$task")
-      if [ "$precedence" = none ]; then
-        rel=1
-        seen="$state/.subsuper-seen-status-$(_stale_key "$task")"
-        [ "$(cat "$seen" 2>/dev/null || true)" = "$last" ] || all_seen=0
-        distilled="${distilled}$(basename "$f"): declared pause is not current on a live endpoint | "
-      elif [ "$precedence" = actionable ]; then
-        rel=1
-        all_seen=0
-      fi
+      summary=$(daemon_lifecycle_summary "$task" "$class" "$identity" "$state")
+      distilled="${distilled}${distilled:+ | }$base: $summary"
+      continue
     fi
+    case "$class" in
+      working|paused) continue ;;
+      unknown)
+        last=$(last_status_line "$state/$task.status")
+        if status_is_paused "$last"; then
+          win=$(window_for_task "$(_stale_key "$task")" "$state" 2>/dev/null || true)
+          precedence=$(daemon_pause_state_class "$win" "$state" "$task")
+          [ "$precedence" = paused ] && continue
+        fi
+        status_is_captain_relevant "$last" || status_is_paused "$last" || continue
+        distilled="${distilled}${distilled:+ | }$base: ${last:-lifecycle unknown}"
+        ;;
+    esac
   done
-  # strip a trailing " | " separator so the distilled line is clean
-  distilled="${distilled% | }"
-  if [ -z "$rel" ]; then
-    printf 'self|routine signal: %s' "$distilled"
-  elif [ "$all_seen" = "1" ]; then
-    # Every relevant status was already escalated by the catch-all scan;
-    # self-handle to avoid a duplicate entry in the digest.
-    printf 'self|signal already escalated (catch-all scan): %s' "$distilled"
-  else
+  if [ -n "$distilled" ]; then
     printf 'escalate|%s' "$distilled"
+  else
+    printf 'self|routine signal already reported or still working'
   fi
 }
 
@@ -416,83 +459,61 @@ EOF
 # first sight of a non-terminal stale it returns "self" and the caller records a
 # timestamp marker; persistence is escalated by housekeeping's recheck, not here.
 classify_stale() {  # <window> <state>
-  local win=$1 state=$2 task last seen key verb instance summary rel="" all_seen=1 distilled="" precedence watcher_key
+  local win=$1 state=$2 task lifecycle class identity last precedence watcher_key
   task=$(window_to_task "$win" "$state")
-  while IFS=$'\t' read -r key verb instance summary || [ -n "$key" ]; do
-    [ -n "$key" ] || continue
-    rel=1
-    distilled="${distilled}${distilled:+ | }open $verb [key=$key] [occurrence=$instance]: $summary"
-    seen="$state/.subsuper-seen-decision-$instance"
-    [ "$(cat "$seen" 2>/dev/null || true)" = "$instance" ] || all_seen=0
-  done <<EOF
-$(status_open_supervision_decisions "$state/$task.status")
-EOF
-  if [ -n "$rel" ]; then
-    if [ "$all_seen" = 1 ]; then
-      printf 'self|stale + open decision already escalated: %s' "$distilled"
+  lifecycle=$(fm_lifecycle_read "$task" cached "$state") || true
+  class=${lifecycle%%$'\t'*}
+  identity=${lifecycle#*$'\t'}
+  if [ "$identity" != none ]; then
+    if [ "$(fm_surfaced_state "$task" "$identity" "$state")" = surfaced ]; then
+      printf 'self|stale + %s already reported (%s)' "$class" "$(fm_lifecycle_identity_prefix "$identity")"
+    elif daemon_legacy_occurrence_surfaced "$task" "$identity" "$state"; then
+      fm_mark_surfaced "$task" "$identity" "$state" || return 1
+      printf 'self|stale + %s already reported (%s)' "$class" "$(fm_lifecycle_identity_prefix "$identity")"
     else
-      printf 'escalate|stale + %s' "$distilled"
+      last=$(last_status_line "$state/$task.status")
+      printf 'escalate|stale + %s: %s' "$class" "${last:-$identity}"
     fi
     return
   fi
-  watcher_key=$(_stale_key "$win")
-  if [ "$(cat "$state/.stale-surfaced-$watcher_key" 2>/dev/null || true)" = "$(capture_unreadable_stale_identity)" ]; then
-    printf 'escalate|stale + endpoint unreadable: %s' "$win"
-    return
-  fi
-  last=$(last_status_line "$state/$task.status")
-  if status_is_paused "$last"; then
-    precedence=$(daemon_pause_state_class "$win" "$state" "$task")
-  else
-    precedence=$(crew_supervision_precedence "$state/$task.status" none unknown)
-  fi
-  if [ "$precedence" = actionable ] && { [ -z "$last" ] || ! status_is_captain_relevant "$last"; }; then
-    printf 'escalate|stale + open structured decision or blocker'
-    return
-  fi
-  if [ "$precedence" = paused ]; then
-    # A declared external-wait pause validated as current on a live endpoint is
-    # expected to idle, so this is not a wedge. The caller records a pause marker
-    # for the long housekeeping cadence rather than a wedge stale marker.
-    printf 'pause|paused (awaiting external), rechecked on a long cadence: %s' "$last"
-    return
-  fi
-  if status_is_paused "$last" && [ "$precedence" = none ]; then
-    seen="$state/.subsuper-seen-status-$(_stale_key "$task")"
-    if [ "$(cat "$seen" 2>/dev/null || true)" = "$last" ]; then
-      printf 'self|stale + invalid pause already escalated: %s' "$last"
-    else
-      printf 'escalate|stale + declared pause is not current on a live endpoint: %s' "$last"
-    fi
-    return
-  fi
-  if [ "$precedence" = actionable ]; then
-    # Independent of free-text captain-relevant matching: a nonterminal progress
-    # verb (working:) must never take the terminal stale path. Seen-status dedupe
-    # must not permanently suppress or clear possible-wedge aging merely because
-    # prose once looked captain-relevant. Real terminal verbs and legacy free-text
-    # captain lines without those verbs keep the terminal escalate/dedupe path.
-    if ! status_is_terminal_verb "$last"; then
-      case "$(status_line_verb "$last")" in
-        working|resolved|captain-held)
-          printf 'self|transient stale (%s): %s' "$win" "$last"
-          return
-          ;;
-      esac
-    fi
-    # Dedupe against the signal path: if this status was already escalated
-    # (seen marker matches), self-handle to avoid a duplicate in the digest.
-    seen="$state/.subsuper-seen-status-$(_stale_key "$task")"
-    if [ "$(cat "$seen" 2>/dev/null || true)" = "$last" ]; then
-      printf 'self|stale + terminal (already escalated by signal): %s' "$last"
+  case "$class" in
+    working)
+      printf 'self|transient stale (%s): working' "$win"
       return
-    fi
-    printf 'escalate|stale + terminal status: %s' "$last"
-    return
-  fi
-  # Non-terminal (or no status): defer to the persistence recheck. The caller
-  # records/refreshes the stale marker so housekeeping can age it.
-  printf 'self|transient stale (%s): %s' "$win" "${last:-no status}"
+      ;;
+    paused)
+      precedence=$(daemon_pause_state_class "$win" "$state" "$task")
+      if [ "$precedence" = paused ]; then
+        last=$(last_status_line "$state/$task.status")
+        printf 'pause|paused (awaiting external), rechecked on a long cadence: %s' "$last"
+      else
+        printf 'escalate|stale + declared pause is not current on a live endpoint'
+      fi
+      return
+      ;;
+    unknown)
+      watcher_key=$(_stale_key "$win")
+      if [ "$(cat "$state/.stale-surfaced-$watcher_key" 2>/dev/null || true)" = "$(capture_unreadable_stale_identity)" ]; then
+        printf 'escalate|stale + endpoint unreadable: %s' "$win"
+      elif [ ! -e "$state/$task.meta" ]; then
+        last=$(last_status_line "$state/$task.status")
+        if status_is_paused "$last"; then
+          precedence=$(daemon_pause_state_class "$win" "$state" "$task")
+          case "$precedence" in
+            paused) printf 'pause|paused (awaiting external), rechecked on a long cadence: %s' "$last" ;;
+            actionable) printf 'escalate|stale + open decision or blocker' ;;
+            *) printf 'escalate|stale + declared pause is not current on a live endpoint: %s' "$last" ;;
+          esac
+        else
+          printf 'self|transient stale (%s): no recorded task metadata' "$win"
+        fi
+      else
+        printf 'escalate|stale + lifecycle unknown: %s' "$win"
+      fi
+      return
+      ;;
+  esac
+  printf 'escalate|stale + unrecognized lifecycle: %s' "$win"
 }
 
 classify_check() {  # <full reason>  — check scripts print only when firstmate should wake
@@ -659,27 +680,36 @@ $(status_open_supervision_decisions "$f")
 EOF
 }
 
-# Mark every folded open occurrence and captain-relevant or invalid-pause last
-# status that a per-wake classification escalated as seen, so the catch-all scan
-# does not re-escalate it within HEARTBEAT_SCAN_SECS.
+daemon_mark_lifecycle_surfaced() {  # <task> <state>
+  local task=$1 state=$2 lifecycle identity
+  lifecycle=$(fm_lifecycle_read "$task" cached "$state") || true
+  identity=${lifecycle#*$'\t'}
+  [ "$identity" = none ] || fm_mark_surfaced "$task" "$identity" "$state"
+}
+
+# Mark every occurrence and the legacy away-mode markers only after the wake is
+# already durable and its distilled escalation has been buffered.
 mark_escalated_seen() {  # <kind> <arg> <state>
-  local kind=$1 arg=$2 state=$3 f last task
+  local kind=$1 arg=$2 state=$3 f last task base
   case "$kind" in
     signal)
       for f in $arg; do
         [ -e "$f" ] || continue
-        mark_open_decisions_seen "$state" "$f"
-        last=$(last_status_line "$f")
+        base=$(basename "$f")
+        case "$base" in *.status) task=${base%.status} ;; *.turn-ended) task=${base%.turn-ended} ;; *) continue ;; esac
+        daemon_mark_lifecycle_surfaced "$task" "$state" || return 1
+        mark_open_decisions_seen "$state" "$state/$task.status"
+        last=$(last_status_line "$state/$task.status")
         [ -n "$last" ] || continue
         if status_latest_decision_is_open_occurrence "$f"; then
           continue
         fi
         status_is_captain_relevant "$last" || status_is_paused "$last" || continue
-        task=$(basename "$f"); task="${task%.status}"
         mark_status_seen "$state" "$task" "$last"
       done ;;
     stale)
       task=$(window_to_task "$arg" "$state")
+      daemon_mark_lifecycle_surfaced "$task" "$state" || return 1
       mark_open_decisions_seen "$state" "$state/$task.status"
       last=$(last_status_line "$state/$task.status")
       [ -n "$last" ] \
@@ -1096,6 +1126,7 @@ _oldest_line_age() {  # <buf> -> seconds since the oldest buffered item first ar
 #     captain-relevant line or folded open decision or blocker and escalate it.
 housekeeping() {  # <state>
   local state=$1 now due f key task win marker age last max_defer oldest pause_secs verdict seen
+  local lifecycle class identity reason meta heartbeat_enqueued summary
   now=$(_now)
   migrate_watcher_pause_markers "$state"
 
@@ -1142,6 +1173,30 @@ housekeeping() {  # <state>
     fi
     task=$(window_to_task "$win" "$state")
     last=$(last_status_line "$state/$task.status")
+    lifecycle=$(fm_lifecycle_read "$task" force "$state") || true
+    class=${lifecycle%%$'\t'*}
+    identity=${lifecycle#*$'\t'}
+    case "$class" in
+      parked|terminal)
+        if [ "$identity" != none ] \
+          && [ "$(fm_surfaced_state "$task" "$identity" "$state")" = pending ]; then
+          if daemon_legacy_occurrence_surfaced "$task" "$identity" "$state"; then
+            fm_mark_surfaced "$task" "$identity" "$state" || return 1
+            rm -f "$marker"
+            continue
+          fi
+          reason="stale: $win ($class lifecycle became actionable during away-mode recheck)"
+          daemon_wake_append "$state" stale "$win" "$reason" || return 1
+          escalate_add "$state" "$task.status: ${last:-$class lifecycle}"
+          fm_mark_surfaced "$task" "$identity" "$state" || return 1
+          mark_open_decisions_seen "$state" "$state/$task.status"
+          last=$(last_status_line "$state/$task.status")
+          [ -n "$last" ] && status_is_captain_relevant "$last" && mark_status_seen "$state" "$task" "$last"
+        fi
+        rm -f "$marker"
+        continue
+        ;;
+    esac
     if [ -n "$last" ] && status_is_paused "$last"; then
       verdict=$(reconcile_pause_tracking "$win" "$state" "$last")
       case "$verdict" in
@@ -1224,30 +1279,72 @@ housekeeping() {  # <state>
     esac
   done
 
-  # (3) heartbeat scan catches a folded open occurrence or captain-relevant last
-  # status the per-wake classifier may have missed.
-  # It reads status files only; the shared scans own filtering and the daemon
-  # layers its digest dedup on top.
+  # (3) heartbeat scan asks the same task-level owner used by signal, stale,
+  # normal-mode, and push emitters.
   if [ "$(_file_age "$state/.subsuper-last-scan")" -ge "${FM_HEARTBEAT_SCAN_SECS:-$HEARTBEAT_SCAN_SECS_DEFAULT}" ]; then
     _now > "$state/.subsuper-last-scan"
-    local instance verb summary
-    while IFS="$(printf '\t')" read -r f task verb instance key summary; do
-      [ -n "$f" ] || continue
-      seen="$state/.subsuper-seen-decision-$instance"
-      [ "$(cat "$seen" 2>/dev/null || true)" = "$instance" ] && continue
-      escalate_add "$state" "$(basename "$f"): open $verb [key=$key] [occurrence=$instance]: $summary (catch-all scan)"
-      printf '%s' "$instance" > "$seen"
-    done < <(scan_open_decisions "$state")
-    while IFS="$(printf '\t')" read -r f task last; do
-      [ -n "$f" ] || continue
-      if status_latest_decision_is_open_occurrence "$f"; then
-        continue
+    heartbeat_enqueued=0
+    for meta in "$state"/*.meta; do
+      [ -e "$meta" ] || continue
+      task=$(basename "$meta"); task=${task%.meta}
+      lifecycle=$(fm_lifecycle_read "$task" cached "$state") || true
+      class=${lifecycle%%$'\t'*}
+      identity=${lifecycle#*$'\t'}
+      f="$state/$task.status"
+      last=$(last_status_line "$f")
+      if [ "$identity" != none ]; then
+        [ "$(fm_surfaced_state "$task" "$identity" "$state")" = pending ] || continue
+        if daemon_legacy_occurrence_surfaced "$task" "$identity" "$state"; then
+          fm_mark_surfaced "$task" "$identity" "$state" || return 1
+          continue
+        fi
+      else
+        [ "$class" != working ] || continue
+        status_is_captain_relevant "$last" || continue
+        seen="$state/.subsuper-seen-status-$(_stale_key "$task")"
+        [ "$(cat "$seen" 2>/dev/null || true)" != "$last" ] || continue
       fi
-      seen="$state/.subsuper-seen-status-$(_stale_key "$task")"
-      [ "$(cat "$seen" 2>/dev/null || true)" = "$last" ] && continue
-      escalate_add "$state" "$(basename "$f"): $last (catch-all scan)"
-      mark_status_seen "$state" "$task" "$last"
-    done < <(scan_captain_relevant_statuses "$state")
+      if [ "$heartbeat_enqueued" -eq 0 ]; then
+        daemon_wake_append "$state" heartbeat heartbeat heartbeat || return 1
+        heartbeat_enqueued=1
+      fi
+      summary=$(daemon_lifecycle_summary "$task" "$class" "$identity" "$state")
+      escalate_add "$state" "$(basename "$f"): $summary (catch-all scan)"
+      if [ "$identity" != none ]; then
+        fm_mark_surfaced "$task" "$identity" "$state" || return 1
+      fi
+      mark_open_decisions_seen "$state" "$f"
+      [ -n "$last" ] && status_is_captain_relevant "$last" && mark_status_seen "$state" "$task" "$last"
+    done
+    for f in "$state"/*.status; do
+      [ -e "$f" ] || continue
+      task=$(basename "$f"); task=${task%.status}
+      [ -e "$state/$task.meta" ] && continue
+      lifecycle=$(fm_lifecycle_read "$task" cached "$state") || true
+      class=${lifecycle%%$'\t'*}
+      identity=${lifecycle#*$'\t'}
+      last=$(last_status_line "$f")
+      if [ "$identity" != none ]; then
+        [ "$(fm_surfaced_state "$task" "$identity" "$state")" = pending ] || continue
+        if daemon_legacy_occurrence_surfaced "$task" "$identity" "$state"; then
+          fm_mark_surfaced "$task" "$identity" "$state" || return 1
+          continue
+        fi
+      else
+        status_is_captain_relevant "$last" || continue
+        seen="$state/.subsuper-seen-status-$(_stale_key "$task")"
+        [ "$(cat "$seen" 2>/dev/null || true)" != "$last" ] || continue
+      fi
+      if [ "$heartbeat_enqueued" -eq 0 ]; then
+        daemon_wake_append "$state" heartbeat heartbeat heartbeat || return 1
+        heartbeat_enqueued=1
+      fi
+      summary=$(daemon_lifecycle_summary "$task" "$class" "$identity" "$state")
+      escalate_add "$state" "$(basename "$f"): $summary (catch-all scan)"
+      [ "$identity" = none ] || fm_mark_surfaced "$task" "$identity" "$state" || return 1
+      mark_open_decisions_seen "$state" "$f"
+      [ -n "$last" ] && status_is_captain_relevant "$last" && mark_status_seen "$state" "$task" "$last"
+    done
   fi
 }
 

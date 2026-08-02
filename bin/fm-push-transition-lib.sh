@@ -9,8 +9,8 @@ FM_PUSH_TRANSITION_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # shellcheck source=bin/fm-wake-lib.sh
 . "$FM_PUSH_TRANSITION_LIB_DIR/fm-wake-lib.sh"
-# shellcheck source=bin/fm-classify-lib.sh
-. "$FM_PUSH_TRANSITION_LIB_DIR/fm-classify-lib.sh"
+# shellcheck source=bin/fm-lifecycle-lib.sh
+. "$FM_PUSH_TRANSITION_LIB_DIR/fm-lifecycle-lib.sh"
 # shellcheck source=bin/fm-backend.sh
 . "$FM_PUSH_TRANSITION_LIB_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-transition-lib.sh
@@ -60,6 +60,21 @@ decision_occurrence_is_surfaced() {  # <stream-id>.<instance>
   [ "$(cat "$path" 2>/dev/null || true)" = "$occurrence" ]
 }
 
+legacy_occurrence_is_surfaced() {  # <task> <identity>
+  local task=$1 identity=$2 occurrence last
+  case "$identity" in
+    decision:*)
+      occurrence=${identity#decision:}
+      decision_occurrence_is_surfaced "$occurrence"
+      ;;
+    status:*)
+      last=$(last_status_line "$STATE/$task.status")
+      [ -n "$last" ] && [ "$(cat "$(_hb_surfaced_path "$task")" 2>/dev/null || true)" = "$last" ]
+      ;;
+    *) return 1 ;;
+  esac
+}
+
 mark_decision_occurrence_surfaced() {  # <stream-id>.<instance>
   local occurrence=$1 path
   path=$(_hb_decision_surfaced_path "$occurrence") || return 1
@@ -77,22 +92,37 @@ EOF
 }
 
 pending_open_decisions() {  # <status-file>
-  local f=$1 key occurrence summary
+  local f=$1 task line identity wanted key occurrence summary
+  task=$(basename "$f"); task=${task%.status}
+  line=$(fm_lifecycle_read "$task" force "$STATE") || true
+  identity=${line#*$'\t'}
+  case "$identity" in decision:*) wanted=${identity#decision:} ;; *) return 0 ;; esac
+  [ "$(fm_surfaced_state "$task" "$identity" "$STATE")" = pending ] || return 0
+  if decision_occurrence_is_surfaced "$wanted"; then
+    fm_mark_surfaced "$task" "$identity" "$STATE" || return 1
+    return 0
+  fi
   while IFS=$'\t' read -r key occurrence summary || [ -n "$key" ]; do
     [ -n "$key" ] || continue
-    decision_occurrence_is_surfaced "$occurrence" && continue
+    [ "$occurrence" = "$wanted" ] || continue
     printf '%s\t%s\t%s\n' "$key" "$occurrence" "$summary"
+    return 0
   done <<EOF
 $(status_open_token_needs_decisions "$f")
 EOF
 }
 
 enqueue_pending_open_decisions() {  # <status-file>
-  local f=$1 key occurrence summary found=1 payload
+  local f=$1 task key occurrence summary found=1 payload identity
+  task=$(basename "$f"); task=${task%.status}
   while IFS=$'\t' read -r key occurrence summary || [ -n "$key" ]; do
     [ -n "$key" ] || continue
+    identity="decision:$occurrence"
     payload="decision: $(basename "$f") [key=$key] [occurrence=$occurrence]: $summary"
     fm_wake_append decision "$occurrence" "$payload" || return 2
+    if [ ! -e "$STATE/.afk" ]; then
+      fm_mark_surfaced "$task" "$identity" "$STATE" || return 2
+    fi
     mark_decision_occurrence_surfaced "$occurrence" || return 2
     found=0
   done <<EOF
@@ -101,9 +131,9 @@ EOF
   return "$found"
 }
 
-# Record folded open occurrences and the current captain-relevant status after
-# their durable wake has been enqueued.
-mark_surfaced() {  # <status-file>
+# Keep dual-writing the legacy normal-mode markers through PR 1 so reverting
+# the new owner restores the prior behavior without a state gap.
+mark_legacy_surfaced() {  # <status-file>
   local f=$1 task last
   mark_open_decision_occurrences_surfaced "$f" || return 1
   task=$(basename "$f"); task="${task%.status}"
@@ -113,9 +143,22 @@ mark_surfaced() {  # <status-file>
   printf '%s' "$last" > "$(_hb_surfaced_path "$task")"
 }
 
+# Record the current occurrence and the legacy markers only after its durable
+# wake has been enqueued.
+mark_surfaced() {  # <status-file>
+  local f=$1 task line identity
+  task=$(basename "$f"); task="${task%.status}"
+  line=$(fm_lifecycle_read "$task" cached "$STATE") || true
+  identity=${line#*$'\t'}
+  if [ -n "$identity" ] && [ "$identity" != none ]; then
+    fm_mark_surfaced "$task" "$identity" "$STATE" || return 1
+  fi
+  mark_legacy_surfaced "$f"
+}
+
 # Act on a fresh actionable transition from a push-capable backend.
 handle_push_transition() {  # <backend> <session> <record>
-  local backend=$1 session=$2 record=$3 pane_id to window task reason statusf last current endpoint precedence
+  local backend=$1 session=$2 record=$3 pane_id to window task reason statusf last current endpoint precedence lifecycle class identity
   pane_id=$(fm_transition_pane_id "$record")
   to=$(fm_transition_to_status "$record")
   [ -n "$pane_id" ] || { sleep 1; return; }
@@ -129,14 +172,30 @@ handle_push_transition() {  # <backend> <session> <record>
     endpoint=$(fm_backend_agent_alive "$backend" "$window" 2>/dev/null) || endpoint=unknown
     precedence=$(crew_supervision_precedence "$statusf" "$current" "$endpoint")
   fi
-  if [ "$precedence" = paused ]; then
+  lifecycle=$(fm_lifecycle_read "$task" force "$STATE") || true
+  class=${lifecycle%%$'\t'*}
+  identity=${lifecycle#*$'\t'}
+  if [ "$precedence" = paused ] || [ "$class" = paused ]; then
     triage_log "absorbed push $to (declared pause, awaiting external): $window"
+    fm_backend_commit_transition "$backend" "$STATE" "$session" "$record" || exit 1
+    return
+  fi
+  if [ "$identity" != none ] \
+    && { [ "$(fm_surfaced_state "$task" "$identity" "$STATE")" = surfaced ] \
+      || legacy_occurrence_is_surfaced "$task" "$identity"; }; then
+    fm_mark_surfaced "$task" "$identity" "$STATE" || exit 1
+    triage_log "absorbed $class (already reported, $(fm_lifecycle_identity_prefix "$identity")): $window"
     fm_backend_commit_transition "$backend" "$STATE" "$session" "$record" || exit 1
     return
   fi
   reason="stale: $window (herdr: agent $to - waiting on human, escalated immediately, not via wedge timer)"
   fm_wake_append stale "$window" "$reason" || exit 1
   fm_backend_commit_transition "$backend" "$STATE" "$session" "$record" || exit 1
-  mark_surfaced "$STATE/$task.status"
+  if [ -e "$STATE/.afk" ]; then
+    mark_legacy_surfaced "$STATE/$task.status"
+  else
+    [ "$identity" = none ] || fm_mark_surfaced "$task" "$identity" "$STATE" || exit 1
+    mark_surfaced "$STATE/$task.status"
+  fi
   wake "$reason"
 }
