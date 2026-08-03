@@ -391,6 +391,51 @@ t22_push_records_only_the_bound_occurrence() (
   pass "T22 push records only the occurrence captured before enqueue"
 )
 
+t22_afk_handoff_stays_pending_until_daemon_buffering() (
+  local state occurrence identity line record
+  state=$(new_state t22-afk-decision); STATE=$state; export STATE
+  FM_WAKE_QUEUE="$state/.wake-queue"
+  FM_WAKE_QUEUE_LOCK="$state/.wake-queue.lock"
+  export FM_WAKE_QUEUE FM_WAKE_QUEUE_LOCK
+  set_meta "$state" task lab:p1
+  fm_decision_cutover_ensure_status "$state/task.status"
+  printf 'needs-decision [key=route]: choose route\n' >> "$state/task.status"
+  occurrence=$(status_open_supervision_decisions "$state/task.status" | awk -F '\t' '$1 == "route" { print $3 }')
+  identity="decision:$occurrence"
+  set_supervision "$state" task unknown none
+  : > "$state/.afk"
+  # shellcheck source=bin/fm-push-transition-lib.sh
+  . "$ROOT/bin/fm-push-transition-lib.sh"
+  enqueue_pending_open_decisions "$state/task.status" \
+    || fail "T22 AFK decision was not enqueued"
+  assert_pending "$state" task "$identity" "T22 AFK decision handoff advanced the shared ledger"
+  decision_occurrence_is_surfaced "$occurrence" \
+    && fail "T22 AFK decision handoff advanced the watcher legacy ledger"
+  grep -F "$(printf '\tdecision\t%s\t' "$occurrence")" "$state/.wake-queue" >/dev/null \
+    || fail "T22 AFK decision handoff was not durable"
+
+  state=$(new_state t22-afk-push); STATE=$state; export STATE
+  line='failed: wait for daemon buffering'
+  identity=$(fm_lifecycle_status_identity "$line")
+  set_meta "$state" task lab:p1
+  printf '%s\n' "$line" > "$state/task.status"
+  set_supervision "$state" task terminal "$identity"
+  : > "$state/.afk"
+  fm_transition_pane_id() { printf 'p1'; }
+  fm_transition_to_status() { printf 'blocked'; }
+  window_to_task() { printf 'task'; }
+  fm_backend_commit_transition() { :; }
+  fm_backend_agent_alive() { printf alive; }
+  fm_wake_append() { :; }
+  wake() { :; }
+  record=fixture
+  handle_push_transition herdr lab "$record"
+  assert_pending "$state" task "$identity" "T22 AFK push handoff advanced the shared ledger"
+  [ ! -e "$state/.hb-surfaced-task" ] \
+    || fail "T22 AFK push handoff advanced the watcher legacy ledger"
+  pass "T22 AFK handoffs stay pending until daemon buffering"
+)
+
 p1_decision_identity_precedes_run_readability
 p4_non_occurrence_classes_have_none_identity
 p5_none_is_never_recorded
@@ -409,5 +454,6 @@ t19_merge_poll_artifacts_are_independent
 t20_cleanup_refusal_keeps_task_visible
 t22_enqueue_before_record_replays_toward_a_duplicate
 t22_push_records_only_the_bound_occurrence
+t22_afk_handoff_stays_pending_until_daemon_buffering
 
 echo "all fm-lifecycle-ledger tests passed"

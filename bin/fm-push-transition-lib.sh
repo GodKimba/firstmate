@@ -112,8 +112,8 @@ enqueue_pending_open_decisions() {  # <status-file>
     fm_wake_append decision "$occurrence" "$payload" || return 2
     if [ ! -e "$STATE/.afk" ]; then
       fm_mark_surfaced "$task" "$identity" "$STATE" || return 2
+      mark_decision_occurrence_surfaced "$occurrence" || return 2
     fi
-    mark_decision_occurrence_surfaced "$occurrence" || return 2
     found=0
   done <<EOF
 $(pending_open_decisions "$f")
@@ -204,9 +204,7 @@ handle_push_transition() {  # <backend> <session> <record>
   reason="stale: $window (herdr: agent $to - waiting on human, escalated immediately, not via wedge timer)"
   fm_wake_append stale "$window" "$reason" || exit 1
   fm_backend_commit_transition "$backend" "$STATE" "$session" "$record" || exit 1
-  if [ -e "$STATE/.afk" ]; then
-    mark_legacy_surfaced "$STATE/$task.status" "$legacy_identity" || exit 1
-  else
+  if [ ! -e "$STATE/.afk" ]; then
     mark_surfaced "$STATE/$task.status" "$identity" "$legacy_identity" || exit 1
   fi
   wake "$reason"

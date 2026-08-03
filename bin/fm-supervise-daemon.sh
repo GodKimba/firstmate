@@ -662,7 +662,7 @@ migrate_watcher_pause_markers() {  # <state>
       if [ "$verdict" = none ]; then
         seen="$state/.subsuper-seen-status-$key"
         if [ "$(cat "$seen" 2>/dev/null || true)" != "$last" ]; then
-          escalate_add "$state" "$(basename "$state/$task.status"): declared pause is not current on a live endpoint"
+          escalate_add "$state" "$(basename "$state/$task.status"): declared pause is not current on a live endpoint" || return 1
           mark_status_seen "$state" "$task" "$last"
         fi
         stale_marker_record "$win" "$state"
@@ -1142,9 +1142,9 @@ _oldest_line_age() {  # <buf> -> seconds since the oldest buffered item first ar
 #     captain-relevant line or folded open decision or blocker and escalate it.
 housekeeping() {  # <state>
   local state=$1 now due f key task win marker age last max_defer oldest pause_secs verdict seen
-  local lifecycle class identity reason meta heartbeat_enqueued summary binding
+  local lifecycle class identity reason meta heartbeat_enqueued summary binding marker_epoch _memo_epoch stale_secs
   now=$(_now)
-  migrate_watcher_pause_markers "$state"
+  migrate_watcher_pause_markers "$state" || return 1
 
   # (1) batch flush
   if [ "${FM_ESCALATE_BATCH_SECS:-$ESCALATE_BATCH_SECS_DEFAULT}" -le 0 ]; then
@@ -1189,9 +1189,26 @@ housekeeping() {  # <state>
     fi
     task=$(window_to_task "$win" "$state")
     last=$(last_status_line "$state/$task.status")
-    lifecycle=$(fm_lifecycle_read "$task" force "$state") || true
-    class=${lifecycle%%$'\t'*}
-    identity=${lifecycle#*$'\t'}
+    marker_epoch=$(cat "$marker" 2>/dev/null || true)
+    case "$marker_epoch" in ''|*[!0-9]*) marker_epoch=$now ;; esac
+    age=$((now - marker_epoch))
+    [ "$age" -ge 0 ] || age=0
+    stale_secs=${FM_STALE_ESCALATE_SECS:-$STALE_ESCALATE_SECS_DEFAULT}
+    if [ "$age" -ge "$stale_secs" ]; then
+      lifecycle=$(fm_lifecycle_read "$task" force "$state") || true
+      class=${lifecycle%%$'\t'*}
+      identity=${lifecycle#*$'\t'}
+    else
+      lifecycle=$(fm_lifecycle_memo_read "$task" "$state" 2>/dev/null || true)
+      if [ -n "$lifecycle" ]; then
+        IFS=$'\t' read -r class identity _memo_epoch <<EOF
+$lifecycle
+EOF
+      else
+        class=unknown
+        identity=none
+      fi
+    fi
     case "$class" in
       parked|terminal)
         if [ "$identity" != none ] \
@@ -1205,7 +1222,7 @@ housekeeping() {  # <state>
           summary=$(daemon_lifecycle_summary "$task" "$class" "$identity" "$state")
           binding=$(daemon_binding_record "$task" "$identity" "$state")
           daemon_wake_append "$state" stale "$win" "$reason" || return 1
-          escalate_add "$state" "$task.status: $summary"
+          escalate_add "$state" "$task.status: $summary" || return 1
           mark_escalated_seen "$state" "$binding" || return 1
         fi
         rm -f "$marker"
@@ -1220,20 +1237,22 @@ housekeeping() {  # <state>
         none)
           seen="$state/.subsuper-seen-status-$(_stale_key "$task")"
           if [ "$(cat "$seen" 2>/dev/null || true)" != "$last" ]; then
-            escalate_add "$state" "$task.status: declared pause is not current on a live endpoint"
+            escalate_add "$state" "$task.status: declared pause is not current on a live endpoint" || return 1
             mark_status_seen "$state" "$task" "$last"
           fi
           stale_marker_record "$win" "$state"
           ;;
       esac
     fi
-    age=$(( now - $(cat "$marker" 2>/dev/null || echo "$now") ))
-    [ "$age" -ge "${FM_STALE_ESCALATE_SECS:-$STALE_ESCALATE_SECS_DEFAULT}" ] || continue
+    [ "$age" -ge "$stale_secs" ] || continue
     stale_window_is_busy "$win" "$state"
     case "$?" in
       0) rm -f "$marker" ;;
-      2) rm -f "$marker" ;;
-      *) escalate_add "$state" "stale persisted ${age}s (possible wedge): $win"
+      2) if [ "$class" = unknown ]; then
+           escalate_add "$state" "stale persisted ${age}s with unknown lifecycle and unreadable endpoint: $win" || return 1
+         fi
+         rm -f "$marker" ;;
+      *) escalate_add "$state" "stale persisted ${age}s (possible wedge): $win" || return 1
          stale_marker_remove "$win" "$state" ;;
     esac
   done
@@ -1268,7 +1287,7 @@ housekeeping() {  # <state>
       none)
         seen="$state/.subsuper-seen-status-$(_stale_key "$task")"
         if [ "$(cat "$seen" 2>/dev/null || true)" != "$last" ]; then
-          escalate_add "$state" "$task.status: declared pause is not current on a live endpoint"
+          escalate_add "$state" "$task.status: declared pause is not current on a live endpoint" || return 1
           mark_status_seen "$state" "$task" "$last"
         fi
         clear_pause_markers "$win" "$state"
@@ -1285,7 +1304,7 @@ housekeeping() {  # <state>
       *)
         last=$(last_status_line "$state/$task.status")
         if [ -n "$last" ] && status_is_paused "$last"; then
-          escalate_add "$state" "paused ${age}s (awaiting external, recheck whether the wait still holds): $win"
+          escalate_add "$state" "paused ${age}s (awaiting external, recheck whether the wait still holds): $win" || return 1
           _now > "$marker"
         else
           rm -f "$marker"
@@ -1325,7 +1344,7 @@ housekeeping() {  # <state>
       fi
       summary=$(daemon_lifecycle_summary "$task" "$class" "$identity" "$state")
       binding=$(daemon_binding_record "$task" "$identity" "$state" "$last")
-      escalate_add "$state" "$(basename "$f"): $summary (catch-all scan)"
+      escalate_add "$state" "$(basename "$f"): $summary (catch-all scan)" || return 1
       mark_escalated_seen "$state" "$binding" || return 1
     done
     for f in "$state"/*.status; do
@@ -1353,7 +1372,7 @@ housekeeping() {  # <state>
       fi
       summary=$(daemon_lifecycle_summary "$task" "$class" "$identity" "$state")
       binding=$(daemon_binding_record "$task" "$identity" "$state" "$last")
-      escalate_add "$state" "$(basename "$f"): $summary (catch-all scan)"
+      escalate_add "$state" "$(basename "$f"): $summary (catch-all scan)" || return 1
       mark_escalated_seen "$state" "$binding" || return 1
     done
   fi
@@ -1514,7 +1533,7 @@ handle_wake() {  # <reason> <state>
   case "$action" in
     escalate)
       log "escalate: $reason -> $distilled"
-      escalate_add "$state" "$distilled"
+      escalate_add "$state" "$distilled" || return 1
       # Terminal and structured-decision stale escalations drop persistence
       # tracking; an invalid pause resumes normal stale aging.
       if [ "$kind" = stale ]; then

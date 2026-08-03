@@ -981,6 +981,88 @@ test_signal_escalate_marks_only_captured_occurrences() {
   pass "daemon records only occurrences captured before buffering"
 }
 
+test_escalation_buffer_failure_keeps_occurrences_pending() {
+  local dir state line expected_identity key
+  dir=$(make_supercase buffer-failure-signal)
+  state="$dir/state"
+  line='failed: buffer unavailable'
+  expected_identity=$(fm_lifecycle_status_identity "$line")
+  printf '%s\n' "$line" > "$state/buffer-failure.status"
+  (
+    fm_lifecycle_read() { printf 'terminal\t%s\n' "$expected_identity"; }
+    escalate_add() { return 1; }
+    if FM_STATE_OVERRIDE="$state" handle_wake "signal: $state/buffer-failure.status" "$state"; then
+      fail "signal handling succeeded after escalation buffering failed"
+    fi
+  )
+  [ ! -e "$state/buffer-failure.surfaced" ] \
+    || fail "signal buffer failure advanced the shared ledger"
+  key=$(_stale_key buffer-failure)
+  [ ! -e "$state/.subsuper-seen-status-$key" ] \
+    || fail "signal buffer failure advanced the daemon legacy ledger"
+
+  dir=$(make_supercase buffer-failure-heartbeat)
+  state="$dir/state"
+  printf '%s\n' "$line" > "$state/buffer-failure.status"
+  fm_write_meta "$state/buffer-failure.meta" "window=sess:fm-buffer-failure" "worktree=$dir/worktree" "kind=ship"
+  (
+    fm_lifecycle_read() { printf 'terminal\t%s\n' "$expected_identity"; }
+    daemon_wake_append() { :; }
+    escalate_add() { return 1; }
+    if FM_STATE_OVERRIDE="$state" FM_HEARTBEAT_SCAN_SECS=0 housekeeping "$state"; then
+      fail "heartbeat housekeeping succeeded after escalation buffering failed"
+    fi
+  )
+  [ ! -e "$state/buffer-failure.surfaced" ] \
+    || fail "heartbeat buffer failure advanced the shared ledger"
+  [ ! -e "$state/.subsuper-seen-status-$key" ] \
+    || fail "heartbeat buffer failure advanced the daemon legacy ledger"
+  pass "failed escalation buffering leaves exact occurrences pending"
+}
+
+test_housekeeping_stale_probe_waits_for_due_boundary() {
+  local dir state win key marker reads count
+  dir=$(make_supercase stale-probe-boundary)
+  state="$dir/state"
+  win='sess:fm-probe-boundary'
+  key=$(_stale_key probe-boundary)
+  marker="$state/.subsuper-stale-$key"
+  fm_write_meta "$state/probe-boundary.meta" "window=$win" "worktree=$dir/worktree" "kind=ship"
+  printf 'working: still running\n' > "$state/probe-boundary.status"
+  fm_lifecycle_memo_write probe-boundary working none "$state"
+  _now > "$marker"
+  _now > "$state/.subsuper-last-scan"
+  reads="$state/.lifecycle-reads"
+  (
+    fm_lifecycle_read() {
+      printf '%s\n' "$2" >> "$reads"
+      printf 'unknown\tnone\n'
+    }
+    FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=240 FM_HEARTBEAT_SCAN_SECS=999999 \
+      housekeeping "$state"
+  )
+  [ ! -e "$reads" ] || fail "stale housekeeping probed before the due boundary"
+  [ -e "$marker" ] || fail "stale housekeeping cleared an undued marker"
+
+  echo $(( $(date +%s) - 500 )) > "$marker"
+  (
+    fm_lifecycle_read() {
+      printf '%s\n' "$2" >> "$reads"
+      rm -f "$marker"
+      printf 'unknown\tnone\n'
+    }
+    stale_window_is_busy() { return 1; }
+    FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=240 FM_HEARTBEAT_SCAN_SECS=999999 \
+      housekeeping "$state"
+  )
+  count=$(wc -l < "$reads" | tr -d '[:space:]')
+  [ "$count" = 1 ] && [ "$(cat "$reads")" = force ] \
+    || fail "stale housekeeping did not force exactly once at the due boundary"
+  [ -s "$state/.subsuper-escalations" ] \
+    || fail "unknown lifecycle disappeared when its due-boundary probe cleared the marker"
+  pass "stale housekeeping probes once at the due boundary and preserves unknown visibility"
+}
+
 test_collapse_newlines_pure() {
   local out
   out=$(_collapse_newlines $'line one\nline two\nline three')
@@ -2119,6 +2201,7 @@ test_housekeeping_pause_endpoint_loss_escalates_immediately
 test_housekeeping_authoritative_working_pause_keeps_wedge_aging
 test_housekeeping_invalid_pause_preserves_wedge_aging
 test_housekeeping_persistent_stale_escalates
+test_housekeeping_stale_probe_waits_for_due_boundary
 test_housekeeping_resumed_stale_cleared
 test_housekeeping_paused_resurfaces_and_resets
 test_housekeeping_paused_resumed_cleared
@@ -2140,6 +2223,7 @@ test_is_wake_reason_distinguishes_status_stdout
 test_terminal_stale_escalate_leaves_no_marker
 test_signal_escalate_marks_seen_no_catchall_refire
 test_signal_escalate_marks_only_captured_occurrences
+test_escalation_buffer_failure_keeps_occurrences_pending
 test_collapse_newlines_pure
 test_afk_absent_daemon_does_not_inject
 test_busy_guard_defers_when_supervisor_busy

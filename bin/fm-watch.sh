@@ -445,9 +445,7 @@ surface_nonterminal_stale() {  # <window> <hash>
   printf '%s' "$h" > "$STATE/.stale-surfaced-$key"
   rm -f "$STATE/.stale-since-$key"
   clear_pause_state "$win"
-  if afk_present; then
-    mark_legacy_surfaced "$STATE/$task.status" "$legacy_identity" || exit 1
-  else
+  if ! afk_present; then
     mark_surfaced "$STATE/$task.status" "$identity" "$legacy_identity" || exit 1
   fi
   wake "stale: $win"
@@ -1014,9 +1012,7 @@ EOF
       done <<EOF
 $pending
 EOF
-      if afk_present; then
-        mark_surfaced_bindings "$signal_bindings" 1 || exit 1
-      else
+      if ! afk_present; then
         mark_surfaced_bindings "$signal_bindings" || exit 1
       fi
       wake "$reason"
