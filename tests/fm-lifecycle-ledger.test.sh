@@ -214,7 +214,7 @@ t7_herdr_push_consults_the_shared_ledger() (
 )
 
 t9_nonworking_boundary_clears_inherited_wedge_timing() {
-  local state key
+  local state key window_key
   state=$(new_state t9); set_meta "$state" task sess:fm-task
   key=sess_fm-task
   : > "$state/.stale-since-$key"
@@ -225,6 +225,19 @@ t9_nonworking_boundary_clears_inherited_wedge_timing() {
   [ ! -e "$state/.stale-since-$key" ] || fail "T9 retained watcher wedge timer"
   [ ! -e "$state/.wedge-escalations-$key" ] || fail "T9 retained watcher escalation count"
   [ ! -e "$state/.subsuper-stale-task" ] || fail "T9 retained away-mode wedge timer"
+
+  state=$(new_state t9-orca)
+  printf 'window=fm-task\nterminal=term-orca-task\nbackend=orca\nworktree=%s/worktree\nkind=ship\n' "$state" > "$state/task.meta"
+  key=term-orca-task
+  window_key=fm-task
+  : > "$state/.stale-since-$key"
+  : > "$state/.wedge-escalations-$key"
+  : > "$state/.stale-since-$window_key"
+  set_supervision "$state" task terminal status:I1
+  read_tuple "$state" task >/dev/null
+  [ ! -e "$state/.stale-since-$key" ] || fail "T9 retained Orca terminal-keyed wedge timer"
+  [ ! -e "$state/.wedge-escalations-$key" ] || fail "T9 retained Orca terminal-keyed escalation count"
+  [ -e "$state/.stale-since-$window_key" ] || fail "T9 cleared the unrelated Orca window key"
   pass "T9 non-working lifecycle boundary clears inherited wedge timing"
 }
 
@@ -336,6 +349,48 @@ t22_enqueue_before_record_replays_toward_a_duplicate() {
   pass "T22 crash between enqueue and record permits at most a duplicate, never silence"
 }
 
+t22_push_records_only_the_bound_occurrence() (
+  local state line1 line2 identity1 identity2 record d1 d2
+  state=$(new_state t22-push-status); STATE=$state; export STATE
+  line1='failed: first occurrence'
+  line2='failed: second occurrence'
+  identity1=$(fm_lifecycle_status_identity "$line1")
+  identity2=$(fm_lifecycle_status_identity "$line2")
+  set_meta "$state" task lab:p1
+  printf '%s\n' "$line1" > "$state/task.status"
+  set_supervision "$state" task terminal "$identity1"
+  # shellcheck source=bin/fm-push-transition-lib.sh
+  . "$ROOT/bin/fm-push-transition-lib.sh"
+  fm_transition_pane_id() { printf 'p1'; }
+  fm_transition_to_status() { printf 'blocked'; }
+  window_to_task() { printf 'task'; }
+  fm_backend_commit_transition() { :; }
+  fm_backend_agent_alive() { printf alive; }
+  fm_wake_append() {
+    printf '%s\n' "$line2" >> "$state/task.status"
+    set_supervision "$state" task terminal "$identity2"
+  }
+  wake() { :; }
+  record=fixture
+  handle_push_transition herdr lab "$record"
+  grep -F "$identity1" "$state/task.surfaced" >/dev/null || fail "T22 push did not record the enqueued status occurrence"
+  grep -F "$identity2" "$state/task.surfaced" >/dev/null && fail "T22 push recorded a later status occurrence"
+  assert_eq "$(cat "$(_hb_surfaced_path task)")" "$line1" "T22 push legacy marker drifted to the later status"
+
+  state=$(new_state t22-push-decisions); STATE=$state; export STATE
+  set_meta "$state" task lab:p1
+  fm_decision_cutover_ensure_status "$state/task.status"
+  printf 'needs-decision [key=one]: first\nneeds-decision [key=two]: second\n' >> "$state/task.status"
+  d1=$(status_open_supervision_decisions "$state/task.status" | awk -F '\t' '$1 == "one" { print $3 }')
+  d2=$(status_open_supervision_decisions "$state/task.status" | awk -F '\t' '$1 == "two" { print $3 }')
+  set_supervision "$state" task unknown none
+  fm_wake_append() { :; }
+  handle_push_transition herdr lab "$record"
+  decision_occurrence_is_surfaced "$d1" || fail "T22 push did not dual-write the queued decision"
+  decision_occurrence_is_surfaced "$d2" && fail "T22 push dual-wrote an unqueued decision"
+  pass "T22 push records only the occurrence captured before enqueue"
+)
+
 p1_decision_identity_precedes_run_readability
 p4_non_occurrence_classes_have_none_identity
 p5_none_is_never_recorded
@@ -353,5 +408,6 @@ t16_t18_nonoccurrence_visibility_contracts
 t19_merge_poll_artifacts_are_independent
 t20_cleanup_refusal_keeps_task_visible
 t22_enqueue_before_record_replays_toward_a_duplicate
+t22_push_records_only_the_bound_occurrence
 
 echo "all fm-lifecycle-ledger tests passed"

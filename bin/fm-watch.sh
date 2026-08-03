@@ -422,12 +422,14 @@ pause_state_class() {  # <window> <task>
 }
 
 surface_nonterminal_stale() {  # <window> <hash>
-  local win=$1 h=$2 key task lifecycle class identity
+  local win=$1 h=$2 key task lifecycle class identity last legacy_identity
   key=$(printf '%s' "$win" | tr ':/.' '___')
   task=$(window_to_task "$win" "$STATE")
   lifecycle=$(fm_lifecycle_read "$task" cached "$STATE") || true
   class=${lifecycle%%$'\t'*}
   identity=${lifecycle#*$'\t'}
+  last=$(last_status_line "$STATE/$task.status")
+  legacy_identity=$(fm_lifecycle_legacy_identity "$identity" "$last")
   if [ "$identity" != none ] \
     && { [ "$(fm_surfaced_state "$task" "$identity" "$STATE")" = surfaced ] \
       || legacy_occurrence_is_surfaced "$task" "$identity"; }; then
@@ -444,10 +446,9 @@ surface_nonterminal_stale() {  # <window> <hash>
   rm -f "$STATE/.stale-since-$key"
   clear_pause_state "$win"
   if afk_present; then
-    mark_legacy_surfaced "$STATE/$task.status"
+    mark_legacy_surfaced "$STATE/$task.status" "$legacy_identity" || exit 1
   else
-    [ "$identity" = none ] || fm_mark_surfaced "$task" "$identity" "$STATE" || exit 1
-    mark_surfaced "$STATE/$task.status"
+    mark_surfaced "$STATE/$task.status" "$identity" "$legacy_identity" || exit 1
   fi
   wake "stale: $win"
 }
@@ -582,28 +583,10 @@ run_check_capture() {
 
 # Surfaced-marker bookkeeping for the heartbeat backstop is owned by
 # fm-push-transition-lib.sh because push and poll paths must write one format.
-# Mark every current captain-relevant status and folded open occurrence as
-# surfaced. Called after the heartbeat backstop enqueues its wake, so the same
-# material is not re-surfaced by the next heartbeat.
-mark_all_captain_relevant_surfaced() {
-  local meta task lifecycle identity f
-  for meta in "$STATE"/*.meta; do
-    [ -e "$meta" ] || continue
-    task=$(basename "$meta"); task=${task%.meta}
-    lifecycle=$(fm_lifecycle_read "$task" cached "$STATE") || true
-    identity=${lifecycle#*$'\t'}
-    if [ "$identity" != none ] && [ "$(fm_surfaced_state "$task" "$identity" "$STATE")" = pending ]; then
-      fm_mark_surfaced "$task" "$identity" "$STATE" || return 1
-    fi
-    f="$STATE/$task.status"
-    [ -e "$f" ] && mark_legacy_surfaced "$f" || true
-  done
-  for f in "$STATE"/*.status; do
-    [ -e "$f" ] || continue
-    task=$(basename "$f"); task=${task%.status}
-    [ -e "$STATE/$task.meta" ] && continue
-    mark_surfaced "$f" || return 1
-  done
+# Mark the occurrences captured by the heartbeat scan as surfaced after the
+# heartbeat backstop enqueues its wake.
+mark_all_captain_relevant_surfaced() {  # <captured-bindings>
+  mark_surfaced_bindings "$1"
 }
 
 # Cheap heartbeat fleet-scan (the always-on twin of the daemon's catch-all).
@@ -613,7 +596,8 @@ mark_all_captain_relevant_surfaced() {
 # This normally finds nothing and the heartbeat is absorbed; it is the fail-safe
 # backstop for material the per-wake path absorbed by mistake.
 heartbeat_scan_finds_actionable() {
-  local meta task lifecycle class identity f last surfaced
+  local meta task lifecycle class identity legacy_identity f last surfaced found=1 bindings=""
+  FM_HEARTBEAT_SURFACED_BINDINGS=
   for meta in "$STATE"/*.meta; do
     [ -e "$meta" ] || continue
     task=$(basename "$meta"); task=${task%.meta}
@@ -628,24 +612,26 @@ heartbeat_scan_finds_actionable() {
         fm_mark_surfaced "$task" "$identity" "$STATE" || return 0
         continue
       fi
-      return 0
+      last=$(last_status_line "$STATE/$task.status")
+      legacy_identity=$(fm_lifecycle_legacy_identity "$identity" "$last")
+      bindings="${bindings}${bindings:+$'\n'}$task"$'\t'"$identity"$'\t'"$legacy_identity"
+      found=0
+      continue
     fi
     f="$STATE/$task.status"
     last=$(last_status_line "$f")
     status_is_captain_relevant "$last" || continue
     [ "$class" = working ] && continue
     surfaced=$(cat "$(_hb_surfaced_path "$task")" 2>/dev/null || true)
-    [ "$surfaced" = "$last" ] || return 0
+    [ "$surfaced" = "$last" ] && continue
+    legacy_identity=$(fm_lifecycle_legacy_identity none "$last")
+    bindings="${bindings}${bindings:+$'\n'}$task"$'\t'none$'\t'"$legacy_identity"
+    found=0
   done
   for f in "$STATE"/*.status; do
     [ -e "$f" ] || continue
     task=$(basename "$f"); task=${task%.status}
     [ -e "$STATE/$task.meta" ] && continue
-    last=$(last_status_line "$f")
-    if status_is_captain_relevant "$last"; then
-      surfaced=$(cat "$(_hb_surfaced_path "$task")" 2>/dev/null || true)
-      [ "$surfaced" = "$last" ] || return 0
-    fi
     lifecycle=$(fm_lifecycle_read "$task" cached "$STATE") || true
     class=${lifecycle%%$'\t'*}
     identity=${lifecycle#*$'\t'}
@@ -657,15 +643,23 @@ heartbeat_scan_finds_actionable() {
         fm_mark_surfaced "$task" "$identity" "$STATE" || return 0
         continue
       fi
-      return 0
+      last=$(last_status_line "$f")
+      legacy_identity=$(fm_lifecycle_legacy_identity "$identity" "$last")
+      bindings="${bindings}${bindings:+$'\n'}$task"$'\t'"$identity"$'\t'"$legacy_identity"
+      found=0
+      continue
     fi
     last=$(last_status_line "$f")
     status_is_captain_relevant "$last" || continue
     [ "$class" = working ] && continue
     surfaced=$(cat "$(_hb_surfaced_path "$task")" 2>/dev/null || true)
-    [ "$surfaced" = "$last" ] || return 0
+    [ "$surfaced" = "$last" ] && continue
+    legacy_identity=$(fm_lifecycle_legacy_identity none "$last")
+    bindings="${bindings}${bindings:+$'\n'}$task"$'\t'none$'\t'"$legacy_identity"
+    found=0
   done
-  return 1
+  FM_HEARTBEAT_SURFACED_BINDINGS=$bindings
+  return "$found"
 }
 
 enqueue_all_pending_open_decisions() {
@@ -958,6 +952,7 @@ EOF
     # settled turn-ends cost no deep read and cannot re-announce the result.
     signal_files=""
     signal_tasks=""
+    signal_bindings=""
     while IFS=$(printf '\t') read -r sf sig f; do
       [ -n "$sf" ] || continue
       base=$(basename "$f")
@@ -974,8 +969,9 @@ EOF
       lifecycle=$(fm_lifecycle_read "$task" "$lifecycle_mode" "$STATE") || true
       class=${lifecycle%%$'\t'*}
       identity=${lifecycle#*$'\t'}
+      last=$(last_status_line "$STATE/$task.status")
       unrepresented_status=0
-      if [ "$lifecycle_mode" = force ] && status_is_captain_relevant "$(last_status_line "$f")" \
+      if [ "$lifecycle_mode" = force ] && status_is_captain_relevant "$last" \
         && ! status_latest_decision_is_open_occurrence "$f"; then
         case "$identity" in decision:*) unrepresented_status=1 ;; esac
       fi
@@ -990,6 +986,14 @@ EOF
         continue
       fi
       signal_files="$signal_files $f"
+      if [ "$unrepresented_status" -eq 1 ]; then
+        bound_identity=none
+        legacy_identity=$(fm_lifecycle_status_identity "$last")
+      else
+        bound_identity=$identity
+        legacy_identity=$(fm_lifecycle_legacy_identity "$identity" "$last")
+      fi
+      signal_bindings="${signal_bindings}${signal_bindings:+$'\n'}$task"$'\t'"$bound_identity"$'\t'"$legacy_identity"
     done <<EOF
 $pending
 EOF
@@ -1004,21 +1008,17 @@ EOF
         case " $signal_files " in
           *" $f "*)
             fm_wake_append signal "$(basename "$f")" "$reason" || exit 1
-            base=$(basename "$f")
-            case "$base" in *.status) task=${base%.status} ;; *.turn-ended) task=${base%.turn-ended} ;; *) task= ;; esac
-            if [ -n "$task" ]; then
-              if afk_present; then
-                mark_legacy_surfaced "$STATE/$task.status"
-              else
-                mark_surfaced "$STATE/$task.status"
-              fi
-            fi
             ;;
         esac
         printf '%s' "$sig" > "$sf"
       done <<EOF
 $pending
 EOF
+      if afk_present; then
+        mark_surfaced_bindings "$signal_bindings" 1 || exit 1
+      else
+        mark_surfaced_bindings "$signal_bindings" || exit 1
+      fi
       wake "$reason"
     fi
     while IFS=$(printf '\t') read -r sf sig f; do
@@ -1247,11 +1247,11 @@ EOF
       exit 1
     elif heartbeat_scan_finds_actionable; then
       # Backstop: material the per-wake path absorbed by mistake.
-      # Enqueue first, then mark every open occurrence and captain-relevant status
-      # surfaced so the next heartbeat does not re-fire it.
+      # Enqueue first, then mark the captured occurrences surfaced so the next
+      # heartbeat does not re-fire them.
       fm_wake_append heartbeat heartbeat heartbeat || exit 1
       touch "$STATE/.last-heartbeat"
-      mark_all_captain_relevant_surfaced
+      mark_all_captain_relevant_surfaced "$FM_HEARTBEAT_SURFACED_BINDINGS" || exit 1
       wake "heartbeat"
     else
       touch "$STATE/.last-heartbeat"

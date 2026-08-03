@@ -30,6 +30,10 @@
 _FM_LIFECYCLE_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd 2>/dev/null)" || _FM_LIFECYCLE_LIB_DIR="."
 # shellcheck source=bin/fm-classify-lib.sh
 . "$_FM_LIFECYCLE_LIB_DIR/fm-classify-lib.sh"
+# shellcheck source=bin/fm-backend.sh
+if ! declare -F fm_backend_target_of_meta >/dev/null; then
+  . "$_FM_LIFECYCLE_LIB_DIR/fm-backend.sh"
+fi
 
 FM_LIFECYCLE_TTL_DEFAULT=300
 
@@ -97,6 +101,39 @@ fm_lifecycle_atomic_write() {  # <path> <content>
   mv -f "$tmp" "$path" || { rm -f "$tmp"; return 1; }
 }
 
+fm_lifecycle_status_identity() {  # <status-line>
+  [ -n "$1" ] || { printf 'none'; return 0; }
+  printf 'status:%s' "$(printf '%s' "$1" | fm_decision_hash_text)"
+}
+
+fm_lifecycle_status_line_for_identity() {  # <status-file> <status-identity>
+  local f=$1 identity=$2 wanted line hash match=
+  case "$identity" in status:*) wanted=${identity#status:} ;; *) return 1 ;; esac
+  [ -f "$f" ] || return 1
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in *[![:space:]]*) ;; *) continue ;; esac
+    fm_decision_marker_line_id "$line" >/dev/null 2>&1 && continue
+    hash=$(printf '%s' "$line" | fm_decision_hash_text) || continue
+    [ "$hash" = "$wanted" ] && match=$line
+  done < "$f"
+  [ -n "$match" ] || return 1
+  printf '%s' "$match"
+}
+
+fm_lifecycle_legacy_identity() {  # <identity> <status-line> [include-paused]
+  local identity=$1 line=${2:-} include_paused=${3:-0}
+  case "$identity" in
+    decision:*|status:*) printf '%s' "$identity"; return 0 ;;
+  esac
+  if [ "$identity" = none ] && [ -n "$line" ] \
+    && { status_is_captain_relevant "$line" \
+      || { [ "$include_paused" = 1 ] && status_is_paused "$line"; }; }; then
+    fm_lifecycle_status_identity "$line"
+    return
+  fi
+  printf 'none'
+}
+
 fm_lifecycle_clear_working_timers() {  # <task> [state] [class]
   local task=$1 state=${2:-} class=${3:-} root meta target target_key task_key worktree
   root=$(fm_lifecycle_state_root "$state")
@@ -106,7 +143,7 @@ fm_lifecycle_clear_working_timers() {  # <task> [state] [class]
     worktree=$(grep '^worktree=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
     [ -n "$worktree" ] || return 0
   fi
-  target=$(grep '^window=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+  target=$(fm_backend_target_of_meta "$meta")
   target_key=$(printf '%s' "$target" | tr ':/.' '___')
   task_key=$(printf '%s' "$task" | tr ':/.' '___')
   if [ -n "$target_key" ]; then

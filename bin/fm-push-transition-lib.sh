@@ -9,10 +9,10 @@ FM_PUSH_TRANSITION_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # shellcheck source=bin/fm-wake-lib.sh
 . "$FM_PUSH_TRANSITION_LIB_DIR/fm-wake-lib.sh"
-# shellcheck source=bin/fm-lifecycle-lib.sh
-. "$FM_PUSH_TRANSITION_LIB_DIR/fm-lifecycle-lib.sh"
 # shellcheck source=bin/fm-backend.sh
 . "$FM_PUSH_TRANSITION_LIB_DIR/fm-backend.sh"
+# shellcheck source=bin/fm-lifecycle-lib.sh
+. "$FM_PUSH_TRANSITION_LIB_DIR/fm-lifecycle-lib.sh"
 # shellcheck source=bin/fm-transition-lib.sh
 . "$FM_PUSH_TRANSITION_LIB_DIR/fm-transition-lib.sh"
 
@@ -68,7 +68,7 @@ legacy_occurrence_is_surfaced() {  # <task> <identity>
       decision_occurrence_is_surfaced "$occurrence"
       ;;
     status:*)
-      last=$(last_status_line "$STATE/$task.status")
+      last=$(fm_lifecycle_status_line_for_identity "$STATE/$task.status" "$identity" 2>/dev/null || true)
       [ -n "$last" ] && [ "$(cat "$(_hb_surfaced_path "$task")" 2>/dev/null || true)" = "$last" ]
       ;;
     *) return 1 ;;
@@ -79,16 +79,6 @@ mark_decision_occurrence_surfaced() {  # <stream-id>.<instance>
   local occurrence=$1 path
   path=$(_hb_decision_surfaced_path "$occurrence") || return 1
   printf '%s' "$occurrence" > "$path"
-}
-
-mark_open_decision_occurrences_surfaced() {  # <status-file>
-  local f=$1 _key _verb occurrence _summary
-  while IFS=$'\t' read -r _key _verb occurrence _summary || [ -n "$_key" ]; do
-    [ -n "$_key" ] || continue
-    mark_decision_occurrence_surfaced "$occurrence" || return 1
-  done <<EOF
-$(status_open_supervision_decisions "$f")
-EOF
 }
 
 pending_open_decisions() {  # <status-file>
@@ -133,32 +123,54 @@ EOF
 
 # Keep dual-writing the legacy normal-mode markers through PR 1 so reverting
 # the new owner restores the prior behavior without a state gap.
-mark_legacy_surfaced() {  # <status-file>
-  local f=$1 task last
-  mark_open_decision_occurrences_surfaced "$f" || return 1
+mark_legacy_surfaced() {  # <status-file> <legacy-identity>
+  local f=$1 identity=$2 task last occurrence
   task=$(basename "$f"); task="${task%.status}"
-  last=$(last_status_line "$f")
-  [ -n "$last" ] || return 0
-  status_is_captain_relevant "$last" || return 0
-  printf '%s' "$last" > "$(_hb_surfaced_path "$task")"
+  case "$identity" in
+    decision:*)
+      occurrence=${identity#decision:}
+      mark_decision_occurrence_surfaced "$occurrence"
+      ;;
+    status:*)
+      last=$(fm_lifecycle_status_line_for_identity "$f" "$identity" 2>/dev/null || true)
+      [ -n "$last" ] || return 0
+      status_is_captain_relevant "$last" || return 0
+      printf '%s' "$last" > "$(_hb_surfaced_path "$task")"
+      ;;
+    none|run:parked:*|run:terminal:*) return 0 ;;
+    *) return 1 ;;
+  esac
 }
 
-# Record the current occurrence and the legacy markers only after its durable
-# wake has been enqueued.
-mark_surfaced() {  # <status-file>
-  local f=$1 task line identity
+# Record only the bound occurrence and its exact legacy counterpart after its
+# durable wake has been enqueued.
+mark_surfaced() {  # <status-file> <identity> <legacy-identity>
+  local f=$1 identity=$2 legacy_identity=$3 task
   task=$(basename "$f"); task="${task%.status}"
-  line=$(fm_lifecycle_read "$task" cached "$STATE") || true
-  identity=${line#*$'\t'}
   if [ -n "$identity" ] && [ "$identity" != none ]; then
     fm_mark_surfaced "$task" "$identity" "$STATE" || return 1
   fi
-  mark_legacy_surfaced "$f"
+  mark_legacy_surfaced "$f" "$legacy_identity"
+}
+
+mark_surfaced_bindings() {  # <task<TAB>identity<TAB>legacy-identity records> [legacy-only]
+  local bindings=$1 legacy_only=${2:-0} task identity legacy_identity f
+  while IFS=$'\t' read -r task identity legacy_identity || [ -n "$task" ]; do
+    [ -n "$task" ] || continue
+    f="$STATE/$task.status"
+    if [ "$legacy_only" = 1 ]; then
+      mark_legacy_surfaced "$f" "$legacy_identity" || return 1
+    else
+      mark_surfaced "$f" "$identity" "$legacy_identity" || return 1
+    fi
+  done <<EOF
+$bindings
+EOF
 }
 
 # Act on a fresh actionable transition from a push-capable backend.
 handle_push_transition() {  # <backend> <session> <record>
-  local backend=$1 session=$2 record=$3 pane_id to window task reason statusf last current endpoint precedence lifecycle class identity
+  local backend=$1 session=$2 record=$3 pane_id to window task reason statusf last current endpoint precedence lifecycle class identity legacy_identity
   pane_id=$(fm_transition_pane_id "$record")
   to=$(fm_transition_to_status "$record")
   [ -n "$pane_id" ] || { sleep 1; return; }
@@ -188,14 +200,14 @@ handle_push_transition() {  # <backend> <session> <record>
     fm_backend_commit_transition "$backend" "$STATE" "$session" "$record" || exit 1
     return
   fi
+  legacy_identity=$(fm_lifecycle_legacy_identity "$identity" "$last")
   reason="stale: $window (herdr: agent $to - waiting on human, escalated immediately, not via wedge timer)"
   fm_wake_append stale "$window" "$reason" || exit 1
   fm_backend_commit_transition "$backend" "$STATE" "$session" "$record" || exit 1
   if [ -e "$STATE/.afk" ]; then
-    mark_legacy_surfaced "$STATE/$task.status"
+    mark_legacy_surfaced "$STATE/$task.status" "$legacy_identity" || exit 1
   else
-    [ "$identity" = none ] || fm_mark_surfaced "$task" "$identity" "$STATE" || exit 1
-    mark_surfaced "$STATE/$task.status"
+    mark_surfaced "$STATE/$task.status" "$identity" "$legacy_identity" || exit 1
   fi
   wake "$reason"
 }

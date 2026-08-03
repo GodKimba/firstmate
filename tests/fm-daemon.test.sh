@@ -931,6 +931,56 @@ test_signal_escalate_marks_seen_no_catchall_refire() {
   pass "captain signal escalate marks seen so the catch-all scan does not re-fire"
 }
 
+test_signal_escalate_marks_only_captured_occurrences() {
+  local dir state line1 line2 identity1 identity2 d1 d2
+  dir=$(make_supercase signal-bound-occurrence)
+  state="$dir/state"
+  line1='failed: first occurrence'
+  line2='failed: second occurrence'
+  identity1=$(fm_lifecycle_status_identity "$line1")
+  identity2=$(fm_lifecycle_status_identity "$line2")
+  printf '%s\n' "$line1" > "$state/bound.status"
+  (
+    fm_lifecycle_read() {
+      if [ -e "$state/.buffered" ]; then
+        printf 'terminal\t%s\n' "$identity2"
+      else
+        printf 'terminal\t%s\n' "$identity1"
+      fi
+    }
+    escalate_add() {
+      printf '0\t%s\n' "$2" >> "$1/.subsuper-escalations"
+      printf '%s\n' "$line2" >> "$state/bound.status"
+      : > "$state/.buffered"
+    }
+    FM_STATE_OVERRIDE="$state" FM_ESCALATE_BATCH_SECS=999999 \
+      handle_wake "signal: $state/bound.status" "$state"
+  )
+  grep -F "$identity1" "$state/bound.surfaced" >/dev/null \
+    || fail "daemon did not record the occurrence captured before buffering"
+  grep -F "$identity2" "$state/bound.surfaced" >/dev/null \
+    && fail "daemon recorded a later status occurrence"
+  [ "$(cat "$state/.subsuper-seen-status-bound" 2>/dev/null || true)" = "$line1" ] \
+    || fail "daemon legacy status marker drifted after buffering"
+
+  dir=$(make_supercase signal-bound-decisions)
+  state="$dir/state"
+  fm_decision_cutover_ensure_status "$state/bound-decisions.status"
+  printf 'needs-decision [key=one]: first\nneeds-decision [key=two]: second\n' >> "$state/bound-decisions.status"
+  d1=$(status_open_supervision_decisions "$state/bound-decisions.status" | awk -F '\t' '$1 == "one" { print $3 }')
+  d2=$(status_open_supervision_decisions "$state/bound-decisions.status" | awk -F '\t' '$1 == "two" { print $3 }')
+  (
+    fm_lifecycle_read() { printf 'parked\tdecision:%s\n' "$d1"; }
+    FM_STATE_OVERRIDE="$state" FM_ESCALATE_BATCH_SECS=999999 \
+      handle_wake "signal: $state/bound-decisions.status" "$state"
+  )
+  [ "$(cat "$state/.subsuper-seen-decision-$d1" 2>/dev/null || true)" = "$d1" ] \
+    || fail "daemon did not dual-write the buffered decision"
+  [ ! -e "$state/.subsuper-seen-decision-$d2" ] \
+    || fail "daemon dual-wrote an unbuffered decision"
+  pass "daemon records only occurrences captured before buffering"
+}
+
 test_collapse_newlines_pure() {
   local out
   out=$(_collapse_newlines $'line one\nline two\nline three')
@@ -2089,6 +2139,7 @@ test_inject_skip_forces_self
 test_is_wake_reason_distinguishes_status_stdout
 test_terminal_stale_escalate_leaves_no_marker
 test_signal_escalate_marks_seen_no_catchall_refire
+test_signal_escalate_marks_only_captured_occurrences
 test_collapse_newlines_pure
 test_afk_absent_daemon_does_not_inject
 test_busy_guard_defers_when_supervisor_busy
