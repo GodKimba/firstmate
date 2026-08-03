@@ -166,6 +166,10 @@ run_crew_state() {  # <case-dir> <id>
   PATH="$1/fakebin:$PATH" FM_STATE_OVERRIDE="$1/state" "$CREW_STATE" "$2"
 }
 
+run_crew_supervision() {  # <case-dir> <id>
+  PATH="$1/fakebin:$PATH" FM_STATE_OVERRIDE="$1/state" "$CREW_STATE" --supervision "$2"
+}
+
 new_case() {  # <name> -> echoes case dir with an empty state/
   local d="$TMP_ROOT/$1"
   mkdir -p "$d/state"
@@ -1846,6 +1850,78 @@ test_missing_run_head_falls_back_to_current_state() {
   pass "missing run head falls back instead of matching by branch"
 }
 
+test_supervision_identity_excludes_presentation_detail() {
+  reset_fakes
+  local d first second fixture
+  d=$(new_case supervision-presentation)
+  make_repo_on_branch "$d/wt" fm/supervision-presentation
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/present.meta" "window=fm:fm-present" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'working: validation started\n' > "$d/state/present.status"
+  FM_FAKE_AXI_STATUS=$(run_parked fm/supervision-presentation)
+  first=$(run_crew_supervision "$d" present)
+  fixture=$(printf '%s\n' "$FM_FAKE_AXI_STATUS" \
+    | sed 's/parked 2m10s/parked 59m59s/; s/pr: ""/pr: "https:\/\/example.test\/pull\/9"/; s/findings\[2\]/findings[1]/')
+  FM_FAKE_AXI_STATUS=$fixture
+  second=$(run_crew_supervision "$d" present)
+  [ "$first" = "$second" ] || fail "P2 presentation-only changes moved identity: $first != $second"
+  pass "P2 finding count, elapsed prose, and PR URL do not change occurrence identity"
+}
+
+test_supervision_identity_changes_for_structural_inputs() {
+  reset_fakes
+  local d base variant base_head descendant out
+  d=$(new_case supervision-structure)
+  make_repo_on_branch "$d/wt" fm/supervision-structure
+  base_head=$(git -C "$d/wt" rev-parse HEAD)
+  git -C "$d/wt" commit -q --allow-empty -m 'pipeline descendant'
+  descendant=$(git -C "$d/wt" rev-parse HEAD)
+  git -C "$d/wt" reset -q --hard "$base_head"
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/structure.meta" "window=fm:fm-structure" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'working: validation started\n' > "$d/state/structure.status"
+  FM_FAKE_RUN_HEAD=$base_head
+  FM_FAKE_AXI_STATUS=$(run_parked_in_gate_block fm/supervision-structure)
+  base=$(run_crew_supervision "$d" structure)
+
+  for variant in id status outcome gate steps head; do
+    FM_FAKE_RUN_HEAD=$base_head
+    FM_FAKE_AXI_STATUS=$(run_parked_in_gate_block fm/supervision-structure)
+    case "$variant" in
+      id) FM_FAKE_AXI_STATUS=$(printf '%s\n' "$FM_FAKE_AXI_STATUS" | sed 's/01RUN/02RUN/') ;;
+      status) FM_FAKE_AXI_STATUS=$(printf '%s\n' "$FM_FAKE_AXI_STATUS" | awk '!changed && /^  status: running$/ { $0="  status: fixing"; changed=1 } { print }') ;;
+      outcome) FM_FAKE_AXI_STATUS="$FM_FAKE_AXI_STATUS"$'\n''outcome: failed' ;;
+      gate) FM_FAKE_AXI_STATUS=$(printf '%s\n' "$FM_FAKE_AXI_STATUS" | sed 's/step: review/step: security/') ;;
+      steps) FM_FAKE_AXI_STATUS=$(printf '%s\n' "$FM_FAKE_AXI_STATUS" | sed 's/test,pending/test,running/') ;;
+      head) FM_FAKE_RUN_HEAD=$descendant; FM_FAKE_AXI_STATUS=$(run_parked_in_gate_block fm/supervision-structure) ;;
+    esac
+    out=$(run_crew_supervision "$d" structure)
+    [ "$out" != "$base" ] || fail "P3 structural input '$variant' did not change identity"
+  done
+  pass "P3 run id, head, status, outcome, gate, and step vector change identity"
+}
+
+test_supervision_output_is_separate_from_human_detail() {
+  reset_fakes
+  local d human_before human_after supervision
+  d=$(new_case supervision-channel)
+  make_repo_on_branch "$d/wt" fm/supervision-channel
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/channel.meta" "window=fm:fm-channel" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'working: validation started\n' > "$d/state/channel.status"
+  FM_FAKE_AXI_STATUS=$(run_parked fm/supervision-channel)
+  human_before=$(run_crew_state "$d" channel)
+  supervision=$(run_crew_supervision "$d" channel)
+  human_after=$(run_crew_state "$d" channel)
+  [ "$human_before" = "$human_after" ] || fail "P8 supervision read changed the human line"
+  assert_contains "$human_before" "state: parked · source: run-step · parked at review: 2 finding(s) (ask-user: authority decision)" "P8 human detail changed"
+  assert_not_contains "$human_before" "run:parked:" "P8 identity leaked into human detail"
+  case "$supervision" in parked$'\t'run:parked:????????????????????????????????????????????????????????????????) ;;
+    *) fail "P9 supervision output was not exactly class<TAB>identity: $supervision" ;;
+  esac
+  pass "P8-P9 human detail stays byte-stable and supervision has its own exact channel"
+}
+
 test_active_run_is_authoritative
 test_stale_needs_decision_superseded
 test_stale_blocked_superseded
@@ -1920,5 +1996,8 @@ test_historical_same_branch_rewritten_head_not_current
 test_active_run_descendant_fix_head_remains_current
 test_local_advanced_past_run_head_invalidates
 test_missing_run_head_falls_back_to_current_state
+test_supervision_identity_excludes_presentation_detail
+test_supervision_identity_changes_for_structural_inputs
+test_supervision_output_is_separate_from_human_detail
 
 echo "all fm-crew-state tests passed"

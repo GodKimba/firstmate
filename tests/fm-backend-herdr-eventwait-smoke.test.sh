@@ -25,20 +25,19 @@ command -v python3 >/dev/null 2>&1 || { echo "skip: python3 not found (required 
 # shellcheck source=tests/herdr-test-safety.sh
 . "$ROOT/tests/herdr-test-safety.sh"
 
-# This suite runs against its own isolated lab session, so a Herdr pane
-# inherited from the terminal it was launched in must not follow spawn into it
-# as a cross-session parent identity (tests/herdr-test-safety.sh).
-herdr_forget_inherited_pane
-
+# Prepare the lab tripwire while the caller's exact fleet pane identity is still
+# available, then drop that inherited pane before any lab worker is spawned so
+# it cannot follow the test into the isolated session as a cross-session parent.
 SESSION="fm-lab-eventwait-smoke-$$"
-export HERDR_SESSION="$SESSION"
 SCRATCH=
 cleanup_all() {
   [ -n "$SCRATCH" ] && rm -rf "$SCRATCH"
   herdr_safe_stop_and_delete "$SESSION"
 }
 trap cleanup_all EXIT
-fm_herdr_lab_prepare "$SESSION" || fail "could not prepare the isolated Herdr lab session"
+fm_herdr_lab_provision "$SESSION" || fail "could not provision the isolated Herdr lab session"
+herdr_forget_inherited_pane
+export HERDR_SESSION="$SESSION"
 
 # The dispatcher is a separately linted production boundary. Its dynamic
 # adapter source edges stop at each independently linted canonical adapter.

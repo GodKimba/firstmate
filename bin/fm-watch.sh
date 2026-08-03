@@ -10,11 +10,15 @@
 # the separate idle absorb case only while authoritative current state confirms
 # it on a live endpoint, and then re-surfaces on its long bounded cadence.
 # Its initial no-verb status signal still surfaces in normal mode.
-# While state/.afk exists, the daemon owns triage and this watcher queues and exits
-# on every wake. Printed reason lines:
+# While state/.afk exists, the daemon owns triage and this watcher consults the
+# shared lifecycle ledger before a one-shot handoff.
+# A newly handed-off occurrence remains pending until the daemon buffers it.
+# Printed reason lines:
 #   signal: <file>...      status/turn-end signals, surfaced when a listed status
 #                          has a captain-relevant verb OR a no-verb signal's crew
-#                          is not provably working, unless afk is active
+#                          is not provably working; in afk mode routine signals
+#                          hand off too, while previously surfaced closed
+#                          occurrences remain suppressed by the shared ledger
 #   stale: <window>        a provably-working stale is ALWAYS absorbed (with a wedge
 #                          timer) regardless of what the status log says - an active
 #                          run-step or busy pane outranks even a captain-relevant log
@@ -49,9 +53,10 @@
 #   check: rejected unauthenticated PR poll retirement receipts: <paths>
 #                          invalid pending retirements were preserved without
 #                          running a check or removing poll artifacts
-#   heartbeat              fleet-scan backstop found an unsurfaced captain-relevant
-#                          status or folded open decision or blocker, unless afk
-#                          is active
+#   heartbeat              fleet-scan backstop found an unsurfaced lifecycle
+#                          occurrence or exact captain-relevant status fallback;
+#                          in afk mode the scheduled heartbeat hands off to the
+#                          daemon's own scan
 # For normal supervision, resume the session-start primary-harness protocol
 # after each printed reason. Direct duplicate invocations of this script still
 # no-op through the watcher singleton lock.
@@ -135,8 +140,9 @@ SIGNAL_GRACE=${FM_SIGNAL_GRACE:-30}   # seconds to linger after a signal so trai
 # the durable queue and exits, which
 # is what wakes the LLM through the background-task completion. The same classifier
 # (fm-classify-lib.sh) backs the away-mode daemon; while state/.afk exists the
-# daemon owns triage, so this watcher reverts to one-shot (enqueue + exit on every
-# wake) and never double-triages - and never runs the costly provably-working read.
+# daemon owns triage, so this watcher consults shared occurrence state, leaves a
+# newly handed-off occurrence pending, and exits after the durable one-shot
+# handoff instead of running legacy provably-working absorption.
 STALE_ESCALATE_SECS=${FM_STALE_ESCALATE_SECS:-240}  # idle secs before a provably-working stale escalates as a possible wedge
 # A busy pane is unconditional proof of liveness with no built-in duration bound,
 # so a hung foreground call can remain hidden even while its rendered busy
@@ -172,9 +178,10 @@ _event_cap_ok=0
 _event_cap_fails=0
 
 # afk_present: 0 while the away-mode flag exists. When set, the daemon wraps this
-# watcher and owns triage, so the watcher must behave one-shot (enqueue + exit on
-# every wake) and let the daemon classify - never absorb here, or the daemon's
-# digest/injection layer would never see the wake.
+# watcher and owns triage, so the watcher must hand routine and newly pending
+# events to the daemon without recording the occurrence here.
+# A closed occurrence already surfaced through either mode remains absorbed by
+# the shared lifecycle owner.
 afk_present() { [ -e "$STATE/.afk" ]; }
 
 hash_pane() {
@@ -276,7 +283,7 @@ FM_WEDGE_DEMAND_INSPECT_COUNT=${FM_WEDGE_DEMAND_INSPECT_COUNT:-3}
 # and the stale_is_terminal-overridden path (a captain-relevant status-log
 # line that an active run/busy pane outranked).
 wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-file>
-  local win=$1 since_file=$2 label=$3 escalation_file=$4 since age n reason
+  local win=$1 since_file=$2 label=$3 escalation_file=$4 since age n reason task lifecycle class h
   since=$(cat "$since_file" 2>/dev/null || true)
   case "$since" in
     ''|*[!0-9]*)
@@ -286,6 +293,24 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
     *)
       age=$(( $(date +%s) - since ))
       if [ "$age" -ge "$STALE_ESCALATE_SECS" ]; then
+        task=$(window_to_task "$win" "$STATE")
+        lifecycle=$(fm_lifecycle_read "$task" force "$STATE") || true
+        class=${lifecycle%%$'\t'*}
+        if [ "$class" = unknown ]; then
+          case "$label" in busy*) class=working ;; esac
+        fi
+        case "$class" in
+          parked|terminal)
+            rm -f "$since_file" "$escalation_file"
+            h=$(cat "$STATE/.hash-$(printf '%s' "$win" | tr ':/.' '___')" 2>/dev/null || true)
+            surface_nonterminal_stale "$win" "$h"
+            return
+            ;;
+          paused)
+            rm -f "$since_file" "$escalation_file"
+            return
+            ;;
+        esac
         n=$(( $(cat "$escalation_file" 2>/dev/null || echo 0) + 1 ))
         echo "$n" > "$escalation_file"
         reason="stale: $win (idle ${age}s, possible wedge, escalation $n)"
@@ -335,6 +360,7 @@ EOF
 # every poll. Advances the stale suppressor to <hash> and flags the key paused.
 handle_paused_stale() {  # <window> <task> <hash>
   local win=$1 task=$2 h=$3 key statusf mtime age rf rf_age reason
+  fm_lifecycle_read "$task" cached "$STATE" >/dev/null || true
   key=$(printf '%s' "$win" | tr ':/.' '___')
   printf '%s' "$h" > "$STATE/.stale-$key"
   : > "$STATE/.paused-$key"
@@ -376,13 +402,15 @@ clear_pause_tracking() {  # <window>
 # Reconcile structured status, authoritative current state, and endpoint liveness
 # through crew_supervision_precedence, the single owner of their ordering.
 pause_state_class() {  # <window> <task>
-  local win=$1 task=$2 key recheck_file current endpoint verdict
+  local win=$1 task=$2 key recheck_file current endpoint verdict lifecycle class
   key=${win//:/_}
   key=${key//\//_}
   key=${key//./_}
   recheck_file="$STATE/.paused-rechecked-$key"
   endpoint=$(fm_backend_agent_alive "$(window_backend "$win")" "$win" 2>/dev/null) || endpoint=unknown
-  current=$(crew_absorb_class "$task")
+  lifecycle=$(fm_lifecycle_read "$task" cached "$STATE") || true
+  class=${lifecycle%%$'\t'*}
+  case "$class" in working|paused) current=$class ;; *) current=none ;; esac
   verdict=$(crew_supervision_precedence "$STATE/$task.status" "$current" "$endpoint")
   case "$verdict" in
     paused)
@@ -401,20 +429,47 @@ pause_state_class() {  # <window> <task>
 }
 
 surface_nonterminal_stale() {  # <window> <hash>
-  local win=$1 h=$2 key
+  local win=$1 h=$2 key task lifecycle class identity last legacy_identity
   key=$(printf '%s' "$win" | tr ':/.' '___')
+  task=$(window_to_task "$win" "$STATE")
+  lifecycle=$(fm_lifecycle_read "$task" cached "$STATE") || true
+  class=${lifecycle%%$'\t'*}
+  identity=${lifecycle#*$'\t'}
+  last=$(last_status_line "$STATE/$task.status")
+  legacy_identity=$(fm_lifecycle_legacy_identity "$identity" "$last")
+  if [ "$identity" != none ] \
+    && { [ "$(fm_surfaced_state "$task" "$identity" "$STATE")" = surfaced ] \
+      || legacy_occurrence_is_surfaced "$task" "$identity"; }; then
+    printf '%s' "$h" > "$STATE/.stale-$key"
+    printf '%s' "$h" > "$STATE/.stale-surfaced-$key"
+    rm -f "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key"
+    clear_pause_state "$win"
+    triage_log "absorbed $class (already reported, $(fm_lifecycle_identity_prefix "$identity")): $win"
+    return 0
+  fi
   fm_wake_append stale "$win" "stale: $win" || exit 1
   printf '%s' "$h" > "$STATE/.stale-$key"
   printf '%s' "$h" > "$STATE/.stale-surfaced-$key"
   rm -f "$STATE/.stale-since-$key"
   clear_pause_state "$win"
+  if ! afk_present; then
+    mark_surfaced "$STATE/$task.status" "$identity" "$legacy_identity" || exit 1
+  fi
   wake "stale: $win"
 }
 
 surface_nonterminal_stale_once() {  # <window> <hash>
-  local win=$1 h=$2 key
+  local win=$1 h=$2 key task lifecycle identity
   key=$(printf '%s' "$win" | tr ':/.' '___')
-  if [ "$(cat "$STATE/.stale-surfaced-$key" 2>/dev/null || true)" != "$h" ]; then
+  task=$(window_to_task "$win" "$STATE")
+  lifecycle=$(fm_lifecycle_read "$task" cached "$STATE") || true
+  identity=${lifecycle#*$'\t'}
+  if [ "$identity" != none ]; then
+    # The shared occurrence owner decides whether this lifecycle was surfaced;
+    # the legacy capture hash remains a PR-1 fallback only when no closed
+    # occurrence identity exists.
+    surface_nonterminal_stale "$win" "$h"
+  elif [ "$(cat "$STATE/.stale-surfaced-$key" 2>/dev/null || true)" != "$h" ]; then
     surface_nonterminal_stale "$win" "$h"
   fi
   clear_pause_state "$win"
@@ -533,19 +588,10 @@ run_check_capture() {
 
 # Surfaced-marker bookkeeping for the heartbeat backstop is owned by
 # fm-push-transition-lib.sh because push and poll paths must write one format.
-# Mark every current captain-relevant status and folded open occurrence as
-# surfaced. Called after the heartbeat backstop enqueues its wake, so the same
-# material is not re-surfaced by the next heartbeat.
-mark_all_captain_relevant_surfaced() {
-  local f _task _last
-  while IFS=$(printf '\t') read -r f _task _last; do
-    [ -n "$f" ] || continue
-    mark_surfaced "$f" || return 1
-  done < <(scan_captain_relevant_statuses "$STATE")
-  for f in "$STATE"/*.status; do
-    [ -e "$f" ] || continue
-    mark_open_decision_occurrences_surfaced "$f" || return 1
-  done
+# Mark the occurrences captured by the heartbeat scan as surfaced after the
+# heartbeat backstop enqueues its wake.
+mark_all_captain_relevant_surfaced() {  # <captured-bindings>
+  mark_surfaced_bindings "$1"
 }
 
 # Cheap heartbeat fleet-scan (the always-on twin of the daemon's catch-all).
@@ -555,23 +601,60 @@ mark_all_captain_relevant_surfaced() {
 # This normally finds nothing and the heartbeat is absorbed; it is the fail-safe
 # backstop for material the per-wake path absorbed by mistake.
 heartbeat_scan_finds_actionable() {
-  local f _task _verb occurrence _key _summary task last surfaced
-  while IFS=$(printf '\t') read -r f _task _verb occurrence _key _summary; do
-    [ -n "$f" ] || continue
-    decision_occurrence_is_surfaced "$occurrence" && continue
-    return 0
-  done < <(scan_open_decisions "$STATE")
-  while IFS=$(printf '\t') read -r f task last; do
-    [ -n "$f" ] || continue
-    if [ "$(status_line_verb "$last")" = needs-decision ] \
-      && status_latest_needs_decision_is_open_token_occurrence "$f"; then
-      continue
+  local meta task lifecycle identity legacy_identity status_identity f last found=1 bindings=""
+  FM_HEARTBEAT_SURFACED_BINDINGS=
+  for meta in "$STATE"/*.meta; do
+    [ -e "$meta" ] || continue
+    task=$(basename "$meta"); task=${task%.meta}
+    lifecycle=$(fm_lifecycle_read "$task" cached "$STATE") || true
+    identity=${lifecycle#*$'\t'}
+    f="$STATE/$task.status"
+    last=$(last_status_line "$f")
+    status_identity=$(fm_lifecycle_status_fallback_identity "$f" "$identity" "$last")
+    if [ "$identity" != none ]; then
+      if [ "$(fm_surfaced_state "$task" "$identity" "$STATE")" = surfaced ]; then
+        :
+      elif legacy_occurrence_is_surfaced "$task" "$identity"; then
+        fm_mark_surfaced "$task" "$identity" "$STATE" || return 0
+      else
+        legacy_identity=$(fm_lifecycle_legacy_identity "$identity" "$last")
+        bindings="${bindings}${bindings:+$'\n'}$task"$'\t'"$identity"$'\t'"$legacy_identity"
+        found=0
+      fi
     fi
-    surfaced=$(cat "$(_hb_surfaced_path "$task")" 2>/dev/null || true)
-    [ "$surfaced" = "$last" ] && continue
-    return 0
-  done < <(scan_captain_relevant_statuses "$STATE")
-  return 1
+    if [ "$status_identity" != none ] \
+      && ! legacy_occurrence_is_surfaced "$task" "$status_identity"; then
+      bindings="${bindings}${bindings:+$'\n'}$task"$'\t'none$'\t'"$status_identity"
+      found=0
+    fi
+  done
+  for f in "$STATE"/*.status; do
+    [ -e "$f" ] || continue
+    task=$(basename "$f"); task=${task%.status}
+    [ -e "$STATE/$task.meta" ] && continue
+    lifecycle=$(fm_lifecycle_read "$task" cached "$STATE") || true
+    identity=${lifecycle#*$'\t'}
+    last=$(last_status_line "$f")
+    status_identity=$(fm_lifecycle_status_fallback_identity "$f" "$identity" "$last")
+    if [ "$identity" != none ]; then
+      if [ "$(fm_surfaced_state "$task" "$identity" "$STATE")" = surfaced ]; then
+        :
+      elif legacy_occurrence_is_surfaced "$task" "$identity"; then
+        fm_mark_surfaced "$task" "$identity" "$STATE" || return 0
+      else
+        legacy_identity=$(fm_lifecycle_legacy_identity "$identity" "$last")
+        bindings="${bindings}${bindings:+$'\n'}$task"$'\t'"$identity"$'\t'"$legacy_identity"
+        found=0
+      fi
+    fi
+    if [ "$status_identity" != none ] \
+      && ! legacy_occurrence_is_surfaced "$task" "$status_identity"; then
+      bindings="${bindings}${bindings:+$'\n'}$task"$'\t'none$'\t'"$status_identity"
+      found=0
+    fi
+  done
+  FM_HEARTBEAT_SURFACED_BINDINGS=$bindings
+  return "$found"
 }
 
 enqueue_all_pending_open_decisions() {
@@ -847,7 +930,6 @@ while :; do
     done <<EOF
 $pending
 EOF
-    reason="signal:$files"
     decision_enqueued=0
     for f in $files; do
       case "$f" in *.status) ;; *) continue ;; esac
@@ -859,53 +941,98 @@ EOF
         *) exit 1 ;;
       esac
     done
-    # Triage: a signal is ACTIONABLE when any of these holds (cheapest first):
-    #   - the away-mode daemon owns triage (afk) and wants every wake;
-    #   - any status file carries a captain-relevant verb;
-    #   - or it is a no-verb wake (a bare turn-end, a working: note) whose crew is
-    #     NOT provably working - the crew stopped its turn with no actively-running
-    #     pipeline and no busy pane, so it may be done (even via an interactive menu
-    #     that wrote no done: status), waiting on a decision, or wedged. Absorbing
-    #     such a turn-end is exactly the swallowed-finish this change guards against.
-    # Actionable -> enqueue, advance .seen-* markers, exit. Benign (a no-verb wake
-    # whose crew IS provably working) in always-on mode -> advance the markers so it
-    # will not re-fire, log, and keep blocking without enqueuing. The provably-working
-    # check is the only costly one (it may run bounded no-mistakes and GitHub
-    # check-run calls), so the || ordering evaluates it ONLY for a non-afk,
-    # no-captain-verb signal.
-    signal_actionable=0
-    # shellcheck disable=SC2086  # $files is a space-separated status-path list (ids carry no spaces)
-    if afk_present || signal_reason_is_actionable $files; then
-      signal_actionable=1
-    elif [ "$decision_enqueued" -eq 0 ] && ! signal_crew_provably_working $files; then
-      signal_actionable=1
-    fi
-    if [ "$decision_enqueued" -eq 1 ] || [ "$signal_actionable" -eq 1 ]; then
-      if [ "$signal_actionable" -eq 1 ]; then
-        while IFS=$(printf '\t') read -r sf sig f; do
-          [ -n "$sf" ] || continue
-          fm_wake_append signal "$(basename "$f")" "$reason" || exit 1
-        done <<EOF
-$pending
-EOF
+    # The shared lifecycle owner decides whether each task occurrence is new.
+    # Status writes force a refresh; a bare turn-end reuses only an already
+    # settled memo, so completion from working still refreshes while repeated
+    # settled turn-ends cost no deep read and cannot re-announce the result.
+    signal_files=""
+    signal_tasks=""
+    signal_bindings=""
+    while IFS=$(printf '\t') read -r sf sig f; do
+      [ -n "$sf" ] || continue
+      base=$(basename "$f")
+      case "$base" in
+        *.status) task=${base%.status}; lifecycle_mode=force ;;
+        *.turn-ended)
+          task=${base%.turn-ended}
+          lifecycle_mode=$(fm_lifecycle_turn_end_mode "$task" "$STATE")
+          ;;
+        *) signal_files="$signal_files $f"; continue ;;
+      esac
+      case " $signal_tasks " in *" $task "*) continue ;; esac
+      signal_tasks="$signal_tasks $task"
+      lifecycle=$(fm_lifecycle_read "$task" "$lifecycle_mode" "$STATE") || true
+      class=${lifecycle%%$'\t'*}
+      identity=${lifecycle#*$'\t'}
+      last=$(last_status_line "$STATE/$task.status")
+      status_identity=none
+      if [ "$lifecycle_mode" = force ]; then
+        status_identity=$(fm_lifecycle_status_fallback_identity "$f" "$identity" "$last")
       fi
-      while IFS=$(printf '\t') read -r sf sig f; do
-        [ -n "$sf" ] || continue
-        printf '%s' "$sig" > "$sf"
-        [ "$signal_actionable" -eq 0 ] || mark_surfaced "$f"
-      done <<EOF
+      primary_pending=0
+      status_pending=0
+      if [ "$identity" != none ] \
+        && [ "$(fm_surfaced_state "$task" "$identity" "$STATE")" = pending ]; then
+        if legacy_occurrence_is_surfaced "$task" "$identity"; then
+          fm_mark_surfaced "$task" "$identity" "$STATE" || exit 1
+        else
+          primary_pending=1
+        fi
+      fi
+      if [ "$status_identity" != none ] \
+        && ! legacy_occurrence_is_surfaced "$task" "$status_identity"; then
+        status_pending=1
+      fi
+      if [ "$primary_pending" -eq 0 ] && [ "$status_pending" -eq 0 ]; then
+        if [ "$identity" != none ] || [ "$status_identity" != none ]; then
+          [ "$identity" = none ] \
+            || triage_log "absorbed $class (already reported, $(fm_lifecycle_identity_prefix "$identity")): $f"
+          continue
+        fi
+        if ! afk_present && [ "$class" = working ]; then
+          continue
+        fi
+      fi
+      signal_files="$signal_files $f"
+      if [ "$primary_pending" -eq 1 ]; then
+        legacy_identity=$(fm_lifecycle_legacy_identity "$identity" "$last")
+        signal_bindings="${signal_bindings}${signal_bindings:+$'\n'}$task"$'\t'"$identity"$'\t'"$legacy_identity"
+      fi
+      if [ "$status_pending" -eq 1 ]; then
+        signal_bindings="${signal_bindings}${signal_bindings:+$'\n'}$task"$'\t'none$'\t'"$status_identity"
+      fi
+    done <<EOF
 $pending
 EOF
-      wake "$reason"
+    if [ "$decision_enqueued" -eq 1 ] && [ -z "$signal_files" ]; then
+      reason="signal:$files"
     else
+      reason="signal:$signal_files"
+    fi
+    if [ "$decision_enqueued" -eq 1 ] || [ -n "$signal_files" ]; then
       while IFS=$(printf '\t') read -r sf sig f; do
         [ -n "$sf" ] || continue
+        case " $signal_files " in
+          *" $f "*)
+            fm_wake_append signal "$(basename "$f")" "$reason" || exit 1
+            ;;
+        esac
         printf '%s' "$sig" > "$sf"
       done <<EOF
 $pending
 EOF
-      triage_log "absorbed benign $reason"
+      if ! afk_present; then
+        mark_surfaced_bindings "$signal_bindings" || exit 1
+      fi
+      wake "$reason"
     fi
+    while IFS=$(printf '\t') read -r sf sig f; do
+      [ -n "$sf" ] || continue
+      printf '%s' "$sig" > "$sf"
+    done <<EOF
+$pending
+EOF
+    triage_log "absorbed benign signal:$files"
   fi
 
   # Layer 1 backbone: pane staleness. Two consecutive identical hashes with no busy
@@ -927,15 +1054,7 @@ EOF
     fi
     if ! tail40=$(fm_backend_capture "$(window_backend "$w")" "$w" 40 "$(window_label "$w")" 2>/dev/null); then
       h=$(capture_unreadable_stale_identity)
-      if afk_present; then
-        if [ "$(cat "$STATE/.stale-surfaced-$key" 2>/dev/null || true)" != "$h" ]; then
-          fm_wake_append stale "$w" "stale: $w" || exit 1
-          printf '%s' "$h" > "$STATE/.stale-surfaced-$key"
-          wake "stale: $w"
-        fi
-      else
-        surface_nonterminal_stale_once "$w" "$h"
-      fi
+      surface_nonterminal_stale_once "$w" "$h"
       continue
     fi
     h=$(capture_unreadable_stale_identity)
@@ -962,6 +1081,15 @@ EOF
       n=$(( $(cat "$cf" 2>/dev/null || echo 0) + 1 ))
       echo "$n" > "$cf"
       if [ "$n" -ge 2 ] && [ "$busy_now" -ne 0 ]; then
+        # A closed lifecycle occurrence outranks the legacy pane hash. Consult
+        # it on every settled stale cycle so a same-capture completion cannot
+        # be hidden by an older .stale-* suppression marker.
+        lifecycle=$(fm_lifecycle_read "$task" cached "$STATE") || true
+        identity=${lifecycle#*$'\t'}
+        if [ "$identity" != none ]; then
+          surface_nonterminal_stale "$w" "$h"
+          continue
+        fi
         # The pane is idle/stale at hash $h. Triage decides whether this wakes
         # firstmate. Detection itself is unchanged from above.
         if [ "$kind" = secondmate ]; then
@@ -971,12 +1099,9 @@ EOF
             *)      surface_nonterminal_stale_once "$w" "$h" ;;
           esac
         elif afk_present; then
-          # Daemon owns triage: one-shot per distinct stale hash, as before.
-          if [ "$(cat "$sf" 2>/dev/null || true)" != "$h" ]; then
-            fm_wake_append stale "$w" "stale: $w" || exit 1
-            printf '%s' "$h" > "$sf"
-            wake "stale: $w"
-          fi
+          # The daemon owns the captain-facing escalation, but this emitter still
+          # consults the shared occurrence ledger before queuing the handoff.
+          surface_nonterminal_stale_once "$w" "$h"
         elif stale_is_terminal "$w" "$STATE"; then
           # The log's last line is captain-relevant - but that alone is not
           # proof the crew is actually done: a crew's own status log gets no
@@ -998,11 +1123,7 @@ EOF
               date +%s > "$ssf"
               triage_log "absorbed stale (provably working, overriding a stale captain-relevant status): $w"
             else
-              fm_wake_append stale "$w" "stale: $w" || exit 1
-              printf '%s' "$h" > "$sf"
-              rm -f "$ssf"
-              mark_surfaced "$STATE/$(window_to_task "$w" "$STATE").status"
-              wake "stale: $w"
+              surface_nonterminal_stale "$w" "$h"
             fi
           elif [ -e "$ssf" ]; then
             # This exact hash was already overridden as provably-working (a
@@ -1081,6 +1202,11 @@ EOF
         fi
       fi
     else
+      old_count=$(cat "$cf" 2>/dev/null || echo 0)
+      case "$old_count" in ''|*[!0-9]*) old_count=0 ;; esac
+      if [ "$old_count" -ge 2 ] && [ "$busy_now" -ne 0 ]; then
+        fm_lifecycle_read "$task" force "$STATE" >/dev/null || true
+      fi
       printf '%s' "$h" > "$hf"
       echo 0 > "$cf"
       if [ "$busy_now" -eq 0 ] && busy_turn_over_age "$task"; then
@@ -1126,11 +1252,11 @@ EOF
       exit 1
     elif heartbeat_scan_finds_actionable; then
       # Backstop: material the per-wake path absorbed by mistake.
-      # Enqueue first, then mark every open occurrence and captain-relevant status
-      # surfaced so the next heartbeat does not re-fire it.
+      # Enqueue first, then mark the captured occurrences surfaced so the next
+      # heartbeat does not re-fire them.
       fm_wake_append heartbeat heartbeat heartbeat || exit 1
       touch "$STATE/.last-heartbeat"
-      mark_all_captain_relevant_surfaced
+      mark_all_captain_relevant_surfaced "$FM_HEARTBEAT_SURFACED_BINDINGS" || exit 1
       wake "heartbeat"
     else
       touch "$STATE/.last-heartbeat"

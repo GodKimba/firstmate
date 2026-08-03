@@ -117,6 +117,24 @@ test_daemon_state_root_uses_fm_home() {
   pass "supervise daemon state root is scoped by FM_HOME"
 }
 
+test_daemon_wake_append_is_scoped_to_explicit_state() {
+  local dir ambient target
+  dir=$(make_supercase daemon-wake-scope)
+  ambient="$dir/ambient/state"
+  target="$dir/target/state"
+  mkdir -p "$ambient" "$target"
+
+  FM_HOME="${ambient%/state}" \
+    FM_WAKE_QUEUE="$ambient/.wake-queue" \
+    FM_WAKE_QUEUE_LOCK="$ambient/.wake-queue.lock" \
+    daemon_wake_append "$target" stale sess:fm-test 'stale: sess:fm-test' \
+    || fail "daemon_wake_append rejected the explicit scratch state"
+
+  [ -s "$target/.wake-queue" ] || fail "daemon_wake_append did not write the explicit scratch queue"
+  [ ! -e "$ambient/.wake-queue" ] || fail "daemon_wake_append leaked into the ambient home queue"
+  pass "daemon housekeeping wake appends stay inside the explicit state fixture"
+}
+
 test_classify_routine_signal_self() {
   local dir state out
   dir=$(make_supercase classify-routine)
@@ -138,6 +156,25 @@ test_classify_terminal_signal_escalates() {
     case "$out" in escalate\|*) ;; *) fail "captain verb did not escalate ($kw): $out" ;; esac
   done
   pass "captain-relevant status verbs escalate"
+}
+
+test_working_status_failure_escalates() {
+  local dir state fakebin status_file failure out
+  dir=$(make_supercase classify-working-failure)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  status_file="$state/working-failure.status"
+  failure='failed: active worker reported a fresh failure'
+  fm_write_meta "$state/working-failure.meta" "window=sess:fm-working-failure" "worktree=$dir/worktree" "kind=ship"
+  printf '%s\n' "$failure" > "$status_file"
+  out=$(FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_FAKE_CREW_STATE='state: working · source: run-step · worker active' \
+    classify_signal "$status_file" "$state")
+  case "$out" in
+    escalate\|*"$failure"*) ;;
+    *) fail "daemon hid a captain-relevant status behind working lifecycle: $out" ;;
+  esac
+  pass "daemon working lifecycle suppresses only no-verb signals"
 }
 
 test_classify_check_and_unknown_escalate() {
@@ -801,7 +838,7 @@ test_retained_decision_signal_and_scan_dedup() {
   FM_STATE_OVERRIDE="$state" housekeeping "$state"
   [ ! -s "$state/.subsuper-escalations" ] \
     || fail "daemon catch-all re-fired a retained decision already surfaced by signal"
-  rm -f "$marker" "$state/.subsuper-last-scan"
+  rm -f "$marker" "$state/retained.surfaced" "$state/.subsuper-last-scan"
   FM_STATE_OVERRIDE="$state" housekeeping "$state"
   grep -F "occurrence=$instance" "$state/.subsuper-escalations" >/dev/null \
     || fail "daemon catch-all omitted an unsurfaced retained decision occurrence"
@@ -836,11 +873,52 @@ test_retained_blocker_signal_and_scan_dedup() {
   FM_STATE_OVERRIDE="$state" housekeeping "$state"
   [ ! -s "$state/.subsuper-escalations" ] \
     || fail "daemon catch-all re-fired a retained blocker already surfaced by signal"
-  rm -f "$marker" "$state/.subsuper-last-scan"
+  rm -f "$marker" "$state/retained-blocker.surfaced" "$state/.subsuper-last-scan"
   FM_STATE_OVERRIDE="$state" housekeeping "$state"
   grep -F "open blocked" "$state/.subsuper-escalations" | grep -F "occurrence=$instance" >/dev/null \
     || fail "daemon catch-all omitted an unsurfaced retained blocker occurrence"
   pass "daemon signal and catch-all surface retained blockers once per occurrence"
+}
+
+test_surfaced_decision_does_not_hide_supplemental_failure() {
+  local dir state status_file occurrence identity failure out key
+  dir=$(make_supercase retained-decision-supplemental-failure)
+  state="$dir/state"
+  status_file="$state/supplemental.status"
+  fm_write_meta "$state/supplemental.meta" "window=sess:fm-supplemental" "worktree=$dir/worktree" "kind=ship"
+  fm_decision_cutover_ensure_status "$status_file" || fail "could not establish supplemental-failure fixture"
+  printf 'needs-decision [key=route]: captain must choose the route\n' >> "$status_file"
+  occurrence=$(status_open_supervision_decisions "$status_file" | awk -F '\t' '$1 == "route" { print $3; exit }')
+  identity="decision:$occurrence"
+  fm_mark_surfaced supplemental "$identity" "$state"
+  mark_decision_seen "$state" "$occurrence"
+  failure='failed: implementation crashed after requesting the route'
+  printf '%s\n' "$failure" >> "$status_file"
+
+  out=$(FM_STATE_OVERRIDE="$state" classify_signal "$status_file" "$state")
+  case "$out" in
+    escalate\|*"$failure"*) ;;
+    *) fail "daemon signal classifier hid a supplemental failure behind the surfaced decision: $out" ;;
+  esac
+  FM_STATE_OVERRIDE="$state" FM_ESCALATE_BATCH_SECS=999999 \
+    handle_wake "signal: $status_file" "$state"
+  key=$(_stale_key supplemental)
+  [ "$(cat "$state/.subsuper-seen-status-$key" 2>/dev/null || true)" = "$failure" ] \
+    || fail "daemon signal path did not record the buffered supplemental failure"
+  grep -F "$failure" "$state/.subsuper-escalations" >/dev/null \
+    || fail "daemon signal path did not buffer the supplemental failure"
+  grep -F "$identity" "$state/supplemental.surfaced" >/dev/null \
+    || fail "supplemental status recording displaced open-decision precedence"
+
+  : > "$state/.subsuper-escalations"
+  rm -f "$state/.subsuper-seen-status-$key" "$state/.subsuper-last-scan"
+  FM_STATE_OVERRIDE="$state" FM_HEARTBEAT_SCAN_SECS=0 FM_ESCALATE_BATCH_SECS=999999 \
+    housekeeping "$state"
+  grep -F "$failure" "$state/.subsuper-escalations" >/dev/null \
+    || fail "daemon heartbeat hid a supplemental failure behind the surfaced decision"
+  [ "$(cat "$state/.subsuper-seen-status-$key" 2>/dev/null || true)" = "$failure" ] \
+    || fail "daemon heartbeat did not record the buffered supplemental failure"
+  pass "daemon signal and heartbeat preserve failures behind surfaced decisions"
 }
 
 test_handle_wake_routes_self_and_escalate() {
@@ -911,6 +989,139 @@ test_signal_escalate_marks_seen_no_catchall_refire() {
   FM_STATE_OVERRIDE="$state" housekeeping "$state"
   [ ! -s "$state/.subsuper-escalations" ] || fail "catch-all scan re-fired an already-escalated signal"
   pass "captain signal escalate marks seen so the catch-all scan does not re-fire"
+}
+
+test_signal_escalate_marks_only_captured_occurrences() {
+  local dir state line1 line2 identity1 identity2 d1 d2
+  dir=$(make_supercase signal-bound-occurrence)
+  state="$dir/state"
+  line1='failed: first occurrence'
+  line2='failed: second occurrence'
+  identity1=$(fm_lifecycle_status_identity "$line1")
+  identity2=$(fm_lifecycle_status_identity "$line2")
+  printf '%s\n' "$line1" > "$state/bound.status"
+  (
+    fm_lifecycle_read() {
+      if [ -e "$state/.buffered" ]; then
+        printf 'terminal\t%s\n' "$identity2"
+      else
+        printf 'terminal\t%s\n' "$identity1"
+      fi
+    }
+    escalate_add() {
+      printf '0\t%s\n' "$2" >> "$1/.subsuper-escalations"
+      printf '%s\n' "$line2" >> "$state/bound.status"
+      : > "$state/.buffered"
+    }
+    FM_STATE_OVERRIDE="$state" FM_ESCALATE_BATCH_SECS=999999 \
+      handle_wake "signal: $state/bound.status" "$state"
+  )
+  grep -F "$identity1" "$state/bound.surfaced" >/dev/null \
+    || fail "daemon did not record the occurrence captured before buffering"
+  grep -F "$identity2" "$state/bound.surfaced" >/dev/null \
+    && fail "daemon recorded a later status occurrence"
+  [ "$(cat "$state/.subsuper-seen-status-bound" 2>/dev/null || true)" = "$line1" ] \
+    || fail "daemon legacy status marker drifted after buffering"
+
+  dir=$(make_supercase signal-bound-decisions)
+  state="$dir/state"
+  fm_decision_cutover_ensure_status "$state/bound-decisions.status"
+  printf 'needs-decision [key=one]: first\nneeds-decision [key=two]: second\n' >> "$state/bound-decisions.status"
+  d1=$(status_open_supervision_decisions "$state/bound-decisions.status" | awk -F '\t' '$1 == "one" { print $3 }')
+  d2=$(status_open_supervision_decisions "$state/bound-decisions.status" | awk -F '\t' '$1 == "two" { print $3 }')
+  (
+    # shellcheck disable=SC2329 # Invoked indirectly by handle_wake.
+    fm_lifecycle_read() { printf 'parked\tdecision:%s\n' "$d1"; }
+    FM_STATE_OVERRIDE="$state" FM_ESCALATE_BATCH_SECS=999999 \
+      handle_wake "signal: $state/bound-decisions.status" "$state"
+  )
+  [ "$(cat "$state/.subsuper-seen-decision-$d1" 2>/dev/null || true)" = "$d1" ] \
+    || fail "daemon did not dual-write the buffered decision"
+  [ ! -e "$state/.subsuper-seen-decision-$d2" ] \
+    || fail "daemon dual-wrote an unbuffered decision"
+  pass "daemon records only occurrences captured before buffering"
+}
+
+test_escalation_buffer_failure_keeps_occurrences_pending() {
+  local dir state line expected_identity key
+  dir=$(make_supercase buffer-failure-signal)
+  state="$dir/state"
+  line='failed: buffer unavailable'
+  expected_identity=$(fm_lifecycle_status_identity "$line")
+  printf '%s\n' "$line" > "$state/buffer-failure.status"
+  (
+    fm_lifecycle_read() { printf 'terminal\t%s\n' "$expected_identity"; }
+    escalate_add() { return 1; }
+    if FM_STATE_OVERRIDE="$state" handle_wake "signal: $state/buffer-failure.status" "$state"; then
+      fail "signal handling succeeded after escalation buffering failed"
+    fi
+  )
+  [ ! -e "$state/buffer-failure.surfaced" ] \
+    || fail "signal buffer failure advanced the shared ledger"
+  key=$(_stale_key buffer-failure)
+  [ ! -e "$state/.subsuper-seen-status-$key" ] \
+    || fail "signal buffer failure advanced the daemon legacy ledger"
+
+  dir=$(make_supercase buffer-failure-heartbeat)
+  state="$dir/state"
+  printf '%s\n' "$line" > "$state/buffer-failure.status"
+  fm_write_meta "$state/buffer-failure.meta" "window=sess:fm-buffer-failure" "worktree=$dir/worktree" "kind=ship"
+  (
+    fm_lifecycle_read() { printf 'terminal\t%s\n' "$expected_identity"; }
+    daemon_wake_append() { :; }
+    escalate_add() { return 1; }
+    if FM_STATE_OVERRIDE="$state" FM_HEARTBEAT_SCAN_SECS=0 housekeeping "$state"; then
+      fail "heartbeat housekeeping succeeded after escalation buffering failed"
+    fi
+  )
+  [ ! -e "$state/buffer-failure.surfaced" ] \
+    || fail "heartbeat buffer failure advanced the shared ledger"
+  [ ! -e "$state/.subsuper-seen-status-$key" ] \
+    || fail "heartbeat buffer failure advanced the daemon legacy ledger"
+  pass "failed escalation buffering leaves exact occurrences pending"
+}
+
+test_housekeeping_stale_probe_waits_for_due_boundary() {
+  local dir state win key marker reads count
+  dir=$(make_supercase stale-probe-boundary)
+  state="$dir/state"
+  win='sess:fm-probe-boundary'
+  key=$(_stale_key probe-boundary)
+  marker="$state/.subsuper-stale-$key"
+  fm_write_meta "$state/probe-boundary.meta" "window=$win" "worktree=$dir/worktree" "kind=ship"
+  printf 'working: still running\n' > "$state/probe-boundary.status"
+  fm_lifecycle_memo_write probe-boundary working none "$state"
+  _now > "$marker"
+  _now > "$state/.subsuper-last-scan"
+  reads="$state/.lifecycle-reads"
+  (
+    fm_lifecycle_read() {
+      printf '%s\n' "$2" >> "$reads"
+      printf 'unknown\tnone\n'
+    }
+    FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=240 FM_HEARTBEAT_SCAN_SECS=999999 \
+      housekeeping "$state"
+  )
+  [ ! -e "$reads" ] || fail "stale housekeeping probed before the due boundary"
+  [ -e "$marker" ] || fail "stale housekeeping cleared an undued marker"
+
+  echo $(( $(date +%s) - 500 )) > "$marker"
+  (
+    fm_lifecycle_read() {
+      printf '%s\n' "$2" >> "$reads"
+      rm -f "$marker"
+      printf 'unknown\tnone\n'
+    }
+    stale_window_is_busy() { return 1; }
+    FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=240 FM_HEARTBEAT_SCAN_SECS=999999 \
+      housekeeping "$state"
+  )
+  count=$(wc -l < "$reads" | tr -d '[:space:]')
+  [ "$count" = 1 ] && [ "$(cat "$reads")" = force ] \
+    || fail "stale housekeeping did not force exactly once at the due boundary"
+  [ -s "$state/.subsuper-escalations" ] \
+    || fail "unknown lifecycle disappeared when its due-boundary probe cleared the marker"
+  pass "stale housekeeping probes once at the due boundary and preserves unknown visibility"
 }
 
 test_collapse_newlines_pure() {
@@ -1172,8 +1383,9 @@ test_classify_signal_dedup_against_scan() {
   printf 'done: PR https://x/y/pull/9' > "$state/.subsuper-seen-status-$key"
   out=$(FM_STATE_OVERRIDE="$state" classify_signal "$state/dup-s9.status" "$state")
   case "$out" in self\|*) ;; *) fail "signal not deduped against scan: $out" ;; esac
-  # Without the seen marker, it should escalate.
-  rm -f "$state/.subsuper-seen-status-$key"
+  [ -s "$state/dup-s9.surfaced" ] || fail "legacy signal suppression was not backfilled into the shared ledger"
+  # Simulate a fresh pre-surface state by removing both PR-1 records.
+  rm -f "$state/.subsuper-seen-status-$key" "$state/dup-s9.surfaced" "$state/dup-s9.lifecycle"
   out=$(FM_STATE_OVERRIDE="$state" classify_signal "$state/dup-s9.status" "$state")
   case "$out" in escalate\|*) ;; *) fail "signal should escalate when not seen: $out" ;; esac
   pass "classify_signal dedupes against the catch-all scan seen marker"
@@ -1190,8 +1402,9 @@ test_classify_stale_dedup_against_signal() {
   printf 'done: PR https://x/y/pull/10' > "$state/.subsuper-seen-status-$key"
   out=$(FM_STATE_OVERRIDE="$state" classify_stale "sess:fm-dup-s10" "$state")
   case "$out" in self\|*) ;; *) fail "stale not deduped against signal: $out" ;; esac
-  # Without the seen marker, it should escalate.
-  rm -f "$state/.subsuper-seen-status-$key"
+  [ -s "$state/dup-s10.surfaced" ] || fail "legacy stale suppression was not backfilled into the shared ledger"
+  # Simulate a fresh pre-surface state by removing both PR-1 records.
+  rm -f "$state/.subsuper-seen-status-$key" "$state/dup-s10.surfaced" "$state/dup-s10.lifecycle"
   out=$(FM_STATE_OVERRIDE="$state" classify_stale "sess:fm-dup-s10" "$state")
   case "$out" in escalate\|*) ;; *) fail "stale should escalate when not seen: $out" ;; esac
   pass "classify_stale dedupes against the signal path seen marker"
@@ -2029,8 +2242,10 @@ test_afk_start_refuses_when_flag_cannot_be_written
 test_afk_start_ignores_stale_pidfile_without_lock
 test_afk_start_reclaims_stale_daemon_lock_reused_pid
 test_daemon_state_root_uses_fm_home
+test_daemon_wake_append_is_scoped_to_explicit_state
 test_classify_routine_signal_self
 test_classify_terminal_signal_escalates
+test_working_status_failure_escalates
 test_classify_check_and_unknown_escalate
 test_stale_transient_self_records_marker
 test_stale_diagnostic_wedge_survives_busy_housekeeping
@@ -2048,6 +2263,7 @@ test_housekeeping_pause_endpoint_loss_escalates_immediately
 test_housekeeping_authoritative_working_pause_keeps_wedge_aging
 test_housekeeping_invalid_pause_preserves_wedge_aging
 test_housekeeping_persistent_stale_escalates
+test_housekeeping_stale_probe_waits_for_due_boundary
 test_housekeeping_resumed_stale_cleared
 test_housekeeping_paused_resurfaces_and_resets
 test_housekeeping_paused_resumed_cleared
@@ -2063,11 +2279,14 @@ test_escalate_batch_age_uses_first_append
 test_heartbeat_scan_dedup
 test_retained_decision_signal_and_scan_dedup
 test_retained_blocker_signal_and_scan_dedup
+test_surfaced_decision_does_not_hide_supplemental_failure
 test_handle_wake_routes_self_and_escalate
 test_inject_skip_forces_self
 test_is_wake_reason_distinguishes_status_stdout
 test_terminal_stale_escalate_leaves_no_marker
 test_signal_escalate_marks_seen_no_catchall_refire
+test_signal_escalate_marks_only_captured_occurrences
+test_escalation_buffer_failure_keeps_occurrences_pending
 test_collapse_newlines_pure
 test_afk_absent_daemon_does_not_inject
 test_busy_guard_defers_when_supervisor_busy

@@ -18,6 +18,15 @@
 #
 #   state: <working|parked|done|blocked|paused|failed|unknown> · source: <run-step|pane|ci-withheld|status-log|none> · <detail>
 #
+# `--supervision` is a separate machine-facing channel consumed by
+# bin/fm-lifecycle-lib.sh and does not change the human line above.
+# It prints:
+#
+#   <working|paused|parked|terminal|unknown><TAB><decision:*|run:parked:*|run:terminal:*|status:*|none>
+#
+# bin/fm-lifecycle-lib.sh owns which closed occurrence inputs may contribute to
+# that identity, while this script owns their derivation from current crew state.
+#
 # Logic, in order:
 #   1. Resolve worktree + backend target + kind from state/<id>.meta.
 #   2. Matching no-mistakes run for this crew's branch AND current code identity,
@@ -79,8 +88,14 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 # shellcheck source=bin/fm-busy-lib.sh
 . "$SCRIPT_DIR/fm-busy-lib.sh"
 
+SUPERVISION_OUTPUT=0
+if [ "${1:-}" = --supervision ]; then
+  SUPERVISION_OUTPUT=1
+  shift
+fi
 ID=${1:-}
-[ -n "$ID" ] || { echo "usage: fm-crew-state.sh <id>" >&2; exit 2; }
+[ -n "$ID" ] || { echo "usage: fm-crew-state.sh [--supervision] <id>" >&2; exit 2; }
+[ "$#" -eq 1 ] || { echo "usage: fm-crew-state.sh [--supervision] <id>" >&2; exit 2; }
 
 META="$STATE/$ID.meta"
 LOG="$STATE/$ID.status"
@@ -99,9 +114,106 @@ FM_CREW_STATE_GH_TIMEOUT=${FM_CREW_STATE_GH_TIMEOUT:-20}
 case "$FM_CREW_STATE_GH_TIMEOUT" in ''|*[!0-9]*|0) FM_CREW_STATE_GH_TIMEOUT=20 ;; esac
 SEP=' · '
 
-# Emit the one canonical line and exit 0. Detail is optional.
+supervision_open_decision() {
+  local key _verb instance _summary
+  while IFS=$'\t' read -r key _verb instance _summary || [ -n "$key" ]; do
+    [ -n "$key" ] || continue
+    printf '%s' "$instance"
+    return 0
+  done <<EOF
+$(status_open_supervision_decisions "$LOG")
+EOF
+  return 1
+}
+
+supervision_class() {  # <human-state>
+  local verb line=${LOG_LINE:-}
+  [ -n "$line" ] || line=$(last_status_line "$LOG")
+  if supervision_open_decision >/dev/null; then
+    printf 'parked'
+    return
+  fi
+  case "$1" in
+    working) printf 'working' ;;
+    paused) printf 'paused' ;;
+    parked|blocked) printf 'parked' ;;
+    done|failed) printf 'terminal' ;;
+    *)
+      if status_is_captain_relevant "$line"; then
+        verb=$(status_line_verb "$line")
+        case "$verb" in needs-decision|blocked) printf 'parked' ;; *) printf 'terminal' ;; esac
+      else
+        printf 'unknown'
+      fi
+      ;;
+  esac
+}
+
+supervision_steps_vector() {
+  printf '%s\n' "$RUN_OUT" | awk '
+    /^[[:space:]]*steps\[[0-9]+\]\{/ {
+      row=$0
+      sub(/^.*steps\[/, "", row)
+      sub(/\].*$/, "", row)
+      left=row + 0
+      next
+    }
+    left > 0 {
+      row=$0
+      sub(/^[[:space:]]*/, "", row)
+      split(row, field, ",")
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", field[1])
+      gsub(/^[[:space:]\"]+|[[:space:]\"]+$/, "", field[2])
+      printf "%s:%s,", field[1], field[2]
+      left--
+    }
+  '
+}
+
+supervision_run_identity() {  # <parked|terminal>
+  local class=$1 key id head status outcome gate steps
+  if [ "${RUN_SOURCE:-}" = coarse ]; then
+    key="${CREW_BRANCH:-}|${COARSE_HEAD:-}|${COARSE_STATUS:-}"
+  else
+    id=$(strip_quotes "$(nm_field id)")
+    head=$(strip_quotes "$(nm_field head)")
+    status=$(strip_quotes "$(nm_field status)")
+    outcome=$(strip_quotes "$(nm_field outcome)")
+    gate=$(nm_gate_name)
+    steps=$(supervision_steps_vector)
+    key="$id|$head|$status|$outcome|$gate|$steps"
+  fi
+  printf 'run:%s:%s' "$class" "$(printf '%s' "$key" | fm_decision_hash_text)"
+}
+
+supervision_identity() {  # <class> <source>
+  local class=$1 source=$2 decision line=${LOG_LINE:-}
+  [ -n "$line" ] || line=$(last_status_line "$LOG")
+  decision=$(supervision_open_decision || true)
+  if [ -n "$decision" ]; then
+    printf 'decision:%s' "$decision"
+    return
+  fi
+  case "$class" in parked|terminal) ;; *) printf 'none'; return ;; esac
+  if [ "$source" = run-step ] && [ "${HAVE_RUN:-0}" = 1 ]; then
+    supervision_run_identity "$class"
+  elif [ -n "$line" ] && status_is_captain_relevant "$line"; then
+    printf 'status:%s' "$(printf '%s' "$line" | fm_decision_hash_text)"
+  else
+    printf 'none'
+  fi
+}
+
+# Emit the one canonical human line or the separate machine-facing supervision
+# tuple, then exit 0. The human line remains byte-identical.
 emit() {  # <state> <source> [detail]
-  local line="state: $1${SEP}source: $2"
+  local class identity line="state: $1${SEP}source: $2"
+  if [ "$SUPERVISION_OUTPUT" -eq 1 ]; then
+    class=$(supervision_class "$1")
+    identity=$(supervision_identity "$class" "$2")
+    printf '%s\t%s\n' "$class" "$identity"
+    exit 0
+  fi
   [ -n "${3:-}" ] && line="$line${SEP}$3"
   printf '%s\n' "$line"
   exit 0
@@ -503,8 +615,8 @@ nm_submission_head_matches_worktree() {  # <branch>
 # oriented text - no run id, no JSON/TOON, newest-first, columns
 # "<status> <branch> <short-sha> <date> [<pr-url>]" separated by runs of
 # spaces (verified: no quoting, so splitting on the first two whitespace runs
-# is exact). Echoes the first code-matched terminal row's status word
-# (completed/cancelled/failed), or empty when the newest row is running because
+# is exact). Echoes the first code-matched terminal row as
+# "<status><TAB><short-sha>", or empty when the newest row is running because
 # only detailed status can distinguish active work from a parked gate.
 nm_runs_status_for_branch() {  # <branch>
   local branch=$1 out row st rest br sha
@@ -524,7 +636,7 @@ nm_runs_status_for_branch() {  # <branch>
       [ "$st" = running ] && return 0
       # Coarse rows have no gate detail, so current-code ancestry is required.
       nm_coarse_head_matches_worktree "$sha" || continue
-      printf '%s' "$st"
+      printf '%s\t%s' "$st" "$sha"
       return 0
     fi
   done <<< "$out"
@@ -592,6 +704,7 @@ HAVE_RUN=0
 # run-step block below skips the TOON field parsing entirely for this crew.
 RUN_SOURCE=full
 COARSE_STATUS=""
+COARSE_HEAD=""
 # Scouts and secondmates never drive a no-mistakes validation of their own
 # worktree, so skip the lookup for them and read state from pane/log directly.
 if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/null 2>&1; then
@@ -608,8 +721,11 @@ if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/n
       # primary call means the CLI itself did not respond, so retrying it
       # immediately with a second bounded call would just double the wait
       # for no better answer.
-      COARSE_STATUS=$(nm_runs_status_for_branch "$CREW_BRANCH")
-      if [ -n "$COARSE_STATUS" ]; then
+      coarse_row=$(nm_runs_status_for_branch "$CREW_BRANCH")
+      if [ -n "$coarse_row" ]; then
+        IFS=$'\t' read -r COARSE_STATUS COARSE_HEAD <<EOF
+$coarse_row
+EOF
         HAVE_RUN=1
         RUN_SOURCE=coarse
       fi
