@@ -594,7 +594,7 @@ mark_all_captain_relevant_surfaced() {  # <captured-bindings>
 # This normally finds nothing and the heartbeat is absorbed; it is the fail-safe
 # backstop for material the per-wake path absorbed by mistake.
 heartbeat_scan_finds_actionable() {
-  local meta task lifecycle class identity legacy_identity f last surfaced found=1 bindings=""
+  local meta task lifecycle class identity legacy_identity supplemental_identity f last surfaced found=1 bindings=""
   FM_HEARTBEAT_SURFACED_BINDINGS=
   for meta in "$STATE"/*.meta; do
     [ -e "$meta" ] || continue
@@ -602,22 +602,26 @@ heartbeat_scan_finds_actionable() {
     lifecycle=$(fm_lifecycle_read "$task" cached "$STATE") || true
     class=${lifecycle%%$'\t'*}
     identity=${lifecycle#*$'\t'}
-    if [ "$identity" != none ]; then
-      if [ "$(fm_surfaced_state "$task" "$identity" "$STATE")" = surfaced ]; then
-        continue
-      fi
-      if legacy_occurrence_is_surfaced "$task" "$identity"; then
-        fm_mark_surfaced "$task" "$identity" "$STATE" || return 0
-        continue
-      fi
-      last=$(last_status_line "$STATE/$task.status")
-      legacy_identity=$(fm_lifecycle_legacy_identity "$identity" "$last")
-      bindings="${bindings}${bindings:+$'\n'}$task"$'\t'"$identity"$'\t'"$legacy_identity"
-      found=0
-      continue
-    fi
     f="$STATE/$task.status"
     last=$(last_status_line "$f")
+    supplemental_identity=$(fm_lifecycle_supplemental_status_identity "$f" "$identity" "$last")
+    if [ "$identity" != none ]; then
+      if [ "$(fm_surfaced_state "$task" "$identity" "$STATE")" = surfaced ]; then
+        :
+      elif legacy_occurrence_is_surfaced "$task" "$identity"; then
+        fm_mark_surfaced "$task" "$identity" "$STATE" || return 0
+      else
+        legacy_identity=$(fm_lifecycle_legacy_identity "$identity" "$last")
+        bindings="${bindings}${bindings:+$'\n'}$task"$'\t'"$identity"$'\t'"$legacy_identity"
+        found=0
+      fi
+      if [ "$supplemental_identity" != none ] \
+        && ! legacy_occurrence_is_surfaced "$task" "$supplemental_identity"; then
+        bindings="${bindings}${bindings:+$'\n'}$task"$'\t'none$'\t'"$supplemental_identity"
+        found=0
+      fi
+      continue
+    fi
     status_is_captain_relevant "$last" || continue
     [ "$class" = working ] && continue
     surfaced=$(cat "$(_hb_surfaced_path "$task")" 2>/dev/null || true)
@@ -633,21 +637,25 @@ heartbeat_scan_finds_actionable() {
     lifecycle=$(fm_lifecycle_read "$task" cached "$STATE") || true
     class=${lifecycle%%$'\t'*}
     identity=${lifecycle#*$'\t'}
+    last=$(last_status_line "$f")
+    supplemental_identity=$(fm_lifecycle_supplemental_status_identity "$f" "$identity" "$last")
     if [ "$identity" != none ]; then
       if [ "$(fm_surfaced_state "$task" "$identity" "$STATE")" = surfaced ]; then
-        continue
-      fi
-      if legacy_occurrence_is_surfaced "$task" "$identity"; then
+        :
+      elif legacy_occurrence_is_surfaced "$task" "$identity"; then
         fm_mark_surfaced "$task" "$identity" "$STATE" || return 0
-        continue
+      else
+        legacy_identity=$(fm_lifecycle_legacy_identity "$identity" "$last")
+        bindings="${bindings}${bindings:+$'\n'}$task"$'\t'"$identity"$'\t'"$legacy_identity"
+        found=0
       fi
-      last=$(last_status_line "$f")
-      legacy_identity=$(fm_lifecycle_legacy_identity "$identity" "$last")
-      bindings="${bindings}${bindings:+$'\n'}$task"$'\t'"$identity"$'\t'"$legacy_identity"
-      found=0
+      if [ "$supplemental_identity" != none ] \
+        && ! legacy_occurrence_is_surfaced "$task" "$supplemental_identity"; then
+        bindings="${bindings}${bindings:+$'\n'}$task"$'\t'none$'\t'"$supplemental_identity"
+        found=0
+      fi
       continue
     fi
-    last=$(last_status_line "$f")
     status_is_captain_relevant "$last" || continue
     [ "$class" = working ] && continue
     surfaced=$(cat "$(_hb_surfaced_path "$task")" 2>/dev/null || true)
@@ -968,12 +976,11 @@ EOF
       class=${lifecycle%%$'\t'*}
       identity=${lifecycle#*$'\t'}
       last=$(last_status_line "$STATE/$task.status")
-      unrepresented_status=0
-      if [ "$lifecycle_mode" = force ] && status_is_captain_relevant "$last" \
-        && ! status_latest_decision_is_open_occurrence "$f"; then
-        case "$identity" in decision:*) unrepresented_status=1 ;; esac
+      supplemental_identity=none
+      if [ "$lifecycle_mode" = force ]; then
+        supplemental_identity=$(fm_lifecycle_supplemental_status_identity "$f" "$identity" "$last")
       fi
-      if [ "$unrepresented_status" -eq 0 ] && [ "$identity" != none ] \
+      if [ "$supplemental_identity" = none ] && [ "$identity" != none ] \
         && { [ "$(fm_surfaced_state "$task" "$identity" "$STATE")" = surfaced ] \
           || legacy_occurrence_is_surfaced "$task" "$identity"; }; then
         fm_mark_surfaced "$task" "$identity" "$STATE" || exit 1
@@ -984,12 +991,17 @@ EOF
         continue
       fi
       signal_files="$signal_files $f"
-      if [ "$unrepresented_status" -eq 1 ]; then
+      if [ "$supplemental_identity" != none ]; then
         bound_identity=none
-        legacy_identity=$(fm_lifecycle_status_identity "$last")
+        legacy_identity=$supplemental_identity
       else
         bound_identity=$identity
-        legacy_identity=$(fm_lifecycle_legacy_identity "$identity" "$last")
+        if [ "$lifecycle_mode" = force ] \
+          && status_latest_decision_is_open_occurrence "$f"; then
+          legacy_identity=$(fm_lifecycle_status_identity "$last")
+        else
+          legacy_identity=$(fm_lifecycle_legacy_identity "$identity" "$last")
+        fi
       fi
       signal_bindings="${signal_bindings}${signal_bindings:+$'\n'}$task"$'\t'"$bound_identity"$'\t'"$legacy_identity"
     done <<EOF

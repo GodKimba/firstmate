@@ -106,6 +106,18 @@ fm_lifecycle_status_identity() {  # <status-line>
   printf 'status:%s' "$(printf '%s' "$1" | fm_decision_hash_text)"
 }
 
+fm_lifecycle_supplemental_status_identity() {  # <status-file> <lifecycle-identity> [last-line]
+  local f=$1 identity=$2 last=${3:-}
+  case "$identity" in decision:*) ;; *) printf 'none'; return 0 ;; esac
+  [ -n "$last" ] || last=$(last_status_line "$f")
+  if status_is_captain_relevant "$last" \
+    && ! status_latest_decision_is_open_occurrence "$f"; then
+    fm_lifecycle_status_identity "$last"
+  else
+    printf 'none'
+  fi
+}
+
 fm_lifecycle_status_line_for_identity() {  # <status-file> <status-identity>
   local f=$1 identity=$2 wanted line hash match=
   case "$identity" in status:*) wanted=${identity#status:} ;; *) return 1 ;; esac
@@ -135,14 +147,11 @@ fm_lifecycle_legacy_identity() {  # <identity> <status-line> [include-paused]
 }
 
 fm_lifecycle_clear_working_timers() {  # <task> [state] [class]
-  local task=$1 state=${2:-} class=${3:-} root meta target target_key task_key worktree
+  local task=$1 state=${2:-} class=${3:-} root meta target target_key task_key
+  [ "$class" = unknown ] && return 0
   root=$(fm_lifecycle_state_root "$state")
   meta="$root/$task.meta"
   [ -e "$meta" ] || return 0
-  if [ "$class" = unknown ]; then
-    worktree=$(grep '^worktree=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
-    [ -n "$worktree" ] || return 0
-  fi
   target=$(fm_backend_target_of_meta "$meta")
   target_key=$(printf '%s' "$target" | tr ':/.' '___')
   task_key=$(printf '%s' "$task" | tr ':/.' '___')

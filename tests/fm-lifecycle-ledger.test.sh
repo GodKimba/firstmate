@@ -308,6 +308,21 @@ t16_t18_nonoccurrence_visibility_contracts() {
   pass "T16-T18 working, paused, and unknown stay visible outside occurrence suppression"
 }
 
+t18_unknown_retains_wedge_timing_until_visibility() {
+  local state key
+  state=$(new_state t18-timers); set_meta "$state" task sess:fm-task
+  key=sess_fm-task
+  : > "$state/.stale-since-$key"
+  : > "$state/.wedge-escalations-$key"
+  : > "$state/.subsuper-stale-task"
+  set_supervision "$state" task unknown none
+  read_tuple "$state" task >/dev/null
+  [ -e "$state/.stale-since-$key" ] || fail "T18 unknown cleared the watcher wedge timer"
+  [ -e "$state/.wedge-escalations-$key" ] || fail "T18 unknown cleared the watcher escalation count"
+  [ -e "$state/.subsuper-stale-task" ] || fail "T18 unknown cleared the away-mode wedge timer"
+  pass "T18 unknown lifecycle retains wedge timing until visibility is handled"
+}
+
 t19_merge_poll_artifacts_are_independent() {
   local state before after
   state=$(new_state t19); set_meta "$state" task sess:fm-task
@@ -450,6 +465,7 @@ t10_t11_working_reversal_preserves_ledger_and_new_result_surfaces
 t12_t14_decision_identity_survives_run_flaps_and_reopens
 t15_repark_collision_is_bounded_by_the_resurface_window
 t16_t18_nonoccurrence_visibility_contracts
+t18_unknown_retains_wedge_timing_until_visibility
 t19_merge_poll_artifacts_are_independent
 t20_cleanup_refusal_keeps_task_visible
 t22_enqueue_before_record_replays_toward_a_duplicate

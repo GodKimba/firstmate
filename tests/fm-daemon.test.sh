@@ -861,6 +861,47 @@ test_retained_blocker_signal_and_scan_dedup() {
   pass "daemon signal and catch-all surface retained blockers once per occurrence"
 }
 
+test_surfaced_decision_does_not_hide_supplemental_failure() {
+  local dir state status_file occurrence identity failure out key
+  dir=$(make_supercase retained-decision-supplemental-failure)
+  state="$dir/state"
+  status_file="$state/supplemental.status"
+  fm_write_meta "$state/supplemental.meta" "window=sess:fm-supplemental" "worktree=$dir/worktree" "kind=ship"
+  fm_decision_cutover_ensure_status "$status_file" || fail "could not establish supplemental-failure fixture"
+  printf 'needs-decision [key=route]: captain must choose the route\n' >> "$status_file"
+  occurrence=$(status_open_supervision_decisions "$status_file" | awk -F '\t' '$1 == "route" { print $3; exit }')
+  identity="decision:$occurrence"
+  fm_mark_surfaced supplemental "$identity" "$state"
+  mark_decision_seen "$state" "$occurrence"
+  failure='failed: implementation crashed after requesting the route'
+  printf '%s\n' "$failure" >> "$status_file"
+
+  out=$(FM_STATE_OVERRIDE="$state" classify_signal "$status_file" "$state")
+  case "$out" in
+    escalate\|*"$failure"*) ;;
+    *) fail "daemon signal classifier hid a supplemental failure behind the surfaced decision: $out" ;;
+  esac
+  FM_STATE_OVERRIDE="$state" FM_ESCALATE_BATCH_SECS=999999 \
+    handle_wake "signal: $status_file" "$state"
+  key=$(_stale_key supplemental)
+  [ "$(cat "$state/.subsuper-seen-status-$key" 2>/dev/null || true)" = "$failure" ] \
+    || fail "daemon signal path did not record the buffered supplemental failure"
+  grep -F "$failure" "$state/.subsuper-escalations" >/dev/null \
+    || fail "daemon signal path did not buffer the supplemental failure"
+  grep -F "$identity" "$state/supplemental.surfaced" >/dev/null \
+    || fail "supplemental status recording displaced open-decision precedence"
+
+  : > "$state/.subsuper-escalations"
+  rm -f "$state/.subsuper-seen-status-$key" "$state/.subsuper-last-scan"
+  FM_STATE_OVERRIDE="$state" FM_HEARTBEAT_SCAN_SECS=0 FM_ESCALATE_BATCH_SECS=999999 \
+    housekeeping "$state"
+  grep -F "$failure" "$state/.subsuper-escalations" >/dev/null \
+    || fail "daemon heartbeat hid a supplemental failure behind the surfaced decision"
+  [ "$(cat "$state/.subsuper-seen-status-$key" 2>/dev/null || true)" = "$failure" ] \
+    || fail "daemon heartbeat did not record the buffered supplemental failure"
+  pass "daemon signal and heartbeat preserve failures behind surfaced decisions"
+}
+
 test_handle_wake_routes_self_and_escalate() {
   local dir state
   dir=$(make_supercase handle)
@@ -2217,6 +2258,7 @@ test_escalate_batch_age_uses_first_append
 test_heartbeat_scan_dedup
 test_retained_decision_signal_and_scan_dedup
 test_retained_blocker_signal_and_scan_dedup
+test_surfaced_decision_does_not_hide_supplemental_failure
 test_handle_wake_routes_self_and_escalate
 test_inject_skip_forces_self
 test_is_wake_reason_distinguishes_status_stdout

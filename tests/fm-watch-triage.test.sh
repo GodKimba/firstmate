@@ -1661,6 +1661,7 @@ SH
   [ "$lines" -le 2000 ] || { reap "$pid"; fail "triage log was not capped when wc emitted a spaced byte count (lines=$lines)"; }
   [ ! -s "$state/.wake-queue" ] || { reap "$pid"; fail "benign signal enqueued a wake while testing log capping"; }
   reap "$pid"
+  unset FM_FAKE_CREW_STATE
   pass "triage log capping handles wc byte counts with leading spaces"
 }
 
@@ -1816,6 +1817,32 @@ test_retained_blocker_surfaces_heartbeat_once() {
   fi
   reap "$pid"
   pass "retained blockers behind later pauses surface once through heartbeat"
+}
+
+test_surfaced_decision_does_not_hide_supplemental_failure_heartbeat() {
+  local dir state fakebin out status_file occurrence identity failure sig pid
+  dir=$(make_case retained-decision-supplemental-heartbeat); state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"
+  status_file="$state/supplemental.status"
+  fm_decision_cutover_ensure_status "$status_file" || fail "could not establish watcher supplemental-failure fixture"
+  printf 'needs-decision [key=route]: captain must choose the route\n' >> "$status_file"
+  occurrence=$(status_open_supervision_decisions "$status_file" | awk -F '\t' '$1 == "route" { print $3; exit }')
+  identity="decision:$occurrence"
+  printf '%s\t%s\n' "$identity" "$(date +%s)" > "$state/supplemental.surfaced"
+  printf '%s' "$occurrence" > "$state/.hb-surfaced-decision-$occurrence"
+  failure='failed: implementation crashed after requesting the route'
+  printf '%s\n' "$failure" >> "$status_file"
+  sig=$(seen_sig "$status_file"); printf '%s' "$sig" > "$state/.seen-supplemental_status"
+
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=1 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "watcher heartbeat hid a supplemental failure behind the surfaced decision"
+  grep -Fx heartbeat "$out" >/dev/null || fail "supplemental failure did not surface through heartbeat"
+  [ "$(cat "$state/.hb-surfaced-supplemental" 2>/dev/null || true)" = "$failure" ] \
+    || fail "watcher heartbeat did not record the supplemental failure"
+  grep -F "$identity" "$state/supplemental.surfaced" >/dev/null \
+    || fail "watcher supplemental status displaced open-decision precedence"
+  pass "watcher heartbeat preserves failures behind surfaced decisions"
 }
 
 test_malformed_decision_behind_open_decision_surfaces() {
@@ -2020,6 +2047,7 @@ test_heartbeat_no_change_absorbed
 test_heartbeat_backstop_surfaces_unsurfaced_status
 test_retained_decision_surfaces_signal_and_heartbeat_once
 test_retained_blocker_surfaces_heartbeat_once
+test_surfaced_decision_does_not_hide_supplemental_failure_heartbeat
 test_malformed_decision_behind_open_decision_surfaces
 test_beacon_stays_fresh_while_absorbing
 test_afk_present_reverts_watcher_to_one_shot
