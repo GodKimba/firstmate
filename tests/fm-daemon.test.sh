@@ -1030,6 +1030,7 @@ test_signal_escalate_marks_only_captured_occurrences() {
   d1=$(status_open_supervision_decisions "$state/bound-decisions.status" | awk -F '\t' '$1 == "one" { print $3 }')
   d2=$(status_open_supervision_decisions "$state/bound-decisions.status" | awk -F '\t' '$1 == "two" { print $3 }')
   (
+    # shellcheck disable=SC2329 # Invoked indirectly by handle_wake.
     fm_lifecycle_read() { printf 'parked\tdecision:%s\n' "$d1"; }
     FM_STATE_OVERRIDE="$state" FM_ESCALATE_BATCH_SECS=999999 \
       handle_wake "signal: $state/bound-decisions.status" "$state"
