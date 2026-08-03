@@ -594,17 +594,16 @@ mark_all_captain_relevant_surfaced() {  # <captured-bindings>
 # This normally finds nothing and the heartbeat is absorbed; it is the fail-safe
 # backstop for material the per-wake path absorbed by mistake.
 heartbeat_scan_finds_actionable() {
-  local meta task lifecycle class identity legacy_identity supplemental_identity f last surfaced found=1 bindings=""
+  local meta task lifecycle identity legacy_identity status_identity f last found=1 bindings=""
   FM_HEARTBEAT_SURFACED_BINDINGS=
   for meta in "$STATE"/*.meta; do
     [ -e "$meta" ] || continue
     task=$(basename "$meta"); task=${task%.meta}
     lifecycle=$(fm_lifecycle_read "$task" cached "$STATE") || true
-    class=${lifecycle%%$'\t'*}
     identity=${lifecycle#*$'\t'}
     f="$STATE/$task.status"
     last=$(last_status_line "$f")
-    supplemental_identity=$(fm_lifecycle_supplemental_status_identity "$f" "$identity" "$last")
+    status_identity=$(fm_lifecycle_status_fallback_identity "$f" "$identity" "$last")
     if [ "$identity" != none ]; then
       if [ "$(fm_surfaced_state "$task" "$identity" "$STATE")" = surfaced ]; then
         :
@@ -615,30 +614,21 @@ heartbeat_scan_finds_actionable() {
         bindings="${bindings}${bindings:+$'\n'}$task"$'\t'"$identity"$'\t'"$legacy_identity"
         found=0
       fi
-      if [ "$supplemental_identity" != none ] \
-        && ! legacy_occurrence_is_surfaced "$task" "$supplemental_identity"; then
-        bindings="${bindings}${bindings:+$'\n'}$task"$'\t'none$'\t'"$supplemental_identity"
-        found=0
-      fi
-      continue
     fi
-    status_is_captain_relevant "$last" || continue
-    [ "$class" = working ] && continue
-    surfaced=$(cat "$(_hb_surfaced_path "$task")" 2>/dev/null || true)
-    [ "$surfaced" = "$last" ] && continue
-    legacy_identity=$(fm_lifecycle_legacy_identity none "$last")
-    bindings="${bindings}${bindings:+$'\n'}$task"$'\t'none$'\t'"$legacy_identity"
-    found=0
+    if [ "$status_identity" != none ] \
+      && ! legacy_occurrence_is_surfaced "$task" "$status_identity"; then
+      bindings="${bindings}${bindings:+$'\n'}$task"$'\t'none$'\t'"$status_identity"
+      found=0
+    fi
   done
   for f in "$STATE"/*.status; do
     [ -e "$f" ] || continue
     task=$(basename "$f"); task=${task%.status}
     [ -e "$STATE/$task.meta" ] && continue
     lifecycle=$(fm_lifecycle_read "$task" cached "$STATE") || true
-    class=${lifecycle%%$'\t'*}
     identity=${lifecycle#*$'\t'}
     last=$(last_status_line "$f")
-    supplemental_identity=$(fm_lifecycle_supplemental_status_identity "$f" "$identity" "$last")
+    status_identity=$(fm_lifecycle_status_fallback_identity "$f" "$identity" "$last")
     if [ "$identity" != none ]; then
       if [ "$(fm_surfaced_state "$task" "$identity" "$STATE")" = surfaced ]; then
         :
@@ -649,20 +639,12 @@ heartbeat_scan_finds_actionable() {
         bindings="${bindings}${bindings:+$'\n'}$task"$'\t'"$identity"$'\t'"$legacy_identity"
         found=0
       fi
-      if [ "$supplemental_identity" != none ] \
-        && ! legacy_occurrence_is_surfaced "$task" "$supplemental_identity"; then
-        bindings="${bindings}${bindings:+$'\n'}$task"$'\t'none$'\t'"$supplemental_identity"
-        found=0
-      fi
-      continue
     fi
-    status_is_captain_relevant "$last" || continue
-    [ "$class" = working ] && continue
-    surfaced=$(cat "$(_hb_surfaced_path "$task")" 2>/dev/null || true)
-    [ "$surfaced" = "$last" ] && continue
-    legacy_identity=$(fm_lifecycle_legacy_identity none "$last")
-    bindings="${bindings}${bindings:+$'\n'}$task"$'\t'none$'\t'"$legacy_identity"
-    found=0
+    if [ "$status_identity" != none ] \
+      && ! legacy_occurrence_is_surfaced "$task" "$status_identity"; then
+      bindings="${bindings}${bindings:+$'\n'}$task"$'\t'none$'\t'"$status_identity"
+      found=0
+    fi
   done
   FM_HEARTBEAT_SURFACED_BINDINGS=$bindings
   return "$found"
@@ -976,34 +958,42 @@ EOF
       class=${lifecycle%%$'\t'*}
       identity=${lifecycle#*$'\t'}
       last=$(last_status_line "$STATE/$task.status")
-      supplemental_identity=none
+      status_identity=none
       if [ "$lifecycle_mode" = force ]; then
-        supplemental_identity=$(fm_lifecycle_supplemental_status_identity "$f" "$identity" "$last")
+        status_identity=$(fm_lifecycle_status_fallback_identity "$f" "$identity" "$last")
       fi
-      if [ "$supplemental_identity" = none ] && [ "$identity" != none ] \
-        && { [ "$(fm_surfaced_state "$task" "$identity" "$STATE")" = surfaced ] \
-          || legacy_occurrence_is_surfaced "$task" "$identity"; }; then
-        fm_mark_surfaced "$task" "$identity" "$STATE" || exit 1
-        triage_log "absorbed $class (already reported, $(fm_lifecycle_identity_prefix "$identity")): $f"
-        continue
-      fi
-      if ! afk_present && [ "$class" = working ]; then
-        continue
-      fi
-      signal_files="$signal_files $f"
-      if [ "$supplemental_identity" != none ]; then
-        bound_identity=none
-        legacy_identity=$supplemental_identity
-      else
-        bound_identity=$identity
-        if [ "$lifecycle_mode" = force ] \
-          && status_latest_decision_is_open_occurrence "$f"; then
-          legacy_identity=$(fm_lifecycle_status_identity "$last")
+      primary_pending=0
+      status_pending=0
+      if [ "$identity" != none ] \
+        && [ "$(fm_surfaced_state "$task" "$identity" "$STATE")" = pending ]; then
+        if legacy_occurrence_is_surfaced "$task" "$identity"; then
+          fm_mark_surfaced "$task" "$identity" "$STATE" || exit 1
         else
-          legacy_identity=$(fm_lifecycle_legacy_identity "$identity" "$last")
+          primary_pending=1
         fi
       fi
-      signal_bindings="${signal_bindings}${signal_bindings:+$'\n'}$task"$'\t'"$bound_identity"$'\t'"$legacy_identity"
+      if [ "$status_identity" != none ] \
+        && ! legacy_occurrence_is_surfaced "$task" "$status_identity"; then
+        status_pending=1
+      fi
+      if [ "$primary_pending" -eq 0 ] && [ "$status_pending" -eq 0 ]; then
+        if [ "$identity" != none ] || [ "$status_identity" != none ]; then
+          [ "$identity" = none ] \
+            || triage_log "absorbed $class (already reported, $(fm_lifecycle_identity_prefix "$identity")): $f"
+          continue
+        fi
+        if ! afk_present && [ "$class" = working ]; then
+          continue
+        fi
+      fi
+      signal_files="$signal_files $f"
+      if [ "$primary_pending" -eq 1 ]; then
+        legacy_identity=$(fm_lifecycle_legacy_identity "$identity" "$last")
+        signal_bindings="${signal_bindings}${signal_bindings:+$'\n'}$task"$'\t'"$identity"$'\t'"$legacy_identity"
+      fi
+      if [ "$status_pending" -eq 1 ]; then
+        signal_bindings="${signal_bindings}${signal_bindings:+$'\n'}$task"$'\t'none$'\t'"$status_identity"
+      fi
     done <<EOF
 $pending
 EOF

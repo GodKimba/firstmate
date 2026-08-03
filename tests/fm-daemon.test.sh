@@ -158,6 +158,25 @@ test_classify_terminal_signal_escalates() {
   pass "captain-relevant status verbs escalate"
 }
 
+test_working_status_failure_escalates() {
+  local dir state fakebin status_file failure out
+  dir=$(make_supercase classify-working-failure)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  status_file="$state/working-failure.status"
+  failure='failed: active worker reported a fresh failure'
+  fm_write_meta "$state/working-failure.meta" "window=sess:fm-working-failure" "worktree=$dir/worktree" "kind=ship"
+  printf '%s\n' "$failure" > "$status_file"
+  out=$(FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_FAKE_CREW_STATE='state: working · source: run-step · worker active' \
+    classify_signal "$status_file" "$state")
+  case "$out" in
+    escalate\|*"$failure"*) ;;
+    *) fail "daemon hid a captain-relevant status behind working lifecycle: $out" ;;
+  esac
+  pass "daemon working lifecycle suppresses only no-verb signals"
+}
+
 test_classify_check_and_unknown_escalate() {
   local out
   out=$(classify_check "check: /s/c.check.sh: merged: https://x")
@@ -2225,6 +2244,7 @@ test_daemon_state_root_uses_fm_home
 test_daemon_wake_append_is_scoped_to_explicit_state
 test_classify_routine_signal_self
 test_classify_terminal_signal_escalates
+test_working_status_failure_escalates
 test_classify_check_and_unknown_escalate
 test_stale_transient_self_records_marker
 test_stale_diagnostic_wedge_survives_busy_housekeeping

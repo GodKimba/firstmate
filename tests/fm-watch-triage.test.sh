@@ -1706,6 +1706,65 @@ test_heartbeat_backstop_surfaces_unsurfaced_status() {
   pass "heartbeat backstop fail-safe surfaces a captain-relevant status the per-wake path missed"
 }
 
+test_working_status_failure_surfaces_signal_and_heartbeat() {
+  local dir state fakebin out status_file failure sig pid
+  failure='failed: active worker reported a fresh failure'
+
+  dir=$(make_case working-status-signal); state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"
+  status_file="$state/working-failure.status"
+  fm_write_meta "$state/working-failure.meta" "window=sess:fm-working-failure" "worktree=$dir/worktree" "kind=ship"
+  printf '%s\n' "$failure" > "$status_file"
+  PATH="$fakebin:$PATH" FM_FAKE_CREW_STATE='state: working · source: run-step · worker active' \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "working lifecycle hid a captain-relevant status signal"
+  grep -F "signal: $status_file" "$out" >/dev/null \
+    || fail "working lifecycle did not surface the exact failed status signal"
+  [ "$(cat "$state/.hb-surfaced-working-failure" 2>/dev/null || true)" = "$failure" ] \
+    || fail "signal path did not record the exact failed status fallback"
+
+  dir=$(make_case working-status-heartbeat); state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"
+  status_file="$state/working-failure.status"
+  fm_write_meta "$state/working-failure.meta" "window=sess:fm-working-failure" "worktree=$dir/worktree" "kind=ship"
+  printf '%s\n' "$failure" > "$status_file"
+  sig=$(seen_sig "$status_file"); printf '%s' "$sig" > "$state/.seen-working-failure_status"
+  PATH="$fakebin:$PATH" FM_FAKE_CREW_STATE='state: working · source: run-step · worker active' \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=1 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "working lifecycle hid a captain-relevant heartbeat fallback"
+  grep -Fx heartbeat "$out" >/dev/null || fail "working failure did not surface through heartbeat"
+  [ "$(cat "$state/.hb-surfaced-working-failure" 2>/dev/null || true)" = "$failure" ] \
+    || fail "heartbeat did not record the exact failed status fallback"
+  pass "working lifecycle suppresses only no-verb signals"
+}
+
+test_blocker_and_coalesced_failure_retain_both_bindings() {
+  local dir state fakebin out status_file failure occurrence identity marker pid
+  dir=$(make_case blocker-coalesced-failure); state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"
+  status_file="$state/blocker.status"
+  failure='failed: maintenance recovery also crashed'
+  printf '%s\n' \
+    'blocked [key=database]: maintenance failed' \
+    "$failure" > "$status_file"
+  occurrence=$(status_open_supervision_decisions "$status_file" | awk -F '\t' '$2 == "blocked" { print $3; exit }')
+  identity="decision:$occurrence"
+  marker="$state/.hb-surfaced-decision-$occurrence"
+
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "coalesced failure hid its open blocker"
+  [ "$(cat "$marker" 2>/dev/null || true)" = "$occurrence" ] \
+    || fail "signal path did not retain the blocker legacy binding"
+  [ "$(cat "$state/.hb-surfaced-blocker" 2>/dev/null || true)" = "$failure" ] \
+    || fail "signal path did not retain the coalesced failure binding"
+  grep -F "$identity" "$state/blocker.surfaced" >/dev/null \
+    || fail "coalesced status fallback displaced open-decision precedence"
+  pass "coalesced failures retain their primary blocker binding"
+}
+
 test_retained_decision_surfaces_signal_and_heartbeat_once() {
   local dir state fakebin out status_file instance marker pid sig out2 queue drain_out
   dir=$(make_case retained-decision-signal); state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"
@@ -2045,6 +2104,8 @@ test_nonterminal_stale_repairs_missing_or_corrupt_timer
 test_triage_log_size_cap_accepts_spaced_wc_counts
 test_heartbeat_no_change_absorbed
 test_heartbeat_backstop_surfaces_unsurfaced_status
+test_working_status_failure_surfaces_signal_and_heartbeat
+test_blocker_and_coalesced_failure_retain_both_bindings
 test_retained_decision_surfaces_signal_and_heartbeat_once
 test_retained_blocker_surfaces_heartbeat_once
 test_surfaced_decision_does_not_hide_supplemental_failure_heartbeat

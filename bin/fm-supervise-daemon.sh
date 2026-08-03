@@ -435,7 +435,7 @@ daemon_classification_emit() {  # <action> <distilled> <bindings> [result-var] [
 
 classify_signal() {  # <reason-after-colon> <state> [result-var] [bindings-var]
   local reason=$1 state=$2 result_var=${3:-} bindings_var=${4:-}
-  local f base task mode lifecycle class identity last supplemental_identity distilled="" precedence win summary binding bindings=""
+  local f base task mode lifecycle class identity last status_identity distilled="" precedence win summary binding bindings=""
   for f in $reason; do
     [ -e "$f" ] || continue
     base=$(basename "$f")
@@ -448,9 +448,9 @@ classify_signal() {  # <reason-after-colon> <state> [result-var] [bindings-var]
     class=${lifecycle%%$'\t'*}
     identity=${lifecycle#*$'\t'}
     last=$(last_status_line "$state/$task.status")
-    supplemental_identity=none
+    status_identity=none
     if [ "$mode" = force ]; then
-      supplemental_identity=$(fm_lifecycle_supplemental_status_identity "$state/$task.status" "$identity" "$last")
+      status_identity=$(fm_lifecycle_status_fallback_identity "$state/$task.status" "$identity" "$last")
     fi
     if [ "$identity" != none ]; then
       if [ "$(fm_surfaced_state "$task" "$identity" "$state")" = pending ]; then
@@ -463,12 +463,14 @@ classify_signal() {  # <reason-after-colon> <state> [result-var] [bindings-var]
           bindings="${bindings}${bindings:+$'\n'}$binding"
         fi
       fi
-      if [ "$supplemental_identity" != none ] \
-        && ! daemon_legacy_occurrence_surfaced "$task" "$supplemental_identity" "$state"; then
-        distilled="${distilled}${distilled:+ | }$base: $last"
-        binding="$task"$'\t'none$'\t'"$supplemental_identity"
-        bindings="${bindings}${bindings:+$'\n'}$binding"
-      fi
+    fi
+    if [ "$status_identity" != none ] \
+      && ! daemon_legacy_occurrence_surfaced "$task" "$status_identity" "$state"; then
+      distilled="${distilled}${distilled:+ | }$base: $last"
+      binding="$task"$'\t'none$'\t'"$status_identity"
+      bindings="${bindings}${bindings:+$'\n'}$binding"
+    fi
+    if [ "$identity" != none ] || [ "$status_identity" != none ]; then
       continue
     fi
     case "$class" in
@@ -1153,7 +1155,7 @@ _oldest_line_age() {  # <buf> -> seconds since the oldest buffered item first ar
 #     captain-relevant line or folded open decision or blocker and escalate it.
 housekeeping() {  # <state>
   local state=$1 now due f key task win marker age last max_defer oldest pause_secs verdict seen
-  local lifecycle class identity supplemental_identity primary_pending supplemental_pending
+  local lifecycle class identity status_identity primary_pending status_pending
   local reason meta heartbeat_enqueued summary binding marker_epoch _memo_epoch stale_secs
   now=$(_now)
   migrate_watcher_pause_markers "$state" || return 1
@@ -1338,52 +1340,37 @@ EOF
       identity=${lifecycle#*$'\t'}
       f="$state/$task.status"
       last=$(last_status_line "$f")
-      supplemental_identity=$(fm_lifecycle_supplemental_status_identity "$f" "$identity" "$last")
-      if [ "$identity" != none ]; then
-        primary_pending=0
-        supplemental_pending=0
-        if [ "$(fm_surfaced_state "$task" "$identity" "$state")" = pending ]; then
-          if daemon_legacy_occurrence_surfaced "$task" "$identity" "$state"; then
-            fm_mark_surfaced "$task" "$identity" "$state" || return 1
-          else
-            primary_pending=1
-          fi
+      status_identity=$(fm_lifecycle_status_fallback_identity "$f" "$identity" "$last")
+      primary_pending=0
+      status_pending=0
+      if [ "$identity" != none ] \
+        && [ "$(fm_surfaced_state "$task" "$identity" "$state")" = pending ]; then
+        if daemon_legacy_occurrence_surfaced "$task" "$identity" "$state"; then
+          fm_mark_surfaced "$task" "$identity" "$state" || return 1
+        else
+          primary_pending=1
         fi
-        if [ "$supplemental_identity" != none ] \
-          && ! daemon_legacy_occurrence_surfaced "$task" "$supplemental_identity" "$state"; then
-          supplemental_pending=1
-        fi
-        [ "$primary_pending" -eq 1 ] || [ "$supplemental_pending" -eq 1 ] || continue
-        if [ "$heartbeat_enqueued" -eq 0 ]; then
-          daemon_wake_append "$state" heartbeat heartbeat heartbeat || return 1
-          heartbeat_enqueued=1
-        fi
-        if [ "$primary_pending" -eq 1 ]; then
-          summary=$(daemon_lifecycle_summary "$task" "$class" "$identity" "$state")
-          binding=$(daemon_binding_record "$task" "$identity" "$state" "$last")
-          escalate_add "$state" "$(basename "$f"): $summary (catch-all scan)" || return 1
-          mark_escalated_seen "$state" "$binding" || return 1
-        fi
-        if [ "$supplemental_pending" -eq 1 ]; then
-          binding="$task"$'\t'none$'\t'"$supplemental_identity"
-          escalate_add "$state" "$(basename "$f"): $last (catch-all scan)" || return 1
-          mark_escalated_seen "$state" "$binding" || return 1
-        fi
-        continue
-      else
-        [ "$class" != working ] || continue
-        status_is_captain_relevant "$last" || continue
-        seen="$state/.subsuper-seen-status-$(_stale_key "$task")"
-        [ "$(cat "$seen" 2>/dev/null || true)" != "$last" ] || continue
       fi
+      if [ "$status_identity" != none ] \
+        && ! daemon_legacy_occurrence_surfaced "$task" "$status_identity" "$state"; then
+        status_pending=1
+      fi
+      [ "$primary_pending" -eq 1 ] || [ "$status_pending" -eq 1 ] || continue
       if [ "$heartbeat_enqueued" -eq 0 ]; then
         daemon_wake_append "$state" heartbeat heartbeat heartbeat || return 1
         heartbeat_enqueued=1
       fi
-      summary=$(daemon_lifecycle_summary "$task" "$class" "$identity" "$state")
-      binding=$(daemon_binding_record "$task" "$identity" "$state" "$last")
-      escalate_add "$state" "$(basename "$f"): $summary (catch-all scan)" || return 1
-      mark_escalated_seen "$state" "$binding" || return 1
+      if [ "$primary_pending" -eq 1 ]; then
+        summary=$(daemon_lifecycle_summary "$task" "$class" "$identity" "$state")
+        binding=$(daemon_binding_record "$task" "$identity" "$state" "$last")
+        escalate_add "$state" "$(basename "$f"): $summary (catch-all scan)" || return 1
+        mark_escalated_seen "$state" "$binding" || return 1
+      fi
+      if [ "$status_pending" -eq 1 ]; then
+        binding="$task"$'\t'none$'\t'"$status_identity"
+        escalate_add "$state" "$(basename "$f"): $last (catch-all scan)" || return 1
+        mark_escalated_seen "$state" "$binding" || return 1
+      fi
     done
     for f in "$state"/*.status; do
       [ -e "$f" ] || continue
@@ -1393,51 +1380,37 @@ EOF
       class=${lifecycle%%$'\t'*}
       identity=${lifecycle#*$'\t'}
       last=$(last_status_line "$f")
-      supplemental_identity=$(fm_lifecycle_supplemental_status_identity "$f" "$identity" "$last")
-      if [ "$identity" != none ]; then
-        primary_pending=0
-        supplemental_pending=0
-        if [ "$(fm_surfaced_state "$task" "$identity" "$state")" = pending ]; then
-          if daemon_legacy_occurrence_surfaced "$task" "$identity" "$state"; then
-            fm_mark_surfaced "$task" "$identity" "$state" || return 1
-          else
-            primary_pending=1
-          fi
+      status_identity=$(fm_lifecycle_status_fallback_identity "$f" "$identity" "$last")
+      primary_pending=0
+      status_pending=0
+      if [ "$identity" != none ] \
+        && [ "$(fm_surfaced_state "$task" "$identity" "$state")" = pending ]; then
+        if daemon_legacy_occurrence_surfaced "$task" "$identity" "$state"; then
+          fm_mark_surfaced "$task" "$identity" "$state" || return 1
+        else
+          primary_pending=1
         fi
-        if [ "$supplemental_identity" != none ] \
-          && ! daemon_legacy_occurrence_surfaced "$task" "$supplemental_identity" "$state"; then
-          supplemental_pending=1
-        fi
-        [ "$primary_pending" -eq 1 ] || [ "$supplemental_pending" -eq 1 ] || continue
-        if [ "$heartbeat_enqueued" -eq 0 ]; then
-          daemon_wake_append "$state" heartbeat heartbeat heartbeat || return 1
-          heartbeat_enqueued=1
-        fi
-        if [ "$primary_pending" -eq 1 ]; then
-          summary=$(daemon_lifecycle_summary "$task" "$class" "$identity" "$state")
-          binding=$(daemon_binding_record "$task" "$identity" "$state" "$last")
-          escalate_add "$state" "$(basename "$f"): $summary (catch-all scan)" || return 1
-          mark_escalated_seen "$state" "$binding" || return 1
-        fi
-        if [ "$supplemental_pending" -eq 1 ]; then
-          binding="$task"$'\t'none$'\t'"$supplemental_identity"
-          escalate_add "$state" "$(basename "$f"): $last (catch-all scan)" || return 1
-          mark_escalated_seen "$state" "$binding" || return 1
-        fi
-        continue
-      else
-        status_is_captain_relevant "$last" || continue
-        seen="$state/.subsuper-seen-status-$(_stale_key "$task")"
-        [ "$(cat "$seen" 2>/dev/null || true)" != "$last" ] || continue
       fi
+      if [ "$status_identity" != none ] \
+        && ! daemon_legacy_occurrence_surfaced "$task" "$status_identity" "$state"; then
+        status_pending=1
+      fi
+      [ "$primary_pending" -eq 1 ] || [ "$status_pending" -eq 1 ] || continue
       if [ "$heartbeat_enqueued" -eq 0 ]; then
         daemon_wake_append "$state" heartbeat heartbeat heartbeat || return 1
         heartbeat_enqueued=1
       fi
-      summary=$(daemon_lifecycle_summary "$task" "$class" "$identity" "$state")
-      binding=$(daemon_binding_record "$task" "$identity" "$state" "$last")
-      escalate_add "$state" "$(basename "$f"): $summary (catch-all scan)" || return 1
-      mark_escalated_seen "$state" "$binding" || return 1
+      if [ "$primary_pending" -eq 1 ]; then
+        summary=$(daemon_lifecycle_summary "$task" "$class" "$identity" "$state")
+        binding=$(daemon_binding_record "$task" "$identity" "$state" "$last")
+        escalate_add "$state" "$(basename "$f"): $summary (catch-all scan)" || return 1
+        mark_escalated_seen "$state" "$binding" || return 1
+      fi
+      if [ "$status_pending" -eq 1 ]; then
+        binding="$task"$'\t'none$'\t'"$status_identity"
+        escalate_add "$state" "$(basename "$f"): $last (catch-all scan)" || return 1
+        mark_escalated_seen "$state" "$binding" || return 1
+      fi
     done
   fi
 }

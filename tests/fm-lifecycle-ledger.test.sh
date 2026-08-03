@@ -75,6 +75,25 @@ p1_decision_identity_precedes_run_readability() {
   pass "P1 decision occurrence outranks run readability"
 }
 
+test_status_fallback_is_exact_without_displacing_decisions() {
+  local state status_file decision_identity failure failure_identity
+  state=$(new_state p3); status_file="$state/p3.status"
+  failure='failed: active run reported a fresh failure'
+  printf '%s\n' "$failure" > "$status_file"
+  failure_identity=$(fm_lifecycle_status_identity "$failure")
+  assert_eq "$(fm_lifecycle_status_fallback_identity "$status_file" none "$failure")" "$failure_identity" \
+    "working lifecycle hid the exact status fallback"
+
+  printf 'blocked [key=database]: maintenance failed\n' > "$status_file"
+  decision_identity="decision:$(status_open_supervision_decisions "$status_file" | awk -F '\t' 'NR == 1 { print $3 }')"
+  assert_eq "$(fm_lifecycle_status_fallback_identity "$status_file" "$decision_identity")" none \
+    "exact open decision became a status fallback"
+  printf '%s\n' "$failure" >> "$status_file"
+  assert_eq "$(fm_lifecycle_status_fallback_identity "$status_file" "$decision_identity")" "$failure_identity" \
+    "supplemental failure did not retain its exact fallback identity"
+  pass "exact status fallbacks preserve open-decision precedence"
+}
+
 p4_non_occurrence_classes_have_none_identity() {
   local state class tuple
   state=$(new_state p4)
@@ -452,6 +471,7 @@ t22_afk_handoff_stays_pending_until_daemon_buffering() (
 )
 
 p1_decision_identity_precedes_run_readability
+test_status_fallback_is_exact_without_displacing_decisions
 p4_non_occurrence_classes_have_none_identity
 p5_none_is_never_recorded
 p6_malformed_ledger_is_pending

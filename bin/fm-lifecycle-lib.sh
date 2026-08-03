@@ -106,16 +106,21 @@ fm_lifecycle_status_identity() {  # <status-line>
   printf 'status:%s' "$(printf '%s' "$1" | fm_decision_hash_text)"
 }
 
-fm_lifecycle_supplemental_status_identity() {  # <status-file> <lifecycle-identity> [last-line]
-  local f=$1 identity=$2 last=${3:-}
-  case "$identity" in decision:*) ;; *) printf 'none'; return 0 ;; esac
+fm_lifecycle_status_fallback_identity() {  # <status-file> <lifecycle-identity> [last-line]
+  local f=$1 identity=$2 last=${3:-} status_identity decision_key
   [ -n "$last" ] || last=$(last_status_line "$f")
-  if status_is_captain_relevant "$last" \
-    && ! status_latest_decision_is_open_occurrence "$f"; then
-    fm_lifecycle_status_identity "$last"
-  else
-    printf 'none'
-  fi
+  status_is_captain_relevant "$last" || { printf 'none'; return 0; }
+  status_identity=$(fm_lifecycle_status_identity "$last")
+  [ "$status_identity" != "$identity" ] || { printf 'none'; return 0; }
+  case "$identity" in
+    decision:*)
+      if status_latest_decision_is_open_occurrence "$f"; then
+        decision_key=$(_fm_decision_key "$last" 2>/dev/null || true)
+        [ "$decision_key" = default ] || { printf 'none'; return 0; }
+      fi
+      ;;
+  esac
+  printf '%s' "$status_identity"
 }
 
 fm_lifecycle_status_line_for_identity() {  # <status-file> <status-identity>
