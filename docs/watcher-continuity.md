@@ -61,7 +61,9 @@ Codex uses a distinct code rather than the quiet-checkpoint 124 because a stand-
 
 A stand-down is terminal and is not a failure.
 The caller starts no successor, schedules no retry, raises no failure alarm, and delivers no wake.
-Suppressing delivery is deliberate: the away supervisor is the supervisor while away mode is on, the watcher still enqueues every wake to `state/.wake-queue` before advancing its suppression markers, and `bin/fm-afk-return.sh` replays that queue on return.
+Suppressing adapter delivery is deliberate because the away supervisor is the consumer while away mode is on.
+The watcher consults the shared lifecycle ledger, durably queues each remaining handoff before advancing detector state, and leaves a newly queued lifecycle occurrence pending until the daemon captures and buffers the binding it will surface.
+`bin/fm-afk-return.sh` replays the durable queue on return, while [event-driven supervision](architecture.md#event-driven-supervision) owns the complete occurrence-recording order.
 
 The gate lives in each adapter's own arm and deliver path, not only in the arm layer.
 An arm-layer gate alone is unsound: an adapter that does not classify the stand-down reclassifies the clean exit as an unexplained empty cycle, burns its retry ladder, and injects a spurious `watcher: FAILED` wake anyway.

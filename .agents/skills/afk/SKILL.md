@@ -151,7 +151,8 @@ wake reason in bash, and self-handles the routine majority without consuming a
 firstmate turn.
 Captain-relevant events, invalid pause candidates, endpoint loss, and a bounded recheck of a valid declared external wait escalate to firstmate's context as one pre-read, single-line, batched digest.
 The status fold and supervision precedence live in the shared `bin/fm-classify-lib.sh`, the same library the always-on watcher uses for its own triage when afk is off, so both modes order keyed decisions, blockers, current state, pauses, and endpoint liveness identically.
-While `state/.afk` exists the daemon owns the watcher, so the watcher reverts to one-shot and lets the daemon do the triage - the two never run their triage at the same time.
+[`docs/architecture.md`](../../../docs/architecture.md#event-driven-supervision) owns cross-emitter lifecycle occurrence identity, exact binding, record ordering, and PR-1 legacy-suppressor compatibility.
+While `state/.afk` exists the daemon owns the watcher, so the watcher remains one-shot, performs only detection, shared occurrence suppression, and durable handoff, and leaves wake classification to the daemon.
 
 Classify each wake this way:
 
@@ -168,7 +169,7 @@ Classify each wake this way:
   This bounds wedge-detection latency to the threshold plus a tick: a delay, never a loss.
   Healthy crewmates are autonomous and do not wait on firstmate mid-task.
 - `heartbeat` -> self-handle.
-  The daemon runs its own cheap bash fleet scan every `FM_HEARTBEAT_SCAN_SECS` (default 300s) as the catch-all for a captain-relevant status or folded open decision or blocker the per-wake classifier might miss.
+  The daemon runs its own cheap bash fleet scan every `FM_HEARTBEAT_SCAN_SECS` (default 300s) through the shared lifecycle owner as the catch-all for an occurrence or exact captain-relevant status fallback the per-wake classifier might miss.
 - Unknown reason, or any uncertainty -> escalate fail-safe.
 
 Escalations are buffered up to `FM_ESCALATE_BATCH_SECS` (default 90s; 0 =
@@ -211,8 +212,8 @@ the operational prefix lets firstmate distinguish it from a real captain message
   text firstmate sees is clean.
 - **Portable singleton lock** - the daemon uses the repo's portable lock helper
   (`fm-wake-lib.sh`) instead of `flock`, which is absent on macOS.
-- **Dedupe across signal/stale/scan** - `classify_signal` and terminal `classify_stale` paths check the seen-status marker before escalating, so a captain-relevant status escalated by one path is not re-escalated by another in the same digest.
-  The marker does not clear or suppress possible-wedge aging for a nonterminal progress line.
+- **Lifecycle occurrence dedupe** - [`docs/architecture.md`](../../../docs/architecture.md#event-driven-supervision) owns the shared contract and PR-1 compatibility behavior.
+  The daemon's local seen markers are legacy suppressors rather than a second lifecycle authority.
 - **Auto-discovered supervisor pane** - the daemon resolves its own BACKEND
   (tmux vs herdr) and TARGET independently, mirroring
   `bin/fm-backend.sh`'s own runtime auto-detection. Backend: `FM_SUPERVISOR_BACKEND`

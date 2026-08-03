@@ -34,11 +34,16 @@
 #
 # Reliability model (see the /afk skill):
 #   - Nothing is lost in away mode: while state/.afk exists, the watcher reverts
-#     to daemon-owned one-shot behavior and enqueues every wake to
-#     state/.wake-queue BEFORE advancing its suppression markers, so a
-#     crash/restart/missed injection is recovered on the next fm-wake-drain.sh.
-#     The daemon does not touch the queue; it only reads the watcher's stdout
-#     reason.
+#     to daemon-owned one-shot behavior, consults the shared occurrence ledger,
+#     and enqueues each remaining handoff to state/.wake-queue before advancing
+#     detector state.
+#     A newly handed-off lifecycle occurrence remains pending until this daemon
+#     appends the exact captured binding to its escalation buffer.
+#     When a daemon-created lifecycle recheck or heartbeat finds a closed
+#     occurrence, it appends the durable queue before buffering and recording
+#     the bound occurrence.
+#     The daemon never consumes the watcher's queue; it reads the watcher stdout
+#     reason, and fm-wake-drain.sh remains the queue consumer.
 #   - Fail-safe-to-escalate: any wake the classifier cannot confidently mark
 #     routine is escalated.
 #   - Bounded wedge latency: a routine nonterminal stale pane that remains idle
@@ -53,9 +58,10 @@
 #     undelivered past FM_MAX_DEFER_SECS, the daemon retries a normal flush and
 #     writes state/.subsuper-inject-wedged and attempts a configurable active
 #     alert if submit still cannot be confirmed.
-#   - Cheap heartbeat catch-all: every HEARTBEAT_SCAN_SECS the daemon scans all
-#     state/*.status for a captain-relevant line or folded open decision or
-#     blocker the per-wake classifier might have missed and escalates it.
+#   - Cheap heartbeat catch-all: every HEARTBEAT_SCAN_SECS the daemon asks the
+#     shared lifecycle owner for pending closed occurrences and exact
+#     captain-relevant status fallbacks the per-wake classifier might have
+#     missed, then escalates them.
 #
 # The robustness shell from the prior always-inject version is preserved:
 # single-instance lock (portable helper, no flock dependency), crash-loop
@@ -163,10 +169,11 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 # shellcheck source=bin/fm-operational-input.sh
 . "$FM_DAEMON_DIR/fm-operational-input.sh"
 
-# Shared wake classifier (last_status_line, status_is_captain_relevant,
-# window_to_task, scan_captain_relevant_statuses). The SAME library backs the
-# always-on watcher's triage, so the captain-relevant verb set and the
-# classification predicates have exactly one definition.
+# Shared lifecycle owner, which imports the wake classifier for
+# last_status_line, status_is_captain_relevant, window_to_task, and the keyed
+# decision fold.
+# The same owner backs always-on watcher triage, so lifecycle reduction and
+# captain-relevant classification have one definition.
 # shellcheck source=bin/fm-lifecycle-lib.sh
 . "$FM_DAEMON_DIR/fm-lifecycle-lib.sh"
 
@@ -1151,8 +1158,9 @@ _oldest_line_age() {  # <buf> -> seconds since the oldest buffered item first ar
 #  2b) pause re-surface: for each pause marker past PAUSE_RESURFACE_SECS,
 #     revalidate shared precedence, clear or escalate invalid state, and re-surface
 #     a still-valid idle pause before resetting the bounded window.
-#  3) heartbeat scan: every HEARTBEAT_SCAN_SECS, scan state/*.status for a
-#     captain-relevant line or folded open decision or blocker and escalate it.
+#  3) heartbeat scan: every HEARTBEAT_SCAN_SECS, ask the shared lifecycle owner
+#     for a pending closed occurrence or exact captain-relevant status fallback
+#     and escalate it.
 housekeeping() {  # <state>
   local state=$1 now due f key task win marker age last max_defer oldest pause_secs verdict seen
   local lifecycle class identity status_identity primary_pending status_pending

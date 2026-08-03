@@ -18,6 +18,15 @@
 #
 #   state: <working|parked|done|blocked|paused|failed|unknown> · source: <run-step|pane|ci-withheld|status-log|none> · <detail>
 #
+# `--supervision` is a separate machine-facing channel consumed by
+# bin/fm-lifecycle-lib.sh and does not change the human line above.
+# It prints:
+#
+#   <working|paused|parked|terminal|unknown><TAB><decision:*|run:parked:*|run:terminal:*|status:*|none>
+#
+# bin/fm-lifecycle-lib.sh owns which closed occurrence inputs may contribute to
+# that identity, while this script owns their derivation from current crew state.
+#
 # Logic, in order:
 #   1. Resolve worktree + backend target + kind from state/<id>.meta.
 #   2. Matching no-mistakes run for this crew's branch AND current code identity,

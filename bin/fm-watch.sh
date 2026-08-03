@@ -10,11 +10,15 @@
 # the separate idle absorb case only while authoritative current state confirms
 # it on a live endpoint, and then re-surfaces on its long bounded cadence.
 # Its initial no-verb status signal still surfaces in normal mode.
-# While state/.afk exists, the daemon owns triage and this watcher queues and exits
-# on every wake. Printed reason lines:
+# While state/.afk exists, the daemon owns triage and this watcher consults the
+# shared lifecycle ledger before a one-shot handoff.
+# A newly handed-off occurrence remains pending until the daemon buffers it.
+# Printed reason lines:
 #   signal: <file>...      status/turn-end signals, surfaced when a listed status
 #                          has a captain-relevant verb OR a no-verb signal's crew
-#                          is not provably working, unless afk is active
+#                          is not provably working; in afk mode routine signals
+#                          hand off too, while previously surfaced closed
+#                          occurrences remain suppressed by the shared ledger
 #   stale: <window>        a provably-working stale is ALWAYS absorbed (with a wedge
 #                          timer) regardless of what the status log says - an active
 #                          run-step or busy pane outranks even a captain-relevant log
@@ -49,9 +53,10 @@
 #   check: rejected unauthenticated PR poll retirement receipts: <paths>
 #                          invalid pending retirements were preserved without
 #                          running a check or removing poll artifacts
-#   heartbeat              fleet-scan backstop found an unsurfaced captain-relevant
-#                          status or folded open decision or blocker, unless afk
-#                          is active
+#   heartbeat              fleet-scan backstop found an unsurfaced lifecycle
+#                          occurrence or exact captain-relevant status fallback;
+#                          in afk mode the scheduled heartbeat hands off to the
+#                          daemon's own scan
 # For normal supervision, resume the session-start primary-harness protocol
 # after each printed reason. Direct duplicate invocations of this script still
 # no-op through the watcher singleton lock.
@@ -135,8 +140,9 @@ SIGNAL_GRACE=${FM_SIGNAL_GRACE:-30}   # seconds to linger after a signal so trai
 # the durable queue and exits, which
 # is what wakes the LLM through the background-task completion. The same classifier
 # (fm-classify-lib.sh) backs the away-mode daemon; while state/.afk exists the
-# daemon owns triage, so this watcher reverts to one-shot (enqueue + exit on every
-# wake) and never double-triages - and never runs the costly provably-working read.
+# daemon owns triage, so this watcher consults shared occurrence state, leaves a
+# newly handed-off occurrence pending, and exits after the durable one-shot
+# handoff instead of running legacy provably-working absorption.
 STALE_ESCALATE_SECS=${FM_STALE_ESCALATE_SECS:-240}  # idle secs before a provably-working stale escalates as a possible wedge
 # A busy pane is unconditional proof of liveness with no built-in duration bound,
 # so a hung foreground call can remain hidden even while its rendered busy
@@ -172,9 +178,10 @@ _event_cap_ok=0
 _event_cap_fails=0
 
 # afk_present: 0 while the away-mode flag exists. When set, the daemon wraps this
-# watcher and owns triage, so the watcher must behave one-shot (enqueue + exit on
-# every wake) and let the daemon classify - never absorb here, or the daemon's
-# digest/injection layer would never see the wake.
+# watcher and owns triage, so the watcher must hand routine and newly pending
+# events to the daemon without recording the occurrence here.
+# A closed occurrence already surfaced through either mode remains absorbed by
+# the shared lifecycle owner.
 afk_present() { [ -e "$STATE/.afk" ]; }
 
 hash_pane() {

@@ -20,10 +20,20 @@ A concurrent replacement remains armed, every non-merged or invalid observation 
 `bin/fm-pr-lib.sh` owns the receipt format and strict identity mechanics, while `bin/fm-watch.sh` owns queue-before-retirement ordering.
 `bin/fm-lifecycle-lib.sh` is the shared owner for closed lifecycle occurrence identity and whether that occurrence has already surfaced.
 It writes a short-lived `state/<id>.lifecycle` memo containing `working`, `paused`, `parked`, `terminal`, or `unknown`, and a mode-free, endpoint-free `state/<id>.surfaced` occurrence ledger.
-Open keyed decisions and blockers retain precedence through the durable status fold, while structural no-mistakes identity comes from the separate `fm-crew-state.sh --supervision` channel and excludes volatile findings, elapsed prose, URLs, pane captures, and endpoint names.
-Watcher signals, turn-end handling, stale polling, heartbeats, native Herdr transitions, and away-mode rechecks all consult that owner, append the durable notification before recording the occurrence, and clear inherited wedge timing when the lifecycle is no longer working.
-During the first migration phase, the watcher and daemon still dual-write and consult the legacy per-emitter suppressors so rollback remains safe; those legacy files are not additional lifecycle authority.
+Only closed parked and terminal observations may receive an occurrence identity; working, paused, and unknown use `none` and remain outside ledger suppression.
+Open keyed decisions and blockers retain precedence through the durable status fold, while structural no-mistakes identity comes from the separate `fm-crew-state.sh --supervision` channel without changing its human output and excludes volatile findings, elapsed prose, URLs, pane captures, and endpoint names.
+A supplemental captain-relevant final status line remains independently visible behind an open decision without displacing that decision's precedence.
+Normal-mode signals, turn-end handling, stale polling, heartbeats, and native Herdr transitions capture the exact pending occurrence, append its durable notification, and then record that same binding, so a later status append cannot move the record and a crash between those steps can cause a duplicate but never silence.
+During away mode the watcher queues the handoff without recording a newly pending occurrence, and the daemon captures the occurrence it will surface and records only that binding after the corresponding digest item enters its escalation buffer; a buffer failure therefore leaves the occurrence pending.
+When daemon-created heartbeat or stale recheck discovers a closed occurrence, it follows the same queue-before-buffer-before-record order.
+A repeated structurally identical parked run becomes pending again after `FM_PAUSE_RESURFACE_SECS`, bounding a conservative identity collision rather than suppressing it forever.
+Memo corruption triggers a fresh authoritative read, ledger corruption means pending, and atomic replacement prevents a reader from observing a partially published record.
+Known non-working lifecycle states clear inherited watcher and away-mode wedge timing through the metadata-resolved endpoint, while unknown retains that timing until visibility is restored.
+During the first migration phase, the watcher and daemon consult their legacy per-emitter suppressors and dual-write only the legacy identity bound to the queued or buffered occurrence so rollback remains safe; those legacy files are not additional lifecycle authority.
+Authenticated merge polling remains independent of lifecycle occurrence state.
 Guarded task cleanup removes both lifecycle files only after all existing landed-work and clean-copy proofs succeed.
+`tests/fm-lifecycle-ledger.test.sh` is the focused executable contract for identity inputs, precedence, atomicity, concurrency, cross-mode deduplication, bounded re-parking, unknown visibility, exact binding, and crash ordering.
+`tests/fm-teardown.test.sh` verifies that permitted task cleanup removes both lifecycle files.
 No-verb wakes, such as `working:` notes and bare turn-ended signals, are benign only when `bin/fm-crew-state.sh` reports positive evidence that the crew is still working: an actively running no-mistakes step attributed to that crew's current code, an exact busy verdict from the semantic busy-state contract, or its dedicated withheld-CI source.
 A `paused:` declaration enters the longer pause cadence only while authoritative current state still reports paused and the backend confirms a live endpoint.
 Open keyed `needs-decision` and `blocked` occurrences outrank a later unrelated pause.
