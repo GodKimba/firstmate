@@ -1546,6 +1546,8 @@ if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
                 scout_retry_path_status=$?
                 echo "error: the first detach command for scout worktree $WT failed with status $scout_detach_status, and the live endpoint path could not be read for a same-copy retry (status $scout_retry_path_status). First Git diagnostic:" >&2
                 printf '%s\n' "$scout_detach_output" >&2
+                echo "Endpoint diagnostic:" >&2
+                printf '%s\n' "$scout_retry_path" >&2
                 exit 1
               fi
               scout_retry_root=$(spawn_worktree_root_real "$scout_retry_path" || true)
