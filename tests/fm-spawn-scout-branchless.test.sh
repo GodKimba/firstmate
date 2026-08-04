@@ -96,6 +96,19 @@ inject_git_inspection_failure() {
   }
 }
 case " $* " in
+  *" rev-parse --show-toplevel "*)
+    if [ -n "${FM_FAKE_WORKTREE_ROOT_ERROR_AT:-}" ]; then
+      count=0
+      [ ! -f "${FM_FAKE_WORKTREE_ROOT_COUNT:?}" ] \
+        || read -r count < "$FM_FAKE_WORKTREE_ROOT_COUNT"
+      count=$((count + 1))
+      printf '%s\n' "$count" > "$FM_FAKE_WORKTREE_ROOT_COUNT"
+      [ "$count" != "$FM_FAKE_WORKTREE_ROOT_ERROR_AT" ] || {
+        printf 'fatal: simulated worktree-root inspection failure\n' >&2
+        exit 128
+      }
+    fi
+    ;;
   *" rev-parse --absolute-git-dir "*)
     inject_git_inspection_failure git-dir
     if [ -n "${FM_FAKE_GIT_DIR_AFTER_DETACH_FAILURE:-}" ]; then
@@ -222,6 +235,8 @@ run_scout_spawn() {
     FM_FAKE_STALE_PANE_PATH_ONCE_AFTER_DETACH_FAILURE="${FM_FAKE_STALE_PANE_PATH_ONCE_AFTER_DETACH_FAILURE:-}" \
     FM_FAKE_PANE_PATH_COUNT="${FM_FAKE_PANE_PATH_COUNT:-}" \
     FM_FAKE_PANE_PATH_ERROR_AFTER_DETACH_FAILURE="${FM_FAKE_PANE_PATH_ERROR_AFTER_DETACH_FAILURE:-}" \
+    FM_FAKE_WORKTREE_ROOT_ERROR_AT="${FM_FAKE_WORKTREE_ROOT_ERROR_AT:-}" \
+    FM_FAKE_WORKTREE_ROOT_COUNT="${FM_FAKE_WORKTREE_ROOT_COUNT:-}" \
     FM_FAKE_SYMBOLIC_REF_ERROR_AT="${FM_FAKE_SYMBOLIC_REF_ERROR_AT:-}" \
     FM_FAKE_SYMBOLIC_REF_COUNT="${FM_FAKE_SYMBOLIC_REF_COUNT:-}" \
     FM_FAKE_DETACH_FAIL_AT="${FM_FAKE_DETACH_FAIL_AT:-}" \
@@ -473,11 +488,39 @@ EOF
   pass "initial Git directory, HEAD, status, and ancestry inspection failures refuse before detach"
 }
 
+test_post_validation_root_reidentification_failure_refuses_before_detach() {
+  local rec id out status count_file root_count head_before
+  id=scout-root-reidentification-error
+  rec=$(make_scout_case scout-root-reidentification-error "$id" managed)
+  read_scout_record "$rec"
+  count_file="$HOME_DIR/state/detach-count"
+  root_count="$HOME_DIR/state/worktree-root-count"
+  head_before=$(git -C "$WT_DIR" rev-parse HEAD)
+
+  out=$(FM_FAKE_WORKTREE_ROOT_ERROR_AT=4 FM_FAKE_WORKTREE_ROOT_COUNT="$root_count" \
+    FM_FAKE_DETACH_COUNT="$count_file" run_scout_spawn "$id" --scout)
+  status=$?
+  expect_code 1 "$status" "post-validation root re-identification failure must refuse"
+  assert_contains "$out" "cannot preserve scout acquisition identity because $WT_DIR is no longer the isolated worktree root" \
+    "post-validation root re-identification refusal was not actionable"
+  [ "$(cat "$root_count")" = 4 ] \
+    || fail "root re-identification fixture did not reach the post-validation identity check"
+  [ ! -e "$count_file" ] || fail "root re-identification refusal attempted to detach"
+  [ "$(git -C "$WT_DIR" rev-parse HEAD)" = "$head_before" ] \
+    || fail "root re-identification refusal moved scout HEAD"
+  [ "$(head_branch "$WT_DIR")" = fmlab/fmlab-pool-scout-root-reidentification-error ] \
+    || fail "root re-identification refusal changed the scout branch"
+  assert_single_copy_request "root re-identification refusal"
+  assert_not_contains "$out" "spawned $id" "root re-identification refusal launched the harness"
+  assert_absent "$HOME_DIR/state/$id.meta" "root re-identification refusal recorded meta"
+  pass "post-validation root identity loss refuses before detach or launch"
+}
+
 # Once the first command has failed, the retry authority is narrower than the
 # initial acquisition authority: the live endpoint, branch, HEAD, and clean tree
 # must still identify the exact same copy.
 test_retry_refuses_changed_or_unproven_copy_boundaries() {
-  local rec id out status count_file moved_wt
+  local rec id out status count_file moved_wt original_head moved_head
 
   id=scout-retry-dirty-b7
   rec=$(make_scout_case scout-retry-dirty "$id" managed)
@@ -543,6 +586,38 @@ test_retry_refuses_changed_or_unproven_copy_boundaries() {
     "alternating endpoint-path retry refusal launched the harness"
   assert_absent "$HOME_DIR/state/$id.meta" \
     "alternating endpoint-path retry refusal recorded meta"
+
+  id=scout-retry-stable-other-copy-b8
+  rec=$(make_scout_case scout-retry-stable-other-copy "$id" managed)
+  read_scout_record "$rec"
+  count_file="$HOME_DIR/state/detach-count"
+  moved_wt="$HOME_DIR/../moved-wt"
+  git -C "$PROJ_DIR" worktree add -q -b provider/stable-other "$moved_wt"
+  original_head=$(git -C "$WT_DIR" rev-parse HEAD)
+  moved_head=$(git -C "$moved_wt" rev-parse HEAD)
+  out=$(FM_FAKE_DETACH_FAIL_AT=1 FM_FAKE_DETACH_COUNT="$count_file" \
+    FM_FAKE_PANE_PATH_AFTER_DETACH_FAILURE="$moved_wt" \
+    run_scout_spawn "$id" --scout)
+  status=$?
+  expect_code 1 "$status" "a stable different eligible copy must refuse retry"
+  assert_contains "$out" "live endpoint no longer proves the same acquired copy" \
+    "stable different-copy refusal was not actionable"
+  assert_contains "$out" "fatal: simulated transient detach failure" \
+    "stable different-copy refusal hid the initiating Git error"
+  [ "$(cat "$count_file")" = 1 ] || fail "stable different copy made another detach attempt"
+  [ "$(git -C "$WT_DIR" rev-parse HEAD)" = "$original_head" ] \
+    || fail "stable different-copy refusal moved the originally acquired HEAD"
+  [ "$(head_branch "$WT_DIR")" = fmlab/fmlab-pool-scout-retry-stable-other-copy ] \
+    || fail "stable different-copy refusal changed the originally acquired branch"
+  [ "$(git -C "$moved_wt" rev-parse HEAD)" = "$moved_head" ] \
+    || fail "stable different-copy refusal moved the live endpoint HEAD"
+  [ "$(head_branch "$moved_wt")" = provider/stable-other ] \
+    || fail "stable different-copy refusal changed the live endpoint branch"
+  assert_single_copy_request "stable different-copy retry refusal"
+  assert_not_contains "$out" "spawned $id" \
+    "stable different-copy retry refusal launched the harness"
+  assert_absent "$HOME_DIR/state/$id.meta" \
+    "stable different-copy retry refusal recorded meta"
 
   id=scout-retry-git-dir-b9
   rec=$(make_scout_case scout-retry-git-dir "$id" managed)
@@ -883,6 +958,7 @@ test_same_task_recovery_preserves_work_in_the_existing_copy
 test_transient_detach_failure_retries_the_same_clean_copy_once
 test_dirty_or_unique_attached_work_refuses_without_detaching
 test_initial_attached_copy_inspection_failures_refuse
+test_post_validation_root_reidentification_failure_refuses_before_detach
 test_retry_refuses_changed_or_unproven_copy_boundaries
 test_retry_inspection_failures_refuse_without_an_extra_detach
 test_retry_refuses_ancestry_loss_with_unchanged_scout_head
