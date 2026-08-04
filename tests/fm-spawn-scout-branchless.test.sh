@@ -43,7 +43,17 @@ case "$*" in
        && [ -f "$FM_FAKE_DETACH_COUNT" ] \
        && [ -n "${FM_FAKE_PANE_PATH_AFTER_DETACH_FAILURE:-}" ]; then
       read -r detach_count < "$FM_FAKE_DETACH_COUNT"
-      [ "$detach_count" -lt 1 ] || path=$FM_FAKE_PANE_PATH_AFTER_DETACH_FAILURE
+      if [ "$detach_count" -ge 1 ]; then
+        path=$FM_FAKE_PANE_PATH_AFTER_DETACH_FAILURE
+        if [ -n "${FM_FAKE_STALE_PANE_PATH_ONCE_AFTER_DETACH_FAILURE:-}" ]; then
+          path_count=0
+          [ ! -f "${FM_FAKE_PANE_PATH_COUNT:?}" ] \
+            || read -r path_count < "$FM_FAKE_PANE_PATH_COUNT"
+          path_count=$((path_count + 1))
+          printf '%s\n' "$path_count" > "$FM_FAKE_PANE_PATH_COUNT"
+          [ "$path_count" != 1 ] || path=$FM_FAKE_STALE_PANE_PATH_ONCE_AFTER_DETACH_FAILURE
+        fi
+      fi
     fi
     if [ -n "${FM_FAKE_DETACH_COUNT:-}" ] \
        && [ -f "$FM_FAKE_DETACH_COUNT" ] \
@@ -209,6 +219,8 @@ run_scout_spawn() {
     FM_FAKE_SEND_LOG="$HOME_DIR/state/tmux-send.log" \
     FM_FAKE_PANE_PATH="$WT_DIR" \
     FM_FAKE_PANE_PATH_AFTER_DETACH_FAILURE="${FM_FAKE_PANE_PATH_AFTER_DETACH_FAILURE:-}" \
+    FM_FAKE_STALE_PANE_PATH_ONCE_AFTER_DETACH_FAILURE="${FM_FAKE_STALE_PANE_PATH_ONCE_AFTER_DETACH_FAILURE:-}" \
+    FM_FAKE_PANE_PATH_COUNT="${FM_FAKE_PANE_PATH_COUNT:-}" \
     FM_FAKE_PANE_PATH_ERROR_AFTER_DETACH_FAILURE="${FM_FAKE_PANE_PATH_ERROR_AFTER_DETACH_FAILURE:-}" \
     FM_FAKE_SYMBOLIC_REF_ERROR_AT="${FM_FAKE_SYMBOLIC_REF_ERROR_AT:-}" \
     FM_FAKE_SYMBOLIC_REF_COUNT="${FM_FAKE_SYMBOLIC_REF_COUNT:-}" \
@@ -465,7 +477,7 @@ EOF
 # initial acquisition authority: the live endpoint, branch, HEAD, and clean tree
 # must still identify the exact same copy.
 test_retry_refuses_changed_or_unproven_copy_boundaries() {
-  local rec id out status count_file
+  local rec id out status count_file moved_wt
 
   id=scout-retry-dirty-b7
   rec=$(make_scout_case scout-retry-dirty "$id" managed)
@@ -503,6 +515,34 @@ test_retry_refuses_changed_or_unproven_copy_boundaries() {
   assert_single_copy_request "changed-path retry refusal"
   assert_not_contains "$out" "spawned $id" "changed-path retry refusal launched the harness"
   assert_absent "$HOME_DIR/state/$id.meta" "changed-path retry refusal recorded meta"
+
+  id=scout-retry-stale-path-b8
+  rec=$(make_scout_case scout-retry-stale-path "$id" managed)
+  read_scout_record "$rec"
+  count_file="$HOME_DIR/state/detach-count"
+  moved_wt="$HOME_DIR/../moved-wt"
+  git -C "$PROJ_DIR" worktree add -q -b provider/moved "$moved_wt"
+  out=$(FM_FAKE_DETACH_FAIL_AT=1 FM_FAKE_DETACH_COUNT="$count_file" \
+    FM_FAKE_STALE_PANE_PATH_ONCE_AFTER_DETACH_FAILURE="$WT_DIR" \
+    FM_FAKE_PANE_PATH_AFTER_DETACH_FAILURE="$moved_wt" \
+    FM_FAKE_PANE_PATH_COUNT="$HOME_DIR/state/pane-path-count" \
+    run_scout_spawn "$id" --scout)
+  status=$?
+  expect_code 1 "$status" "an alternating stale and current endpoint path must refuse retry"
+  assert_contains "$out" "did not provide two consecutive observations of one exact worktree root" \
+    "alternating endpoint-path refusal was not actionable"
+  assert_contains "$out" "fatal: simulated transient detach failure" \
+    "alternating endpoint-path refusal hid the initiating Git error"
+  [ "$(cat "$count_file")" = 1 ] || fail "alternating endpoint path made another detach attempt"
+  [ "$(head_branch "$WT_DIR")" = fmlab/fmlab-pool-scout-retry-stale-path ] \
+    || fail "alternating endpoint-path refusal detached the originally acquired branch"
+  [ "$(head_branch "$moved_wt")" = provider/moved ] \
+    || fail "alternating endpoint-path refusal changed the current endpoint branch"
+  assert_single_copy_request "alternating endpoint-path retry refusal"
+  assert_not_contains "$out" "spawned $id" \
+    "alternating endpoint-path retry refusal launched the harness"
+  assert_absent "$HOME_DIR/state/$id.meta" \
+    "alternating endpoint-path retry refusal recorded meta"
 
   id=scout-retry-git-dir-b9
   rec=$(make_scout_case scout-retry-git-dir "$id" managed)

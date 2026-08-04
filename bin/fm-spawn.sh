@@ -1270,6 +1270,44 @@ spawn_current_path() {  # <target>
     cmux) fm_backend_cmux_current_path "$1" "$W" ;;
   esac
 }
+spawn_wait_for_stable_worktree_root() {  # <target> <polls> <interval>
+  local target=$1 polls=$2 interval=$3 candidate="" current_path current_root current_status i=0
+  SPAWN_STABLE_PATH=""
+  SPAWN_STABLE_ROOT=""
+  SPAWN_STABLE_OBSERVED=""
+  SPAWN_STABLE_OBSERVED_ROOT=""
+  SPAWN_STABLE_PATH_STATUS=0
+  SPAWN_STABLE_PATH_DIAGNOSTIC=""
+  while [ "$i" -lt "$polls" ]; do
+    i=$((i + 1))
+    if current_path=$(spawn_current_path "$target" 2>&1); then
+      current_status=0
+      SPAWN_STABLE_PATH_DIAGNOSTIC=""
+    else
+      current_status=$?
+      SPAWN_STABLE_PATH_DIAGNOSTIC=$current_path
+    fi
+    SPAWN_STABLE_PATH_STATUS=$current_status
+    current_root=""
+    if [ -n "$current_path" ]; then
+      SPAWN_STABLE_OBSERVED=$current_path
+      current_root=$(spawn_worktree_root_real "$current_path" || true)
+    fi
+    SPAWN_STABLE_OBSERVED_ROOT=$current_root
+    if [ "$current_status" = 0 ] && [ -n "$current_root" ]; then
+      if [ "$current_root" = "$candidate" ]; then
+        SPAWN_STABLE_PATH=$current_path
+        SPAWN_STABLE_ROOT=$current_root
+        return 0
+      fi
+      candidate=$current_root
+    else
+      candidate=""
+    fi
+    [ "$i" -ge "$polls" ] || sleep "$interval"
+  done
+  return 1
+}
 spawn_send_literal() {  # <target> <text>
   case "$BACKEND" in
     tmux) fm_backend_tmux_send_literal "$1" "$2" ;;
@@ -1381,8 +1419,6 @@ if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   # without waiting out a live provisioning window; an unset, blank, zero, or
   # invalid value uses the default, exactly like the other bounded-retry knobs in
   # docs/configuration.md.
-  candidate=""
-  observed=""
   settle_polls=${FM_WORKTREE_SETTLE_POLLS:-60}
   settle_interval=${FM_WORKTREE_SETTLE_INTERVAL:-1}
   case "$settle_polls" in
@@ -1395,26 +1431,12 @@ if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
     *[1-9]*) ;;
     *) settle_interval=1 ;;
   esac
-  settle_i=0
-  while [ "$settle_i" -lt "$settle_polls" ]; do
-    settle_i=$((settle_i + 1))
-    p=$(spawn_current_path "$WT_TARGET" || true)
-    p_root=""
-    if [ -n "$p" ]; then
-      observed="$p"
-      p_root=$(spawn_worktree_root_real "$p" || true)
-    fi
-    if [ -n "$p_root" ]; then
-      if [ "$p_root" = "$candidate" ]; then
-        WT="$p"
-        break
-      fi
-      candidate="$p_root"
-    else
-      candidate=""
-    fi
-    [ "$settle_i" -ge "$settle_polls" ] || sleep "$settle_interval"
-  done
+  if spawn_wait_for_stable_worktree_root "$WT_TARGET" "$settle_polls" "$settle_interval"; then
+    WT=$SPAWN_STABLE_PATH
+  else
+    WT=""
+  fi
+  observed=$SPAWN_STABLE_OBSERVED
   # An exhausted bound is the same refusal as a resolved-but-tangled path, so it
   # keeps the "did not yield an isolated worktree" wording the isolation-guard
   # contract is asserted on, and reports the last observation plus its git root
@@ -1540,17 +1562,21 @@ if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
               # then prove the endpoint still owns the exact clean copy before
               # attempting the only retry.
               sleep 0.1
-              if scout_retry_path=$(spawn_current_path "$WT_TARGET" 2>&1); then
-                :
-              else
-                scout_retry_path_status=$?
+              if ! spawn_wait_for_stable_worktree_root "$WT_TARGET" 2 0.1; then
+                scout_retry_path_status=$SPAWN_STABLE_PATH_STATUS
+                if [ "$scout_retry_path_status" = 0 ]; then
+                  echo "error: the first detach command for scout worktree $WT failed with status $scout_detach_status, and the live endpoint no longer proves the same acquired copy because it did not provide two consecutive observations of one exact worktree root for a same-copy retry (expected '$scout_worktree_root', last observed '${SPAWN_STABLE_OBSERVED:-none}', root '${SPAWN_STABLE_OBSERVED_ROOT:-none}'); refusing to detach or allocate another copy. First Git diagnostic:" >&2
+                  printf '%s\n' "$scout_detach_output" >&2
+                  exit 1
+                fi
                 echo "error: the first detach command for scout worktree $WT failed with status $scout_detach_status, and the live endpoint path could not be read for a same-copy retry (status $scout_retry_path_status). First Git diagnostic:" >&2
                 printf '%s\n' "$scout_detach_output" >&2
                 echo "Endpoint diagnostic:" >&2
-                printf '%s\n' "$scout_retry_path" >&2
+                printf '%s\n' "$SPAWN_STABLE_PATH_DIAGNOSTIC" >&2
                 exit 1
               fi
-              scout_retry_root=$(spawn_worktree_root_real "$scout_retry_path" || true)
+              scout_retry_path=$SPAWN_STABLE_PATH
+              scout_retry_root=$SPAWN_STABLE_ROOT
               if [ "$scout_retry_root" != "$scout_worktree_root" ]; then
                 echo "error: the first detach command for scout worktree $WT failed with status $scout_detach_status, and the live endpoint no longer proves the same acquired copy (expected '$scout_worktree_root', observed '${scout_retry_root:-none}' from '$scout_retry_path'); refusing to detach or allocate another copy. First Git diagnostic:" >&2
                 printf '%s\n' "$scout_detach_output" >&2
