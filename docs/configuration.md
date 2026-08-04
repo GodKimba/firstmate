@@ -69,7 +69,10 @@ A backend spawn refusal from a missing dependency, version gate, or unauthentica
 Task meta records `backend=` only for a non-default backend; an absent `backend=` means `tmux`, preserving the default-path routing contract.
 Every new task records `endpoint_task_id=` as the cleanup binding between the metadata filename and its opaque runtime endpoint.
 Every new ordinary task records acquisition provenance as `acquisition_branch=fm/<id>` for a ship or `acquisition_branch=-` for a branchless scout.
-A Treehouse-provided scout is made branchless at acquisition, before its worker starts, so a managed pool that leases its slot attached to a structural branch matches the recorded provenance that guarded cleanup requires; the step moves no commit, deletes no branch, keeps every tracked and untracked file, and refuses the spawn rather than launching a scout whose provenance cleanup could never honor.
+A Treehouse-provided scout is made branchless at acquisition, before its worker starts, so a managed pool that leases a clean slot attached to a structural branch matches the recorded provenance that guarded cleanup requires.
+An attached copy is detached only when it is clean and its HEAD has no commits absent from the project checkout; dirty or unique work refuses unchanged, while an already-detached scout remains an exact no-op and may retain its scratch work.
+If the first detach command fails while leaving the copy attached, acquisition makes exactly one retry only after the live endpoint still reports the same physical worktree, its Git directory, branch, and HEAD are unchanged, and the clean and non-unique checks pass again.
+The retry never allocates a replacement copy, and successful recovery and refusal diagnostics retain the initiating Git error.
 A ship's acquisition branch is never detached or rewritten by that step, and cleanup keeps refusing an attached branchless scout on both provider routes.
 Scout promotion creates and records the exact ship branch before handing the prepared branch back to the worker.
 A new tmux task additionally records `tmux_window_id=` so teardown can close and confirm the stable exact window; legacy metadata without that field uses exact session and window-name targeting.

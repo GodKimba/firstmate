@@ -104,12 +104,16 @@
 #   because kind=scout records acquisition_branch=- and guarded cleanup only
 #   returns a genuinely branchless worktree. Providers disagree about what they
 #   hand over: a generic provider leases a detached worktree, while a managed
-#   pool leases its slot attached to the pool's own structural branch. The step
-#   detaches HEAD only, so it moves no commit, deletes no branch, keeps every
-#   tracked and untracked file, and is an exact no-op on an already-detached
-#   copy and on a relaunch into the same copy. A scout whose invariant cannot be
-#   established refuses before launch rather than leaving cleanup to detect it
-#   after the worker is already closed. Ship spawns are untouched: they own
+#   pool leases its slot attached to the pool's own structural branch. An
+#   attached copy is detached only when it is clean and its HEAD has no commits
+#   absent from the project checkout. If the first detach command fails while
+#   leaving it attached, one retry is allowed only after the live endpoint still
+#   identifies the same physical worktree and Git directory, the branch and HEAD
+#   are unchanged, and the clean/non-unique checks pass again. The retry never
+#   asks Treehouse for another copy, and every Git failure remains in the
+#   diagnostic. An already-detached copy is an exact no-op, including a scout
+#   relaunch that carries scratch work. A scout whose invariant cannot be
+#   established refuses before launch. Ship spawns are untouched: they own
 #   branch fm/<id>, and no path here detaches or rewrites it.
 # Batch dispatch: pass one or more `id=repo` pairs instead of a single <id> <project>, e.g.
 #     fm-spawn.sh fix-a-k3=projects/foo add-b-q7=projects/bar [--scout]
@@ -1426,46 +1430,275 @@ if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
 
   # A scout is recorded below as acquisition_branch=- and guarded cleanup only
   # returns such a worktree when it is genuinely branchless, so the invariant has
-  # to be established at acquisition rather than assumed. Providers disagree
-  # about that: a generic provider hands over an already-detached worktree, while
-  # a managed pool hands over a slot still attached to the pool's own structural
-  # branch. Recording the provenance without establishing it lets the mismatch
-  # survive until cleanup, which detects it only after the worker is already
-  # closed and then has to preserve the slot and records untouched.
-  # --detach moves no commit, deletes no branch, and keeps every tracked and
-  # untracked file, so this is an exact no-op on an already-detached worktree and
-  # is safe to repeat when the same task is relaunched in its existing copy. Ship
-  # tasks are deliberately untouched: they own branch fm/<id> and create it
-  # themselves, so no path here may detach or rewrite a ship branch.
+  # to be established at acquisition rather than assumed. A generic provider's
+  # already-detached copy is left exactly alone, including on a scratch-work
+  # relaunch. A managed provider's attached structural branch may be detached only
+  # when its tree is clean and its HEAD has no commits absent from the project
+  # checkout. If Git fails once and leaves that copy attached, sleep briefly and
+  # make one retry only after re-proving the live endpoint's physical root, Git
+  # directory, branch, HEAD, cleanliness, and ancestry. No retry path allocates a
+  # replacement copy, and every real Git diagnostic is printed. Ship tasks are
+  # deliberately untouched: they own branch fm/<id> and create it themselves.
   if [ "$KIND" = scout ]; then
-    if scout_head_branch=$(git -C "$WT" symbolic-ref --quiet --short HEAD 2>/dev/null); then
+    if scout_head_output=$(git -C "$WT" symbolic-ref --quiet --short HEAD 2>&1); then
       scout_head_status=0
+      scout_head_branch=$scout_head_output
     else
       scout_head_status=$?
     fi
     case "$scout_head_status" in
       0)
-        git -C "$WT" checkout --detach -q 2>/dev/null || true
-        if scout_head_branch=$(git -C "$WT" symbolic-ref --quiet --short HEAD 2>/dev/null); then
-          scout_head_status=0
+        scout_worktree_root=$(spawn_worktree_root_real "$WT") || {
+          echo "error: cannot preserve scout acquisition identity because $WT is no longer the isolated worktree root; refusing to detach it. Inspect target $T" >&2
+          exit 1
+        }
+        if scout_git_dir=$(git -C "$WT" rev-parse --absolute-git-dir 2>&1); then
+          :
         else
-          scout_head_status=$?
+          scout_git_status=$?
+          echo "error: cannot identify the Git directory for attached scout worktree $WT (git status $scout_git_status); refusing to detach it. Git diagnostic:" >&2
+          printf '%s\n' "$scout_git_dir" >&2
+          exit 1
         fi
-        case "$scout_head_status" in
-          0)
-            echo "error: scout worktree $WT is still attached to branch $scout_head_branch after detaching; refusing to launch a scout whose recorded branchless provenance guarded cleanup could never honor. Inspect target $T" >&2
-            exit 1
-            ;;
-          1) ;;
-          *)
-            echo "error: cannot prove scout worktree $WT is detached after detaching because HEAD inspection failed with status $scout_head_status; refusing to launch. Inspect target $T" >&2
-            exit 1
-            ;;
-        esac
+        if scout_head_commit=$(git -C "$WT" rev-parse --verify 'HEAD^{commit}' 2>&1); then
+          :
+        else
+          scout_git_status=$?
+          echo "error: cannot identify HEAD for attached scout worktree $WT (git status $scout_git_status); refusing to detach it. Git diagnostic:" >&2
+          printf '%s\n' "$scout_head_commit" >&2
+          exit 1
+        fi
+        if scout_project_head=$(git -C "$PROJ_ABS" rev-parse --verify 'HEAD^{commit}' 2>&1); then
+          :
+        else
+          scout_git_status=$?
+          echo "error: cannot identify project HEAD for scout worktree $WT (git status $scout_git_status); refusing to detach it. Git diagnostic:" >&2
+          printf '%s\n' "$scout_project_head" >&2
+          exit 1
+        fi
+        if scout_clean_output=$(git -C "$WT" status --porcelain=v1 --untracked-files=all 2>&1); then
+          :
+        else
+          scout_git_status=$?
+          echo "error: cannot prove attached scout worktree $WT is clean (git status $scout_git_status); refusing to detach it. Git diagnostic:" >&2
+          printf '%s\n' "$scout_clean_output" >&2
+          exit 1
+        fi
+        if [ -n "$scout_clean_output" ]; then
+          echo "error: attached scout worktree $WT has tracked or untracked changes; refusing to detach dirty work. Inspect with: git -C '$WT' status --short" >&2
+          exit 1
+        fi
+        if scout_ancestry_output=$(git -C "$WT" merge-base --is-ancestor "$scout_head_commit" "$scout_project_head" 2>&1); then
+          :
+        else
+          scout_ancestry_status=$?
+          case "$scout_ancestry_status" in
+            1)
+              echo "error: attached scout branch $scout_head_branch at $scout_head_commit contains commits absent from project HEAD $scout_project_head; refusing to detach unique work. Inspect target $T" >&2
+              ;;
+            *)
+              echo "error: cannot prove attached scout branch $scout_head_branch has no unique commits because Git ancestry inspection failed with status $scout_ancestry_status; refusing to detach it. Git diagnostic:" >&2
+              printf '%s\n' "$scout_ancestry_output" >&2
+              ;;
+          esac
+          exit 1
+        fi
+
+        if scout_detach_output=$(git -C "$WT" checkout --detach -q 2>&1); then
+          scout_detach_status=0
+        else
+          scout_detach_status=$?
+        fi
+        if scout_after_output=$(git -C "$WT" symbolic-ref --quiet --short HEAD 2>&1); then
+          scout_after_status=0
+          scout_after_branch=$scout_after_output
+        else
+          scout_after_status=$?
+        fi
+
+        if [ "$scout_detach_status" = 0 ]; then
+          case "$scout_after_status" in
+            0)
+              echo "error: scout worktree $WT is still attached to branch $scout_after_branch after Git reported a successful detach; refusing to launch a scout whose recorded branchless provenance guarded cleanup could never honor. Inspect target $T" >&2
+              exit 1
+              ;;
+            1) ;;
+            *)
+              echo "error: cannot prove scout worktree $WT is detached after Git reported success because HEAD inspection failed with status $scout_after_status; refusing to launch. Git diagnostic:" >&2
+              printf '%s\n' "$scout_after_output" >&2
+              exit 1
+              ;;
+          esac
+        else
+          case "$scout_after_status" in
+            1)
+              echo "warning: the first detach command for scout worktree $WT failed with status $scout_detach_status but HEAD is detached; continuing because the branchless postcondition is proven. Git diagnostic:" >&2
+              printf '%s\n' "$scout_detach_output" >&2
+              ;;
+            0)
+              # Give a short-lived provider/index operation one chance to clear,
+              # then prove the endpoint still owns the exact clean copy before
+              # attempting the only retry.
+              sleep 0.1
+              if scout_retry_path=$(spawn_current_path "$WT_TARGET" 2>&1); then
+                :
+              else
+                scout_retry_path_status=$?
+                echo "error: the first detach command for scout worktree $WT failed with status $scout_detach_status, and the live endpoint path could not be read for a same-copy retry (status $scout_retry_path_status). First Git diagnostic:" >&2
+                printf '%s\n' "$scout_detach_output" >&2
+                exit 1
+              fi
+              scout_retry_root=$(spawn_worktree_root_real "$scout_retry_path" || true)
+              if [ "$scout_retry_root" != "$scout_worktree_root" ]; then
+                echo "error: the first detach command for scout worktree $WT failed with status $scout_detach_status, and the live endpoint no longer proves the same acquired copy (expected '$scout_worktree_root', observed '${scout_retry_root:-none}' from '$scout_retry_path'); refusing to detach or allocate another copy. First Git diagnostic:" >&2
+                printf '%s\n' "$scout_detach_output" >&2
+                exit 1
+              fi
+              if scout_retry_git_dir=$(git -C "$WT" rev-parse --absolute-git-dir 2>&1); then
+                :
+              else
+                scout_git_status=$?
+                echo "error: the first detach command for scout worktree $WT failed, and its Git directory cannot be re-identified for a same-copy retry (git status $scout_git_status). First Git diagnostic:" >&2
+                printf '%s\n' "$scout_detach_output" >&2
+                echo "Git identity diagnostic:" >&2
+                printf '%s\n' "$scout_retry_git_dir" >&2
+                exit 1
+              fi
+              if [ "$scout_retry_git_dir" != "$scout_git_dir" ]; then
+                echo "error: the first detach command for scout worktree $WT failed, and its Git directory changed from '$scout_git_dir' to '$scout_retry_git_dir'; refusing a retry against a different copy. First Git diagnostic:" >&2
+                printf '%s\n' "$scout_detach_output" >&2
+                exit 1
+              fi
+              if scout_retry_branch_output=$(git -C "$WT" symbolic-ref --quiet --short HEAD 2>&1); then
+                scout_retry_branch_status=0
+                scout_retry_branch=$scout_retry_branch_output
+              else
+                scout_retry_branch_status=$?
+              fi
+              case "$scout_retry_branch_status" in
+                0) ;;
+                1)
+                  echo "warning: the first detach command for scout worktree $WT failed with status $scout_detach_status, but HEAD became detached before retry; continuing because the branchless postcondition is proven. Git diagnostic:" >&2
+                  printf '%s\n' "$scout_detach_output" >&2
+                  ;;
+                *)
+                  echo "error: the first detach command for scout worktree $WT failed, and HEAD cannot be re-inspected for a same-copy retry (git status $scout_retry_branch_status). First Git diagnostic:" >&2
+                  printf '%s\n' "$scout_detach_output" >&2
+                  echo "Git HEAD diagnostic:" >&2
+                  printf '%s\n' "$scout_retry_branch_output" >&2
+                  exit 1
+                  ;;
+              esac
+              if [ "$scout_retry_branch_status" = 0 ]; then
+                if [ "$scout_retry_branch" != "$scout_head_branch" ]; then
+                  echo "error: the first detach command for scout worktree $WT failed, and its branch changed from '$scout_head_branch' to '$scout_retry_branch'; refusing to detach changed work. First Git diagnostic:" >&2
+                  printf '%s\n' "$scout_detach_output" >&2
+                  exit 1
+                fi
+                if scout_retry_head=$(git -C "$WT" rev-parse --verify 'HEAD^{commit}' 2>&1); then
+                  :
+                else
+                  scout_git_status=$?
+                  echo "error: the first detach command for scout worktree $WT failed, and HEAD cannot be re-identified for a same-copy retry (git status $scout_git_status). First Git diagnostic:" >&2
+                  printf '%s\n' "$scout_detach_output" >&2
+                  echo "Git HEAD diagnostic:" >&2
+                  printf '%s\n' "$scout_retry_head" >&2
+                  exit 1
+                fi
+                if [ "$scout_retry_head" != "$scout_head_commit" ]; then
+                  echo "error: the first detach command for scout worktree $WT failed, and HEAD changed from $scout_head_commit to $scout_retry_head; refusing to detach changed or unique work. First Git diagnostic:" >&2
+                  printf '%s\n' "$scout_detach_output" >&2
+                  exit 1
+                fi
+                if scout_retry_clean=$(git -C "$WT" status --porcelain=v1 --untracked-files=all 2>&1); then
+                  :
+                else
+                  scout_git_status=$?
+                  echo "error: the first detach command for scout worktree $WT failed, and cleanliness cannot be re-proven for retry (git status $scout_git_status). First Git diagnostic:" >&2
+                  printf '%s\n' "$scout_detach_output" >&2
+                  echo "Git status diagnostic:" >&2
+                  printf '%s\n' "$scout_retry_clean" >&2
+                  exit 1
+                fi
+                if [ -n "$scout_retry_clean" ]; then
+                  echo "error: the first detach command for scout worktree $WT failed, and the copy became dirty before retry; refusing to detach changed work. Inspect with: git -C '$WT' status --short. First Git diagnostic:" >&2
+                  printf '%s\n' "$scout_detach_output" >&2
+                  exit 1
+                fi
+                if scout_retry_project_head=$(git -C "$PROJ_ABS" rev-parse --verify 'HEAD^{commit}' 2>&1); then
+                  :
+                else
+                  scout_git_status=$?
+                  echo "error: the first detach command for scout worktree $WT failed, and project HEAD cannot be re-identified for retry (git status $scout_git_status). First Git diagnostic:" >&2
+                  printf '%s\n' "$scout_detach_output" >&2
+                  echo "Git project-HEAD diagnostic:" >&2
+                  printf '%s\n' "$scout_retry_project_head" >&2
+                  exit 1
+                fi
+                if scout_retry_ancestry_output=$(git -C "$WT" merge-base --is-ancestor "$scout_retry_head" "$scout_retry_project_head" 2>&1); then
+                  :
+                else
+                  scout_ancestry_status=$?
+                  echo "error: the first detach command for scout worktree $WT failed, and its unchanged HEAD is not proven free of unique commits against project HEAD $scout_retry_project_head (Git ancestry status $scout_ancestry_status); refusing to detach it. First Git diagnostic:" >&2
+                  printf '%s\n' "$scout_detach_output" >&2
+                  [ -z "$scout_retry_ancestry_output" ] || {
+                    echo "Git ancestry diagnostic:" >&2
+                    printf '%s\n' "$scout_retry_ancestry_output" >&2
+                  }
+                  exit 1
+                fi
+                if scout_retry_detach_output=$(git -C "$WT" checkout --detach -q 2>&1); then
+                  scout_retry_detach_status=0
+                else
+                  scout_retry_detach_status=$?
+                fi
+                if [ "$scout_retry_detach_status" != 0 ]; then
+                  echo "error: scout detach failed twice for the same clean worktree $WT (first status $scout_detach_status, retry status $scout_retry_detach_status); refusing to launch. First Git diagnostic:" >&2
+                  printf '%s\n' "$scout_detach_output" >&2
+                  echo "Retry Git diagnostic:" >&2
+                  printf '%s\n' "$scout_retry_detach_output" >&2
+                  exit 1
+                fi
+                if scout_retry_after_output=$(git -C "$WT" symbolic-ref --quiet --short HEAD 2>&1); then
+                  scout_retry_after_status=0
+                  scout_retry_after_branch=$scout_retry_after_output
+                else
+                  scout_retry_after_status=$?
+                fi
+                case "$scout_retry_after_status" in
+                  0)
+                    echo "error: scout worktree $WT is still attached to branch $scout_retry_after_branch after the bounded retry reported success; refusing to launch. First Git diagnostic:" >&2
+                    printf '%s\n' "$scout_detach_output" >&2
+                    exit 1
+                    ;;
+                  1)
+                    echo "warning: the first detach command for scout worktree $WT failed with status $scout_detach_status; one same-copy retry succeeded. First Git diagnostic:" >&2
+                    printf '%s\n' "$scout_detach_output" >&2
+                    ;;
+                  *)
+                    echo "error: cannot prove scout worktree $WT is detached after the bounded retry because HEAD inspection failed with status $scout_retry_after_status; refusing to launch. First Git diagnostic:" >&2
+                    printf '%s\n' "$scout_detach_output" >&2
+                    echo "Git HEAD diagnostic:" >&2
+                    printf '%s\n' "$scout_retry_after_output" >&2
+                    exit 1
+                    ;;
+                esac
+              fi
+              ;;
+            *)
+              echo "error: the first detach command for scout worktree $WT failed with status $scout_detach_status, and HEAD inspection failed with status $scout_after_status; refusing to retry without a proven attached same copy. First Git diagnostic:" >&2
+              printf '%s\n' "$scout_detach_output" >&2
+              echo "Git HEAD diagnostic:" >&2
+              printf '%s\n' "$scout_after_output" >&2
+              exit 1
+              ;;
+          esac
+        fi
         ;;
       1) ;;
       *)
-        echo "error: cannot prove scout worktree $WT is detached because HEAD inspection failed with status $scout_head_status; refusing to launch. Inspect target $T" >&2
+        echo "error: cannot prove scout worktree $WT is detached because HEAD inspection failed with status $scout_head_status; refusing to launch. Git diagnostic:" >&2
+        printf '%s\n' "$scout_head_output" >&2
         exit 1
         ;;
     esac

@@ -12,9 +12,10 @@
 # records, but needing manual recovery to finish.
 #
 # These cases assert the invariant is established at acquisition for every
-# provider shape, that repeating the same acquisition in the same copy is safe,
-# that a ship task's branch is never touched, and that an unestablishable
-# invariant refuses before the harness launches rather than after.
+# provider shape, that a transient detach failure gets one safe same-copy retry,
+# that dirty or unique attached work and every retry-identity boundary refuse,
+# that repeating an already-detached acquisition is safe, that a ship task's
+# branch is never touched, and that every Git error remains actionable.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -37,7 +38,14 @@ make_scout_fakebin() {
 set -u
 case "$*" in
   *"#{pane_current_path}"*)
-    printf '%s\n' "${FM_FAKE_PANE_PATH:-}"
+    path=${FM_FAKE_PANE_PATH:-}
+    if [ -n "${FM_FAKE_DETACH_COUNT:-}" ] \
+       && [ -f "$FM_FAKE_DETACH_COUNT" ] \
+       && [ -n "${FM_FAKE_PANE_PATH_AFTER_DETACH_FAILURE:-}" ]; then
+      read -r detach_count < "$FM_FAKE_DETACH_COUNT"
+      [ "$detach_count" -lt 1 ] || path=$FM_FAKE_PANE_PATH_AFTER_DETACH_FAILURE
+    fi
+    printf '%s\n' "$path"
     exit 0
     ;;
 esac
@@ -45,7 +53,10 @@ case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;
   list-windows) exit 0 ;;
   has-session|new-session|new-window|kill-window) exit 0 ;;
-  send-keys) exit 0 ;;
+  send-keys)
+    printf '%s\n' "$*" >> "${FM_FAKE_SEND_LOG:?}"
+    exit 0
+    ;;
 esac
 exit 0
 SH
@@ -54,6 +65,19 @@ SH
   cat > "$fakebin/git" <<'SH'
 #!/usr/bin/env bash
 case " $* " in
+  *" rev-parse --absolute-git-dir "*)
+    if [ -n "${FM_FAKE_GIT_DIR_AFTER_DETACH_FAILURE:-}" ]; then
+      count=0
+      [ ! -f "${FM_FAKE_GIT_DIR_COUNT:?}" ] \
+        || read -r count < "$FM_FAKE_GIT_DIR_COUNT"
+      count=$((count + 1))
+      printf '%s\n' "$count" > "$FM_FAKE_GIT_DIR_COUNT"
+      if [ "$count" -ge 2 ]; then
+        printf '%s\n' "$FM_FAKE_GIT_DIR_AFTER_DETACH_FAILURE"
+        exit 0
+      fi
+    fi
+    ;;
   *" symbolic-ref --quiet --short HEAD "*)
     if [ -n "${FM_FAKE_SYMBOLIC_REF_ERROR_AT:-}" ]; then
       count=0
@@ -61,7 +85,33 @@ case " $* " in
         || read -r count < "$FM_FAKE_SYMBOLIC_REF_COUNT"
       count=$((count + 1))
       printf '%s\n' "$count" > "$FM_FAKE_SYMBOLIC_REF_COUNT"
-      [ "$count" != "$FM_FAKE_SYMBOLIC_REF_ERROR_AT" ] || exit 128
+      [ "$count" != "$FM_FAKE_SYMBOLIC_REF_ERROR_AT" ] || {
+        printf 'fatal: simulated symbolic-ref inspection failure\n' >&2
+        exit 128
+      }
+    fi
+    ;;
+  *" checkout --detach -q "*)
+    if [ -n "${FM_FAKE_DETACH_FAIL_AT:-}" ]; then
+      count=0
+      [ ! -f "${FM_FAKE_DETACH_COUNT:?}" ] \
+        || read -r count < "$FM_FAKE_DETACH_COUNT"
+      count=$((count + 1))
+      printf '%s\n' "$count" > "$FM_FAKE_DETACH_COUNT"
+      if [ "$count" = "$FM_FAKE_DETACH_FAIL_AT" ]; then
+        [ -z "${FM_FAKE_DIRTY_ON_DETACH_FAILURE:-}" ] \
+          || printf 'provider scratch\n' > "$FM_FAKE_DIRTY_ON_DETACH_FAILURE"
+        if [ -n "${FM_FAKE_BRANCH_ON_DETACH_FAILURE:-}" ]; then
+          "${REAL_GIT_FOR_TEST:?}" -C "${FM_FAKE_BRANCH_WORKTREE:?}" \
+            checkout -q -b "$FM_FAKE_BRANCH_ON_DETACH_FAILURE"
+        fi
+        if [ -n "${FM_FAKE_COMMIT_ON_DETACH_FAILURE:-}" ]; then
+          "${REAL_GIT_FOR_TEST:?}" -C "$FM_FAKE_COMMIT_ON_DETACH_FAILURE" \
+            -c user.email=t@t -c user.name=t commit -q --allow-empty -m 'provider moved head'
+        fi
+        printf 'fatal: simulated transient detach failure\n' >&2
+        exit 75
+      fi
     fi
     ;;
 esac
@@ -108,9 +158,19 @@ run_scout_spawn() {
     FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
     FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" \
     FM_WORKTREE_SETTLE_INTERVAL=0.01 \
+    FM_FAKE_SEND_LOG="$HOME_DIR/state/tmux-send.log" \
     FM_FAKE_PANE_PATH="$WT_DIR" \
+    FM_FAKE_PANE_PATH_AFTER_DETACH_FAILURE="${FM_FAKE_PANE_PATH_AFTER_DETACH_FAILURE:-}" \
     FM_FAKE_SYMBOLIC_REF_ERROR_AT="${FM_FAKE_SYMBOLIC_REF_ERROR_AT:-}" \
     FM_FAKE_SYMBOLIC_REF_COUNT="${FM_FAKE_SYMBOLIC_REF_COUNT:-}" \
+    FM_FAKE_DETACH_FAIL_AT="${FM_FAKE_DETACH_FAIL_AT:-}" \
+    FM_FAKE_DETACH_COUNT="${FM_FAKE_DETACH_COUNT:-}" \
+    FM_FAKE_DIRTY_ON_DETACH_FAILURE="${FM_FAKE_DIRTY_ON_DETACH_FAILURE:-}" \
+    FM_FAKE_GIT_DIR_AFTER_DETACH_FAILURE="${FM_FAKE_GIT_DIR_AFTER_DETACH_FAILURE:-}" \
+    FM_FAKE_GIT_DIR_COUNT="${FM_FAKE_GIT_DIR_COUNT:-}" \
+    FM_FAKE_BRANCH_ON_DETACH_FAILURE="${FM_FAKE_BRANCH_ON_DETACH_FAILURE:-}" \
+    FM_FAKE_BRANCH_WORKTREE="$WT_DIR" \
+    FM_FAKE_COMMIT_ON_DETACH_FAILURE="${FM_FAKE_COMMIT_ON_DETACH_FAILURE:-}" \
     PATH="$FAKEBIN_DIR:$PATH" \
     "$SPAWN" "$id" "$PROJ_DIR" "$@" 2>&1
 }
@@ -217,49 +277,170 @@ test_same_task_recovery_preserves_work_in_the_existing_copy() {
   pass "relaunching the same scout in its existing copy preserves its identity, commits, and scratch work"
 }
 
-# A dirty copy is not ambiguity: the scout's laboratory is expected to be dirty,
-# and detaching keeps every change, so acquisition must still establish the
-# invariant rather than refuse work that has nothing wrong with it.
-test_dirty_managed_pool_scout_still_becomes_branchless() {
-  local rec id out status
-  id=scout-dirty-b4
-  rec=$(make_scout_case scout-dirty "$id" managed)
+# A clean attached copy can hit a one-off provider/index race. The exact first
+# Git failure must remain visible, but the same copy gets one bounded retry after
+# its clean identity is re-proven.
+test_transient_detach_failure_retries_the_same_clean_copy_once() {
+  local rec id out status count_file
+  id=scout-transient-b4
+  rec=$(make_scout_case scout-transient "$id" managed)
   read_scout_record "$rec"
-  printf '%s\n' 'uncommitted work' >> "$WT_DIR/README.md"
-  printf '%s\n' 'untracked work' > "$WT_DIR/untracked.txt"
+  count_file="$HOME_DIR/state/detach-count"
 
-  out=$(run_scout_spawn "$id" --scout)
+  out=$(FM_FAKE_DETACH_FAIL_AT=1 FM_FAKE_DETACH_COUNT="$count_file" \
+    run_scout_spawn "$id" --scout)
   status=$?
-  expect_code 0 "$status" "a dirty managed-pool scout copy should still acquire"
-  [ -z "$(head_branch "$WT_DIR")" ] \
-    || fail "dirty managed-pool scout is still attached to $(head_branch "$WT_DIR")"
-  grep -q 'uncommitted work' "$WT_DIR/README.md" \
-    || fail "acquisition discarded an uncommitted change"
-  [ -f "$WT_DIR/untracked.txt" ] \
-    || fail "acquisition discarded an untracked file"
-  pass "a dirty managed-pool scout copy becomes branchless with every change preserved"
+  expect_code 0 "$status" "a transient first detach failure should recover"
+  assert_contains "$out" "one same-copy retry succeeded" \
+    "successful recovery did not identify the bounded same-copy retry"
+  assert_contains "$out" "fatal: simulated transient detach failure" \
+    "successful recovery hid the initiating Git error"
+  [ "$(cat "$count_file")" = 2 ] || fail "transient recovery did not make exactly two detach attempts"
+  [ "$(grep -c 'treehouse get' "$HOME_DIR/state/tmux-send.log")" = 1 ] \
+    || fail "transient recovery allocated or requested another worktree copy"
+  [ -z "$(head_branch "$WT_DIR")" ] || fail "transiently recovered scout remains attached"
+  assert_grep "acquisition_branch=-" "$HOME_DIR/state/$id.meta" \
+    "transient recovery did not record branchless provenance"
+  pass "a transient detach failure gets exactly one clean same-copy retry without hiding Git's error"
 }
 
-# When the invariant cannot be established - a stuck index lock is the ambiguous
-# case, since git cannot tell a crashed process from a live one - acquisition
-# must refuse BEFORE the harness launches, so no worker is ever closed by a
-# later cleanup refusal it could not have avoided.
-test_unestablishable_invariant_refuses_before_launching() {
+# An attached copy can carry real work before Firstmate sees it. Detaching that
+# branch would make ownership ambiguous, so both dirty files and commits absent
+# from the project checkout are hard refusal boundaries.
+test_dirty_or_unique_attached_work_refuses_without_detaching() {
+  local rec id out status head_before count_file
+
+  id=scout-dirty-b5
+  rec=$(make_scout_case scout-dirty "$id" managed)
+  read_scout_record "$rec"
+  count_file="$HOME_DIR/state/detach-count"
+  printf '%s\n' 'uncommitted work' >> "$WT_DIR/README.md"
+  out=$(FM_FAKE_DETACH_FAIL_AT=99 FM_FAKE_DETACH_COUNT="$count_file" \
+    run_scout_spawn "$id" --scout)
+  status=$?
+  expect_code 1 "$status" "a dirty attached scout copy must refuse"
+  assert_contains "$out" "refusing to detach dirty work" "dirty refusal was not actionable"
+  [ ! -e "$count_file" ] || fail "dirty refusal attempted to detach"
+  [ "$(head_branch "$WT_DIR")" = fmlab/fmlab-pool-scout-dirty ] \
+    || fail "dirty refusal changed the attached branch"
+
+  id=scout-unique-b6
+  rec=$(make_scout_case scout-unique "$id" managed)
+  read_scout_record "$rec"
+  git -C "$WT_DIR" -c user.email=t@t -c user.name=t \
+    commit -q --allow-empty -m 'unique provider work'
+  head_before=$(git -C "$WT_DIR" rev-parse HEAD)
+  count_file="$HOME_DIR/state/detach-count"
+  out=$(FM_FAKE_DETACH_FAIL_AT=99 FM_FAKE_DETACH_COUNT="$count_file" \
+    run_scout_spawn "$id" --scout)
+  status=$?
+  expect_code 1 "$status" "an attached branch with unique commits must refuse"
+  assert_contains "$out" "refusing to detach unique work" "unique-work refusal was not actionable"
+  [ ! -e "$count_file" ] || fail "unique-work refusal attempted to detach"
+  [ "$(git -C "$WT_DIR" rev-parse HEAD)" = "$head_before" ] \
+    || fail "unique-work refusal moved HEAD"
+  pass "dirty files and unique commits refuse before any attached-copy detach"
+}
+
+# Once the first command has failed, the retry authority is narrower than the
+# initial acquisition authority: the live endpoint, branch, HEAD, and clean tree
+# must still identify the exact same copy.
+test_retry_refuses_changed_or_unproven_copy_boundaries() {
+  local rec id out status count_file
+
+  id=scout-retry-dirty-b7
+  rec=$(make_scout_case scout-retry-dirty "$id" managed)
+  read_scout_record "$rec"
+  count_file="$HOME_DIR/state/detach-count"
+  out=$(FM_FAKE_DETACH_FAIL_AT=1 FM_FAKE_DETACH_COUNT="$count_file" \
+    FM_FAKE_DIRTY_ON_DETACH_FAILURE="$WT_DIR/provider-scratch.txt" \
+    run_scout_spawn "$id" --scout)
+  status=$?
+  expect_code 1 "$status" "a copy that becomes dirty after failure must refuse retry"
+  assert_contains "$out" "copy became dirty before retry" "retry dirty refusal was not actionable"
+  [ "$(cat "$count_file")" = 1 ] || fail "dirty retry boundary made another detach attempt"
+  [ "$(head_branch "$WT_DIR")" = fmlab/fmlab-pool-scout-retry-dirty ] \
+    || fail "dirty retry refusal detached the branch"
+
+  id=scout-retry-path-b8
+  rec=$(make_scout_case scout-retry-path "$id" managed)
+  read_scout_record "$rec"
+  count_file="$HOME_DIR/state/detach-count"
+  out=$(FM_FAKE_DETACH_FAIL_AT=1 FM_FAKE_DETACH_COUNT="$count_file" \
+    FM_FAKE_PANE_PATH_AFTER_DETACH_FAILURE="$PROJ_DIR" \
+    run_scout_spawn "$id" --scout)
+  status=$?
+  expect_code 1 "$status" "a changed live endpoint path must refuse retry"
+  assert_contains "$out" "live endpoint no longer proves the same acquired copy" \
+    "same-copy path refusal was not actionable"
+  [ "$(cat "$count_file")" = 1 ] || fail "changed-path boundary made another detach attempt"
+
+  id=scout-retry-git-dir-b9
+  rec=$(make_scout_case scout-retry-git-dir "$id" managed)
+  read_scout_record "$rec"
+  count_file="$HOME_DIR/state/detach-count"
+  out=$(FM_FAKE_DETACH_FAIL_AT=1 FM_FAKE_DETACH_COUNT="$count_file" \
+    FM_FAKE_GIT_DIR_AFTER_DETACH_FAILURE="$HOME_DIR/state/different-git-dir" \
+    FM_FAKE_GIT_DIR_COUNT="$HOME_DIR/state/git-dir-count" \
+    run_scout_spawn "$id" --scout)
+  status=$?
+  expect_code 1 "$status" "a changed Git directory must refuse retry"
+  assert_contains "$out" "Git directory changed from" "changed-Git-directory refusal was not actionable"
+  [ "$(cat "$count_file")" = 1 ] || fail "changed-Git-directory boundary made another detach attempt"
+
+  id=scout-retry-branch-b10
+  rec=$(make_scout_case scout-retry-branch "$id" managed)
+  read_scout_record "$rec"
+  count_file="$HOME_DIR/state/detach-count"
+  out=$(FM_FAKE_DETACH_FAIL_AT=1 FM_FAKE_DETACH_COUNT="$count_file" \
+    FM_FAKE_BRANCH_ON_DETACH_FAILURE=provider/reassigned \
+    run_scout_spawn "$id" --scout)
+  status=$?
+  expect_code 1 "$status" "a changed branch must refuse retry"
+  assert_contains "$out" "branch changed from" "changed-branch refusal was not actionable"
+  [ "$(cat "$count_file")" = 1 ] || fail "changed-branch boundary made another detach attempt"
+
+  id=scout-retry-head-b11
+  rec=$(make_scout_case scout-retry-head "$id" managed)
+  read_scout_record "$rec"
+  count_file="$HOME_DIR/state/detach-count"
+  out=$(FM_FAKE_DETACH_FAIL_AT=1 FM_FAKE_DETACH_COUNT="$count_file" \
+    FM_FAKE_COMMIT_ON_DETACH_FAILURE="$WT_DIR" \
+    run_scout_spawn "$id" --scout)
+  status=$?
+  expect_code 1 "$status" "a changed HEAD must refuse retry"
+  assert_contains "$out" "HEAD changed from" "changed-HEAD refusal was not actionable"
+  assert_contains "$out" "refusing to detach changed or unique work" \
+    "changed-HEAD refusal did not preserve the unique-work boundary"
+  [ "$(cat "$count_file")" = 1 ] || fail "changed-HEAD boundary made another detach attempt"
+  pass "retry refuses dirty, different-path, different-Git-dir, changed-branch, and changed-HEAD copies"
+}
+
+# A persistent real Git failure must stop after the one retry and preserve both
+# exact diagnostics. A stuck index lock reproduces the report's exact observable
+# shape - detach fails and leaves a clean copy attached - while proving the new
+# diagnostic exposes the initiating Git failure instead of guessing from the
+# later branch check.
+test_persistent_git_failure_refuses_after_one_retry_with_both_errors() {
   local rec id out status git_dir
-  id=scout-locked-b5
+  id=scout-locked-b12
   rec=$(make_scout_case scout-locked "$id" managed)
   read_scout_record "$rec"
-  git_dir=$(git -C "$WT_DIR" rev-parse --git-dir)
+  git_dir=$(git -C "$WT_DIR" rev-parse --absolute-git-dir)
   : > "$git_dir/index.lock"
 
   out=$(run_scout_spawn "$id" --scout)
   status=$?
-  expect_code 1 "$status" "an unestablishable branchless invariant must refuse the launch"
-  assert_contains "$out" "still attached to branch fmlab/fmlab-pool-scout-locked" \
-    "the refusal did not name the branch the scout is still attached to"
+  expect_code 1 "$status" "a persistent detach error must refuse after one retry"
+  assert_contains "$out" "scout detach failed twice for the same clean worktree" \
+    "persistent refusal did not report the bounded retry outcome"
+  [ "$(printf '%s\n' "$out" | grep -c "fatal: Unable to create '$git_dir/index.lock'")" = 2 ] \
+    || fail "persistent refusal did not preserve both exact Git lock errors: $out"
   assert_not_contains "$out" "spawned $id" "a refused scout spawn must not launch the harness"
   assert_absent "$HOME_DIR/state/$id.meta" "a refused scout spawn must not record meta"
-  pass "a scout whose branchless invariant cannot be established refuses before the harness launches"
+  [ "$(head_branch "$WT_DIR")" = fmlab/fmlab-pool-scout-locked ] \
+    || fail "persistent refusal detached the branch"
+  pass "a persistent real Git error stops after one retry and reports both initiating failures"
 }
 
 test_head_inspection_errors_refuse_before_launching() {
@@ -310,8 +491,10 @@ test_ship_acquisition_never_detaches_its_branch() {
 test_managed_pool_scout_is_branchless_before_work_begins
 test_generic_scout_acquisition_is_an_exact_no_op
 test_same_task_recovery_preserves_work_in_the_existing_copy
-test_dirty_managed_pool_scout_still_becomes_branchless
-test_unestablishable_invariant_refuses_before_launching
+test_transient_detach_failure_retries_the_same_clean_copy_once
+test_dirty_or_unique_attached_work_refuses_without_detaching
+test_retry_refuses_changed_or_unproven_copy_boundaries
+test_persistent_git_failure_refuses_after_one_retry_with_both_errors
 test_head_inspection_errors_refuse_before_launching
 test_ship_acquisition_never_detaches_its_branch
 
