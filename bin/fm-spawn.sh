@@ -1450,17 +1450,9 @@ if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
 
   validate_spawn_worktree "treehouse get" "$T"
 
-  # A scout is recorded below as acquisition_branch=- and guarded cleanup only
-  # returns such a worktree when it is genuinely branchless, so the invariant has
-  # to be established at acquisition rather than assumed. A generic provider's
-  # already-detached copy is left exactly alone, including on a scratch-work
-  # relaunch. A managed provider's attached structural branch may be detached only
-  # when its tree is clean and its HEAD has no commits absent from the project
-  # checkout. If Git fails once and leaves that copy attached, sleep briefly and
-  # make one retry only after re-proving the live endpoint's physical root, Git
-  # directory, branch, HEAD, cleanliness, and ancestry. No retry path allocates a
-  # replacement copy, and every real Git diagnostic is printed. Ship tasks are
-  # deliberately untouched: they own branch fm/<id> and create it themselves.
+  # Enforce the header-owned Treehouse scout acquisition contract before launch.
+  # Ship tasks stay outside this block because they own branch fm/<id>, which no
+  # acquisition path may detach or rewrite.
   if [ "$KIND" = scout ]; then
     if scout_head_output=$(git -C "$WT" symbolic-ref --quiet --short HEAD 2>&1); then
       scout_head_status=0
