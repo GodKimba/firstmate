@@ -194,7 +194,7 @@ status_line_note() {  # <status-line> -> text after the first colon, trimmed
   esac
 }
 _fm_decision_key() {  # <status-line> -> key slug, or "default" when no token
-  local prefix=${1%%:*} k
+  local line=$1 prefix=${1%%:*} k
   case "$prefix" in
     *\[key=*\]*)
       k=${prefix#*\[key=}
@@ -204,7 +204,16 @@ _fm_decision_key() {  # <status-line> -> key slug, or "default" when no token
         *) printf '%s' "$k" ;;
       esac
       ;;
-    *) printf 'default' ;;
+    *)
+      # The key token is only a key BEFORE the colon. A key-like token in the
+      # note is invalid rather than a default-key event, so a line like
+      # `resolved: answered route [key=route]` can neither open nor close any
+      # decision instead of silently acting on the default key.
+      case "$line" in
+        *\[key=*) return 1 ;;
+        *) printf 'default' ;;
+      esac
+      ;;
   esac
 }
 # Print the answer token of a status line, or nothing when it carries none.

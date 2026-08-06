@@ -444,7 +444,6 @@ PUBLIC_FOLLOWUP_STATE=$STATE
 PUBLIC_FOLLOWUP_WORK_HOME=main
 PUBLIC_FOLLOWUP_PARENT_UNRESOLVED=0
 PUBLIC_FOLLOWUP_PARENT_RELAY_ACTIVE=0
-PUBLIC_FOLLOWUP_RELAY_ACTIVE=0
 public_followup_canonical_home() {
   local home=$1
   case "$home" in /*) ;; *) return 1 ;; esac
@@ -528,10 +527,6 @@ if [ -f "$FM_HOME/$SUB_HOME_MARKER" ]; then
           "$PRIMARY_HOME_CANDIDATE" "$FM_HOME" "$SECOND_MATE_ID"); then
         PUBLIC_FOLLOWUP_STATE="$PUBLIC_FOLLOWUP_HOME/state"
         PUBLIC_FOLLOWUP_PARENT_UNRESOLVED=0
-        if [ "$FORCE" != "--force" ] \
-          && fm_pf_relay_active "$PUBLIC_FOLLOWUP_HOME"; then
-          PUBLIC_FOLLOWUP_RELAY_ACTIVE=1
-        fi
       else
         PUBLIC_FOLLOWUP_HOME=
         PUBLIC_FOLLOWUP_STATE=
@@ -556,10 +551,6 @@ if [ -f "$FM_HOME/$SUB_HOME_MARKER" ]; then
             "$PRIMARY_HOME_CANDIDATE" "$FM_HOME" "$SECOND_MATE_ID"); then
           PUBLIC_FOLLOWUP_STATE="$PUBLIC_FOLLOWUP_HOME/state"
           PUBLIC_FOLLOWUP_PARENT_UNRESOLVED=0
-          if [ "$FORCE" != "--force" ] \
-            && fm_pf_relay_active "$PUBLIC_FOLLOWUP_HOME"; then
-            PUBLIC_FOLLOWUP_RELAY_ACTIVE=1
-          fi
         else
           PUBLIC_FOLLOWUP_HOME=
           PUBLIC_FOLLOWUP_STATE=
@@ -572,11 +563,6 @@ if [ -f "$FM_HOME/$SUB_HOME_MARKER" ]; then
   fi
 elif [ "$KIND" = secondmate ]; then
   PUBLIC_FOLLOWUP_WORK_HOME="secondmate:$ID"
-  if [ "$FORCE" != "--force" ] && fm_pf_relay_active "$FM_HOME"; then
-    PUBLIC_FOLLOWUP_RELAY_ACTIVE=1
-  fi
-elif [ "$FORCE" != "--force" ] && fm_pf_relay_active "$FM_HOME"; then
-  PUBLIC_FOLLOWUP_RELAY_ACTIVE=1
 fi
 
 default_branch() {
@@ -2422,9 +2408,16 @@ if [ "$FORCE" != "--force" ] && [ "$PUBLIC_FOLLOWUP_PARENT_UNRESOLVED" = 1 ]; th
   echo "REFUSED: cannot resolve the primary home for marked secondmate $SECOND_MATE_ID; refusing cleanup without its durable parent binding." >&2
   exit 1
 fi
+# This home guards a REGISTERED commitment whether or not outward relay
+# authorization is still present. Losing the token cannot retire a promise that
+# was already made: the registration stays visible and cleanup stays refused
+# until it is delivered or explicitly waived
+# (tests/fm-public-followup.test.sh, "cleanup must remain guarded after relay
+# token loss"). A route that legitimately puts the promise out of scope - a
+# parent on another machine - clears PUBLIC_FOLLOWUP_STATE above instead, so
+# that case still cleans up.
 if [ "$FORCE" != "--force" ] \
   && [ -n "$PUBLIC_FOLLOWUP_STATE" ] \
-  && [ "$PUBLIC_FOLLOWUP_RELAY_ACTIVE" = 1 ] \
   && fm_pf_has_registrations "$PUBLIC_FOLLOWUP_STATE"; then
   if ! PUBLIC_FOLLOWUP_BLOCKING=$(FM_HOME="$PUBLIC_FOLLOWUP_HOME" FM_STATE_OVERRIDE="$PUBLIC_FOLLOWUP_STATE" \
       "$SCRIPT_DIR/fm-public-followup.sh" guard-work "$PUBLIC_FOLLOWUP_WORK_HOME" "$ID" 2>/dev/null); then
