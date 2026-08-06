@@ -2,7 +2,7 @@
 
 This is the authoritative current contract for the "no turn ends blind" primary backstop referenced from AGENTS.md section 8.
 The predicate lives in `bin/fm-turnend-guard.sh`.
-Primary scope lives in `bin/fm-primary-scope-lib.sh`, shared with the native session-start nudge in [`sessionstart-nudge.md`](sessionstart-nudge.md).
+Primary scope lives in `bin/fm-primary-scope-lib.sh`, shared with the native session-start adapters in [`sessionstart-nudge.md`](sessionstart-nudge.md).
 Harness hook files adapt each enabled primary harness integration's turn-end mechanism to that shared predicate.
 
 Related PreToolUse guards deny unsafe commands before execution rather than detecting a blind turn end afterward.
@@ -13,10 +13,11 @@ Do not infer this guard's scope, loop safety, or compatibility tradeoffs for tho
 
 `bin/fm-guard.sh` is a pull-based warning that runs only when another supervision command invokes it.
 The turn-end guard closes the remaining gap at the primary's own turn boundary.
-When work is in flight, the harness integration must prove active supervision or block the turn end or force one bounded follow-up that uses the recovery instruction from the emitted session-start protocol.
+When work, a process-event source, or Relay polling needs supervision at that boundary and no identity-matched watcher has a fresh beacon, the harness integration must either block the turn end or force one bounded follow-up that uses the recovery instruction from the emitted session-start protocol.
+The mid-turn pull warning uses the model-aware supervision verdict described below, while the turn-end guard keeps the PID-strict watcher predicate.
 The guard remains a backstop; [`watcher-continuity.md`](watcher-continuity.md) owns normal continuity.
 
-## Shared predicate
+## Guard predicates
 
 The guard first calls the shared primary scope.
 [`sessionstart-nudge.md`](sessionstart-nudge.md) owns the launch-identity gate that runs before the filesystem checks below.
@@ -27,12 +28,15 @@ That check retains linked-worktree exclusion as a backstop because the git dir d
 It also requires `AGENTS.md`, `bin/`, and the effective state directory.
 
 For an in-scope primary, the guard counts in-flight work from `state/*.meta`.
-The default cross-harness mode exits silently with no work in flight.
-Claude's `--claude` mode also treats `state/x-watch.check.sh` as supervision need, so X-mode relay polling remains guarded without an in-flight task.
-Otherwise it calls `fm_watcher_healthy <state-dir> <watch-path> [grace-seconds] [home]` from `bin/fm-wake-lib.sh`, the same identity-matched lock and fresh-beacon check used by `bin/fm-watch-arm.sh`.
-A stale beacon blocks even when a watcher pid is live.
-A fresh leftover beacon blocks when the lock is missing, dead, or identity-mismatched.
-While `state/.afk` exists, [`watcher-continuity.md`](watcher-continuity.md#away-mode-stand-down) owns the alternative proof during the watcher-start handoff.
+Registered `state/procevent/*.source` records also require supervision even though they have no task metadata.
+The default cross-harness mode exits silently with no supervision need.
+Every mode treats `state/x-watch.check.sh` as supervision need, so Relay polling remains guarded without an in-flight task.
+Otherwise it calls `fm_watcher_healthy <state-dir> <watch-path> [grace-seconds] [home]` from `bin/fm-wake-lib.sh`, the same PID-strict identity-matched lock and fresh-beacon check used by `bin/fm-watch-arm.sh`: a stale beacon blocks even when a watcher pid is live, and a fresh leftover beacon blocks when the lock is missing, dead, or identity-mismatched.
+The turn-end guard needs that strict check because it fires at the turn boundary, where the auto-arm is bringing a fresh watcher up for the upcoming idle period, and it cooperates with that arm rather than trusting a beacon left by the cycle that just ended.
+`bin/fm-guard.sh`, the pull warning, instead uses the model-aware `fm_watcher_supervision_verdict` from the same library, because it fires mid-turn when the auto-arm model runs no watcher at all.
+Under the Claude Stop auto-arm model a beacon fresh within grace is healthy even with no live watcher process, and only a beacon stale beyond grace (or absent) alarms.
+Under every persistent-watcher harness a live identity-matched watcher with a fresh beacon is still required, so the pull guard keeps the same strict semantics there.
+Its banner names the true failing condition, either a missing live watcher process or a genuinely stale beacon with its real age, and keys the once-per-episode dedup on that condition rather than the beacon mtime.
 
 `FM_STATE_OVERRIDE` wins over `FM_HOME/state`, and `FM_HOME` wins over repository-root `state/`.
 `FM_GUARD_GRACE` controls beacon freshness and defaults to 300 seconds.
@@ -54,9 +58,19 @@ In the default Codex mode, a true value lets the second stop finish after one fo
 Claude runs the guard with `--claude`, which ignores `stop_hook_active` and cooperates with the Stop-owned auto-arm.
 The shared predicate exits first for a verified away-mode handoff.
 Claude Code sets `stop_hook_active=true` on every stop after any stop-hook continuation, including `asyncRewake` rewakes, which re-opened the 2026-07-21 blind window under the default one-shot behavior.
-The Claude mode waits up to `FM_CLAUDE_AUTOARM_SYNC_WAIT_MS` (default 800 milliseconds) and allows the stop when the watcher is healthy, `state/.claude-autoarm.lock` has a live owner, or `state/.claude-autoarm-epoch` contains a fresh rewake outcome.
-When none of those proofs appears, it re-blocks up to `FM_CLAUDE_TURNEND_BLOCK_BUDGET` times (default 3, below Claude's 8-block override), then allows degraded with a visible `systemMessage`.
-Any allow resets the budget.
+The Claude mode waits up to `FM_CLAUDE_AUTOARM_SYNC_WAIT_MS` (default 800 milliseconds) and allows the stop when the watcher is healthy, `state/.claude-autoarm.lock` has a live `autoarm` role owner whose eventual failure must exit 2, or `state/.claude-autoarm-epoch` contains a fresh actionable rewake owned by this event epoch.
+Fresh `failed` and `failed-suppressed` outcomes enter or advance the failure progression instead of acting as unconditional recovery proof.
+The auto-arm itself rechecks the healthy watcher predicate and retries a bounded number of times before reporting a genuine failure.
+The first fresh exhausted-failure epoch preserves its handoff without consuming a blocked-stop count, while later fresh failed epochs advance the same monotonic progression instead of resetting it.
+When none of those proofs appears, it re-blocks up to `FM_CLAUDE_TURNEND_BLOCK_BUDGET` times (default 3, below Claude's 8-block override).
+In Claude mode, positive watcher recovery clears the block budget, failure notice, and attended alarm together under the existing budget lock before either hook reports ordinary recovery.
+The one loud attended fail-open is available only when the auto-arm has recorded an exhausted failure, its one notice is already consumed, the block budget is exhausted, and a final check finds neither a healthy watcher nor an automatic continuation.
+Each epoch identity is accounted at most once under the budget lock.
+Whenever both coordination locks are needed, positive auto-arm recovery and the terminal check acquire the auto-arm owner lock before the budget lock.
+After that alarm, the Stop auto-arm suppresses further exit-2 continuations until positive watcher recovery, so the final fail-open remains reachable.
+The alarm cannot repeat during that failure episode, and a later unhealthy stop blocks again.
+A positively verified healthy watcher clears the failure notice, alarm, and block budget for a future independent episode.
+A Claude failure notice describes the automatic mechanism as broken and does not direct a routine manual background arm.
 
 OpenCode, Pi, and pi-signed expose passive callbacks for this purpose.
 Their adapters fail open at the hook boundary to protect the user session but schedule one bounded follow-up when the predicate blocks.
@@ -79,7 +93,7 @@ That warning uses `bin/fm-supervision-instructions.sh --repair-line`, so it alwa
 ## Compatibility limits
 
 - Child crewmate and scout worktrees are outside scope.
-- A valid secondmate home is in scope after the shared launch-identity gate; an idle secondmate endpoint with no X-mode relay poll remains healthy because it has no supervision need.
+- A valid secondmate home is in scope; an idle secondmate endpoint with no Relay poll remains healthy because it has no supervision need.
 - The direct-blocking and bounded passive-follow-up split is limited to the primary integrations listed above.
 - OpenCode headless mode and untrusted Grok project hooks remain fail-open at the host boundary.
 - Kimi Code CLI 0.29.1 exposes only global `[[hooks]]` configuration in `~/.kimi-code/config.toml`, including a `Stop` event with snake_case payload fields `hook_event_name`, `session_id`, `cwd`, and `stop_hook_active`.
@@ -93,7 +107,8 @@ That warning uses `bin/fm-supervision-instructions.sh --repair-line`, so it alwa
 
 ## Regression coverage
 
-`tests/fm-turnend-guard.test.sh` covers the predicate, main and secondmate primary scope, child-worktree exclusion, `FM_HOME` and `FM_STATE_OVERRIDE` precedence, the cooperative `--claude` claim wait, epoch allow, re-block budget, Pi logical-run latching, missing-`jq` behavior, all five primary registrations, Grok native and legacy selection, typed field precedence, malformed input, resume permission, recursion safety, and exactly-one-path safety.
+`tests/fm-turnend-guard.test.sh` covers the predicate, main and secondmate primary scope, child-worktree exclusion, `FM_HOME` and `FM_STATE_OVERRIDE` precedence, the live-lock and fresh-beacon guard predicate, the cooperative `--claude` claim wait, monotonic failed-epoch progression, bounded attended fail-open, post-alarm continuation suppression, positive recovery reset, Pi logical-run latching, missing-`jq` behavior, all five primary registrations, Grok native and legacy selection, typed field precedence, malformed input, and exactly-one-path safety.
+`tests/fm-guard-stale-banner.test.sh` covers the pull-guard predicate, including the persistent-model fresh-leftover-beacon negative control, the auto-arm model's healthy fresh-beacon-without-a-watcher case and its stale-beacon alarm, the true-reason banner wording, and the reason-keyed episode dedup surviving a beacon mtime change.
 `tests/fm-afk-standdown.test.sh` covers the exact live away-daemon handoff and the missing and identity-ambiguous negative controls in both shared guard modes.
 `tests/fm-kimi-harness.test.sh` covers the separate Kimi crew hook's format preservation, idempotence, refusal cases, token guard, spawn registration, and teardown cleanup.
 `tests/fm-supervision-instructions.test.sh` covers recovery-line ownership and pi-signed's identity-preserving reuse of Pi's protocol.

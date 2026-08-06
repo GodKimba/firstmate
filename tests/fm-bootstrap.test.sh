@@ -4,16 +4,16 @@
 # Bootstrap prints one block or line per actionable problem, optional verbose
 # BOOTSTRAP_INFO fact, or completed bootstrap no-action fact and is silent when
 # all is well. firstmate consumes the exact 'MISSING: treehouse (install: ...)',
-# 'MISSING: jq (install: ...)', 'MISSING: gh-axi (install: ...)',
-# 'MISSING: tasks-axi (install: ...)', 'MISSING: quota-axi (install: ...)', and
+# 'MISSING: tasks-axi (install: ...)', 'MISSING: quota-axi (install: ...)',
+# 'MISSING: gh-axi (install: ...)', 'MISSING: lavish-axi (install: ...)', and
 # 'BOOTSTRAP_INFO: ...' lines, so those contracts are pinned verbatim. The cases
-# are table-driven over the inputs that
-# vary: whether `treehouse get --help` advertises --lease, which gh-axi version
-# and api --jq capability is on PATH, which (if any) tasks-axi version is on
-# PATH, whether tasks-axi update advertises --archive-body, whether its mv help
-# advertises multi-ID moves, whether quota-axi is on PATH,
-# whether the local backend config opts out of tasks-axi backlog mutations, and
-# which no-mistakes version is on PATH.
+# are table-driven over the inputs that vary: whether `treehouse get --help`
+# advertises --lease, which (if any) tasks-axi version is on PATH, whether
+# tasks-axi update advertises --archive-body, whether its mv help advertises
+# multi-ID moves, whether quota-axi is on PATH,
+# whether the local backend config opts out of tasks-axi backlog mutations,
+# which no-mistakes version is on PATH, which gh-axi version is on PATH, and
+# which lavish-axi version is on PATH.
 # Dedicated fleet-sync cases pin the computed bootstrap timeout, explicit
 # override, blank-env defaulting, partial-output relay, and pre-launch timeout
 # scan.
@@ -40,7 +40,17 @@ unset TMUX TMUX_PANE HERDR_ENV HERDR_PANE_ID HERDR_SESSION HERDR_SOCKET_PATH \
 make_fake_toolchain() {
   local dir=$1 fakebin
   fakebin=$(fm_fakebin "$dir")
-  fm_fake_exit0 "$fakebin" tmux node jq gh-axi chrome-devtools-axi lavish-axi
+  fm_fake_exit0 "$fakebin" tmux node chrome-devtools-axi
+  fm_fake_version_tool "$fakebin" lavish-axi FM_FAKE_LAVISH_AXI_VERSION 0.1.45
+  cat > "$fakebin/gh-axi" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --version ]; then
+  printf '%s\n' "${FM_FAKE_GH_AXI_VERSION:-0.1.29}"
+  exit 0
+fi
+exit 0
+SH
+  chmod +x "$fakebin/gh-axi"
   cat > "$fakebin/gh" <<'SH'
 #!/usr/bin/env bash
 if [ "${1:-}" = auth ] && [ "${2:-}" = status ]; then
@@ -71,7 +81,7 @@ fi
 exit 0
 SH
   chmod +x "$fakebin/no-mistakes"
-  add_tasks_axi "$fakebin" "0.1.1"
+  add_tasks_axi "$fakebin" "0.2.4"
   add_quota_axi "$fakebin"
   printf '%s\n' "$fakebin"
 }
@@ -81,7 +91,7 @@ add_quota_axi() {
   cat > "$fakebin/quota-axi" <<'SH'
 #!/usr/bin/env bash
 if [ "${1:-}" = --version ]; then
-  printf '%s\n' "${FM_FAKE_QUOTA_AXI_VERSION:-0.1.16}"
+  printf '%s\n' "${FM_FAKE_QUOTA_AXI_VERSION:-0.1.17}"
   exit 0
 fi
 exit 0
@@ -283,16 +293,16 @@ test_bootstrap_reporting() {
         ;;
     esac
   done <<'ROWS'
-treehouse --lease support is accepted silently^1^0.1.1^1^manual^empty^^
-treehouse without --lease reports an upgrade, gh auth is fine^0^0.1.1^1^-^grep^MISSING: treehouse (install: curl -fsSL https://kunchenguid.github.io/treehouse/install.sh | sh)^NEEDS_GH_AUTH
-compatible tasks-axi is silent by default^1^0.1.1^1^-^empty^^
+treehouse --lease support is accepted silently^1^0.2.4^1^manual^empty^^
+treehouse without --lease reports an upgrade, gh auth is fine^0^0.2.4^1^-^grep^MISSING: treehouse (install: curl -fsSL https://kunchenguid.github.io/treehouse/install.sh | sh)^NEEDS_GH_AUTH
+compatible tasks-axi is silent by default^1^0.2.4^1^-^empty^^
 missing tasks-axi is required by default^1^-^1^-^exact^MISSING: tasks-axi (install: npm install -g tasks-axi)^
 incompatible tasks-axi is required by default^1^0.1.0^1^-^exact^MISSING: tasks-axi (install: npm install -g tasks-axi)^
-tasks-axi without archive-body is required by default^1^0.1.2:noarchive^1^-^exact^MISSING: tasks-axi (install: npm install -g tasks-axi)^
-tasks-axi without multi-id mv is required by default^1^0.2.2:nomulti^1^-^exact^MISSING: tasks-axi (install: npm install -g tasks-axi)^
-missing quota-axi is required by default^1^0.1.1^0^manual^exact^MISSING: quota-axi (install: npm install -g quota-axi)^
+tasks-axi without archive-body is required by default^1^0.2.4:noarchive^1^-^exact^MISSING: tasks-axi (install: npm install -g tasks-axi)^
+tasks-axi without multi-id mv is required by default^1^0.2.4:nomulti^1^-^exact^MISSING: tasks-axi (install: npm install -g tasks-axi)^
+missing quota-axi is required by default^1^0.2.4^0^manual^exact^MISSING: quota-axi (install: npm install -g quota-axi)^
 manual backlog backend still requires missing tasks-axi^1^-^1^manual^exact^MISSING: tasks-axi (install: npm install -g tasks-axi)^
-manual backlog backend suppresses tasks-axi availability^1^0.1.1^1^manual^empty^^
+manual backlog backend suppresses tasks-axi availability^1^0.2.4^1^manual^empty^^
 ROWS
   pass "bootstrap reports treehouse lease + tasks-axi/quota-axi bootstrap contracts"
 }
@@ -309,7 +319,6 @@ test_no_mistakes_min_version() {
     mkdir -p "$case_dir/home/config"
     printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
     fakebin=$(make_fake_toolchain "$case_dir")
-    add_tasks_axi "$fakebin" "0.1.1"
     out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
       FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_FAKE_NO_MISTAKES_VERSION="$version" "$ROOT/bin/fm-bootstrap.sh")
     case "$mode" in
@@ -328,44 +337,118 @@ ROWS
   pass "bootstrap enforces no-mistakes minimum version"
 }
 
-test_gh_axi_min_version_and_api_jq() {
-  local label version api_jq mode case_dir fakebin out missing npm_log n
+test_gh_axi_min_version() {
+  local label version mode case_dir fakebin out missing n
   missing='MISSING: gh-axi (install: npm install -g gh-axi && gh-axi setup hooks)'
   n=0
-  while IFS='^' read -r label version api_jq mode; do
+  while IFS='^' read -r label version mode; do
     [ -n "$label" ] || continue
     n=$((n + 1))
     case_dir="$TMP_ROOT/gh-axi-$n"
     mkdir -p "$case_dir/home/config"
     printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
     fakebin=$(make_fake_toolchain "$case_dir")
-    npm_log="$case_dir/npm-called"
-    cat > "$fakebin/npm" <<'SH'
-#!/usr/bin/env bash
-: > "${FM_FAKE_NPM_LOG:?}"
-SH
-    chmod +x "$fakebin/npm"
     out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
-      FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_FAKE_GH_AXI_VERSION="$version" \
-      FM_FAKE_GH_AXI_API_JQ="$api_jq" FM_FAKE_NPM_LOG="$npm_log" "$ROOT/bin/fm-bootstrap.sh")
+      FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_FAKE_GH_AXI_VERSION="$version" "$ROOT/bin/fm-bootstrap.sh")
     case "$mode" in
       empty)
         [ -z "$out" ] || fail "$label: expected silence, got: $out" ;;
       missing)
         [ "$out" = "$missing" ] || fail "$label: expected '$missing', got: $out" ;;
     esac
-    [ ! -e "$npm_log" ] || fail "$label: bootstrap updated gh-axi without approval"
   done <<'ROWS'
-minimum gh-axi version with api jq is accepted^gh-axi 0.1.28^1^empty
-newer gh-axi version with api jq is accepted^gh-axi 0.2.0^1^empty
-older gh-axi reports an update even if api jq is advertised^gh-axi 0.1.27^1^missing
-minimum gh-axi without api jq reports an update^gh-axi 0.1.28^0^missing
-unparseable gh-axi version reports an update^gh-axi development build^1^missing
+minimum gh-axi version is accepted^0.1.29^empty
+newer gh-axi patch is accepted^0.1.30^empty
+newer gh-axi minor is accepted^0.2.0^empty
+newer gh-axi major is accepted^1.0.0^empty
+older gh-axi patch reports an upgrade^0.1.19^missing
+much older gh-axi minor reports an upgrade^0.0.9^missing
+unparseable gh-axi version reports an upgrade^gh-axi development build^missing
 ROWS
-  pass "bootstrap enforces gh-axi version and api jq support without auto-updating"
+  pass "bootstrap enforces gh-axi minimum version"
 }
 
-# 0.1.16 is the first quota-axi build with the evidence needed by dispatch.
+test_lavish_axi_min_version() {
+  local label version mode case_dir fakebin out missing n
+  missing='MISSING: lavish-axi (install: npm install -g lavish-axi && lavish-axi setup hooks)'
+  n=0
+  while IFS='^' read -r label version mode; do
+    [ -n "$label" ] || continue
+    n=$((n + 1))
+    case_dir="$TMP_ROOT/lavish-axi-$n"
+    mkdir -p "$case_dir/home/config"
+    printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+    fakebin=$(make_fake_toolchain "$case_dir")
+    out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+      FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_FAKE_LAVISH_AXI_VERSION="$version" "$ROOT/bin/fm-bootstrap.sh")
+    case "$mode" in
+      empty)
+        [ -z "$out" ] || fail "$label: expected silence, got: $out" ;;
+      missing)
+        [ "$out" = "$missing" ] || fail "$label: expected '$missing', got: $out" ;;
+    esac
+  done <<'ROWS'
+minimum lavish-axi version is accepted^0.1.45^empty
+newer lavish-axi patch is accepted^0.1.46^empty
+newer lavish-axi minor is accepted^0.2.0^empty
+newer lavish-axi major is accepted^1.0.0^empty
+the patch just below the floor reports an upgrade^0.1.44^missing
+much older lavish-axi minor reports an upgrade^0.0.9^missing
+unparseable lavish-axi version reports an upgrade^lavish-axi development build^missing
+ROWS
+  pass "bootstrap enforces lavish-axi minimum version"
+}
+
+test_tasks_axi_min_version() {
+  local label version mode case_dir fakebin out missing n archive_body multi_id
+  missing='MISSING: tasks-axi (install: npm install -g tasks-axi)'
+  n=0
+  while IFS='^' read -r label version mode; do
+    [ -n "$label" ] || continue
+    n=$((n + 1))
+    case_dir="$TMP_ROOT/tasks-axi-$n"
+    mkdir -p "$case_dir/home/config"
+    printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+    fakebin=$(make_fake_toolchain "$case_dir")
+    archive_body=yes
+    multi_id=yes
+    case "$version" in
+      *:noarchive)
+        archive_body=no
+        version=${version%:noarchive}
+        ;;
+    esac
+    case "$version" in
+      *:nomulti)
+        multi_id=no
+        version=${version%:nomulti}
+        ;;
+    esac
+    add_tasks_axi "$fakebin" "$version" "$archive_body" "$multi_id"
+    out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+      FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+    case "$mode" in
+      empty)
+        [ -z "$out" ] || fail "$label: expected silence, got: $out" ;;
+      missing)
+        [ "$out" = "$missing" ] || fail "$label: expected '$missing', got: $out" ;;
+    esac
+  done <<'ROWS'
+minimum tasks-axi version is accepted^0.2.4^empty
+newer tasks-axi patch is accepted^0.2.5^empty
+newer tasks-axi minor is accepted^0.3.0^empty
+newer tasks-axi major is accepted^1.0.0^empty
+older tasks-axi with features reports an upgrade^0.1.1^missing
+the patch just below the floor reports an upgrade^0.2.3^missing
+unparseable tasks-axi version reports an upgrade^tasks-axi development build^missing
+tasks-axi at floor without archive-body reports an upgrade^0.2.4:noarchive^missing
+tasks-axi at floor without multi-id reports an upgrade^0.2.4:nomulti^missing
+ROWS
+  pass "bootstrap enforces tasks-axi minimum version"
+}
+
+# These rows exercise the real bootstrap check with a fake quota-axi answering
+# --version: below the floor produces MISSING, while at or above is silent.
 test_quota_axi_min_version() {
   local label version mode case_dir fakebin out missing n
   missing='MISSING: quota-axi (install: npm install -g quota-axi)'
@@ -377,7 +460,6 @@ test_quota_axi_min_version() {
     mkdir -p "$case_dir/home/config"
     printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
     fakebin=$(make_fake_toolchain "$case_dir")
-    add_tasks_axi "$fakebin" "0.1.1"
     out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
       FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_FAKE_QUOTA_AXI_VERSION="$version" "$ROOT/bin/fm-bootstrap.sh")
     case "$mode" in
@@ -387,11 +469,11 @@ test_quota_axi_min_version() {
         [ "$out" = "$missing" ] || fail "$label: expected '$missing', got: $out" ;;
     esac
   done <<'ROWS'
-minimum quota-axi version is accepted^0.1.16^empty
-newer quota-axi patch is accepted^0.1.17^empty
+minimum quota-axi version is accepted^0.1.17^empty
+newer quota-axi patch is accepted^0.1.18^empty
 newer quota-axi minor is accepted^0.2.0^empty
 newer quota-axi major is accepted^1.0.0^empty
-older quota-axi patch reports an upgrade^0.1.15^missing
+the patch just below the floor reports an upgrade^0.1.16^missing
 much older quota-axi minor reports an upgrade^0.0.9^missing
 unparseable quota-axi version reports an upgrade^quota-axi development build^missing
 ROWS
@@ -447,8 +529,8 @@ test_orca_backend_gates_orca_tool_only_when_selected() {
   pass "bootstrap: backend=orca gates the Orca CLI without requiring it on the default backend"
 }
 
-# Build a fake universal toolchain with tmux REMOVED and the named backend
-# session CLI(s), so a backend that must NOT require tmux can be proven silent
+# Build a fake toolchain with tmux REMOVED and the named backend session CLI(s)
+# plus jq added, so a backend that must NOT require tmux can be proven silent
 # with tmux absent. Echoes the fakebin dir. The removed tmux is what makes these
 # cases catch the old "everything but orca demands tmux" bug: with the buggy
 # TOOLS list a herdr/zellij/cmux home would report MISSING: tmux here.
@@ -457,15 +539,15 @@ make_fake_toolchain_no_tmux() {  # <case-dir> <extra-cli...>
   shift
   fakebin=$(make_fake_toolchain "$dir")
   rm -f "$fakebin/tmux"
-  fm_fake_exit0 "$fakebin" "$@"
+  fm_fake_exit0 "$fakebin" jq "$@"
   printf '%s\n' "$fakebin"
 }
 
 test_session_provider_backends_do_not_require_tmux() {
   local backend cli case_dir fakebin out
-  # herdr/zellij/cmux are session providers only: beyond the universal toolchain
-  # they require their own CLI and treehouse, never tmux. With all genuine deps
-  # present and tmux absent, bootstrap must be silent.
+  # herdr/zellij/cmux are session providers only: they require their own CLI, jq,
+  # and treehouse, never tmux. With all genuine deps present and tmux absent,
+  # bootstrap must be silent.
   while IFS='^' read -r backend cli; do
     [ -n "$backend" ] || continue
     case_dir="$TMP_ROOT/$backend-no-tmux"
@@ -481,7 +563,7 @@ herdr^herdr
 zellij^zellij
 cmux^cmux
 ROWS
-  pass "bootstrap: session-provider backends require their own CLI plus treehouse, never tmux"
+  pass "bootstrap: session-provider backends require their own CLI + jq + treehouse, never tmux"
 }
 
 test_session_provider_backends_gate_own_cli_not_tmux() {
@@ -494,8 +576,7 @@ test_session_provider_backends_gate_own_cli_not_tmux() {
     mkdir -p "$case_dir/home/config"
     printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
     printf '%s\n' "$backend" > "$case_dir/home/config/backend"
-    # The universal toolchain and treehouse are present, but the session CLI and
-    # tmux are absent.
+    # Toolchain has jq + treehouse but NOT the session CLI and NOT tmux.
     fakebin=$(make_fake_toolchain_no_tmux "$case_dir")
     out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
       FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
@@ -558,23 +639,22 @@ test_unknown_backend_reports_invalid_configuration() {
   pass "bootstrap: unknown resolved backends fail closed with an actionable diagnostic"
 }
 
-test_all_backends_require_universal_jq() {
-  local backend cli case_dir fakebin bash_env out count
+test_json_backends_require_jq_not_tmux() {
+  local backend case_dir fakebin bash_env out
+  # herdr/zellij/cmux parse their backend's JSON output, so jq is a genuine dep.
   # jq lives in a system BASE_PATH dir on many hosts, so force it missing with a
-  # command()/jq() override (the same technique the git-required case uses) to
-  # keep the assertion host-independent.
-  while IFS='^' read -r backend cli; do
+  # command()/jq() override (the same technique the git-required case uses) to keep
+  # the assertion host-independent.
+  while IFS='^' read -r backend; do
     [ -n "$backend" ] || continue
     case_dir="$TMP_ROOT/$backend-missing-jq"
     mkdir -p "$case_dir/home/config"
     printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
     printf '%s\n' "$backend" > "$case_dir/home/config/backend"
-    printf '%s\n' '{"default":[{"harness":"codex"}]}' > "$case_dir/home/config/crew-dispatch.json"
+    # Session CLI present, tmux absent, jq deliberately NOT stubbed and masked below.
     fakebin=$(make_fake_toolchain "$case_dir")
-    if [ "$backend" != tmux ]; then
-      rm -f "$fakebin/tmux"
-      fm_fake_exit0 "$fakebin" "$cli"
-    fi
+    rm -f "$fakebin/tmux"
+    fm_fake_exit0 "$fakebin" "$backend"
     bash_env="$case_dir/no-jq.bash"
     cat > "$bash_env" <<'SH'
 command() {
@@ -589,19 +669,14 @@ jq() {
 SH
     out=$(PATH="$fakebin:$BASE_PATH" BASH_ENV="$bash_env" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
       FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
-    assert_contains "$out" "MISSING: jq (install: brew install jq  # or the platform's package manager)" \
-      "backend=$backend must fail closed on the universal jq dependency"
-    count=$(printf '%s\n' "$out" | awk '/^MISSING: jq / { n++ } END { print n + 0 }')
-    [ "$count" -eq 1 ] || fail "backend=$backend should report missing universal jq once, got: $out"
+    assert_contains "$out" "MISSING: jq" "backend=$backend must fail closed on missing jq"
     assert_not_contains "$out" "MISSING: tmux" "backend=$backend must not demand tmux when jq is missing"
   done <<'ROWS'
-tmux^tmux
-herdr^herdr
-zellij^zellij
-orca^orca
-cmux^cmux
+herdr
+zellij
+cmux
 ROWS
-  pass "bootstrap: every backend requires universal jq exactly once"
+  pass "bootstrap: JSON-emitting backends require jq (their genuine dep), never tmux"
 }
 
 test_treehouse_lease_check_follows_resolved_backend() {
@@ -853,6 +928,8 @@ unsupported grok max effort is flagged^{"rules":[{"when":"deep current work","us
 unsupported grok xhigh effort is flagged^{"rules":[{"when":"deep current work","use":{"harness":"grok","model":"grok-4","effort":"xhigh"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: grok:xhigh
 pi max effort is accepted^{"rules":[{"when":"deep coding","use":{"harness":"pi","model":"openai-codex/gpt-5.6-sol","effort":"max"}}]}^empty^
 pi-signed max effort is accepted^{"rules":[{"when":"signed coding","use":{"harness":"pi-signed","model":"openai-codex/gpt-5.6-sol","effort":"max"}}]}^empty^
+muse shared efforts are accepted^{"rules":[{"when":"muse low","use":{"harness":"muse","effort":"low"}},{"when":"muse medium","use":{"harness":"muse","effort":"medium"}},{"when":"muse high","use":{"harness":"muse","effort":"high"}},{"when":"muse xhigh","use":{"harness":"muse","effort":"xhigh"}},{"when":"muse max","use":{"harness":"muse","effort":"max"}}]}^empty^
+unsupported muse ultra effort is flagged^{"rules":[{"when":"muse ultra","use":{"harness":"muse","effort":"ultra"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: muse:ultra
 unsupported opencode effort is flagged^{"rules":[{"when":"opencode work","use":{"harness":"opencode","model":"anthropic/claude-sonnet-4-5","effort":"high"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: opencode:high
 kimi model profile is accepted^{"rules":[{"when":"kimi work","use":{"harness":"kimi","model":"kimi-code/k3"}}]}^empty^
 unsupported kimi effort is flagged^{"rules":[{"when":"kimi work","use":{"harness":"kimi","model":"kimi-code/k3","effort":"high"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: kimi:high
@@ -876,7 +953,9 @@ ROWS
 
 test_bootstrap_reporting
 test_no_mistakes_min_version
-test_gh_axi_min_version_and_api_jq
+test_gh_axi_min_version
+test_lavish_axi_min_version
+test_tasks_axi_min_version
 test_quota_axi_min_version
 test_git_is_required_with_supported_install_instruction
 test_orca_backend_gates_orca_tool_only_when_selected
@@ -885,7 +964,7 @@ test_session_provider_backends_gate_own_cli_not_tmux
 test_herdr_install_requires_manual_action
 test_cmux_bundled_cli_satisfies_dependency
 test_unknown_backend_reports_invalid_configuration
-test_all_backends_require_universal_jq
+test_json_backends_require_jq_not_tmux
 test_treehouse_lease_check_follows_resolved_backend
 test_fleet_sync_timeout_scales_with_origin_backed_project_count
 test_fleet_sync_timeout_floor_preserves_small_fleets

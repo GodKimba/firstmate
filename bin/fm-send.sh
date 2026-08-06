@@ -112,6 +112,32 @@ fm_send_id_from_meta() {  # <meta-file>
   printf '%s' "${base%.meta}"
 }
 
+# fm_send_clear_after_interrupt: muse RESTORES the interrupted prompt back into
+# the composer when Escape cancels a turn, as real bright text (verified: fg
+# 38;2;204;211;219, luminance ~210, muse 0.1.0-R708.1), not de-emphasised ghost
+# text. Classifying that as pending input is correct - the text really is
+# unsubmitted - but leaving it there means the NEXT steer types onto the end of
+# it and submits both as one garbled message. Ctrl-U clears the composer
+# (verified), so the interrupt is not complete until it has been sent. A failed
+# clear is loud rather than silent, because the alternative is a corrupted steer.
+fm_send_clear_after_interrupt() {  # <key>
+  local key=$1
+  [ "$key" = Escape ] || return 0
+  case "$TARGET_HARNESS" in muse*) : ;; *) return 0 ;; esac
+  [ "$TARGET_BACKEND" != remote ] || return 0
+  if ! fm_backend_send_key "$TARGET_BACKEND" "$T" C-u "$EXPECTED_LABEL"; then
+    echo "error: Escape reached $T, but the muse composer could not be cleared; it still holds the restored prompt. Clear it before sending the next message." >&2
+    return 1
+  fi
+}
+
+fm_send_normalize_key() {  # <key>
+  case "$1" in
+    Escape|escape|Esc|esc) printf '%s' Escape ;;
+    *) printf '%s' "$1" ;;
+  esac
+}
+
 fm_send_record_interrupt() {  # <key>
   local key=$1 id gen
   [ "$key" = Escape ] || return 0
@@ -159,10 +185,23 @@ fm_send_resolve_target() {  # <raw-target>
   EXPECTED_LABEL=""
   TARGET_META=""
   TARGET_SELECTOR=""
+  TARGET_REMOTE_ID=""
   RESOLUTION_TRIED=""
 
   meta=$(fm_backend_meta_for_selector "$raw" "$STATE" 2>/dev/null || true)
   if [ -n "$meta" ]; then
+    if [ -n "$(fm_meta_get "$meta" remote_host)" ]; then
+      id=$(fm_send_id_from_meta "$meta")
+      RESOLVED_TARGET="remote:$id"
+      TARGET_BACKEND=remote
+      TARGET_META=$meta
+      TARGET_HARNESS=$(fm_meta_get "$meta" harness)
+      EXPECTED_LABEL="fm-$id"
+      TARGET_SELECTOR=1
+      TARGET_REMOTE_ID=$id
+      RESOLUTION_TRIED="meta=$meta; placement=remote"
+      return 0
+    fi
     RESOLUTION_TRIED="meta=$meta; backend=from-meta"
     target=$(fm_backend_target_of_meta "$meta")
     if [ -z "$target" ]; then
@@ -180,6 +219,11 @@ fm_send_resolve_target() {  # <raw-target>
   fi
 
   case "$raw" in
+    fm-*:*)
+      # A named Herdr session may itself begin with "fm-". Keep that explicit
+      # session:pane target on the validated backend-target path below rather
+      # than mistaking it for an unresolved task selector.
+      ;;
     fm-*)
       RESOLUTION_TRIED="meta=$STATE/$raw.meta; legacy-meta=$STATE/${raw#fm-}.meta; backend=none"
       echo "error: no metadata for $raw in $STATE (tried $RESOLUTION_TRIED); pass a well-formed explicit backend target only when targeting outside this firstmate home" >&2
@@ -239,7 +283,9 @@ fm_send_resolve_target "$RAW_TARGET" || exit 1
 T=$RESOLVED_TARGET
 shift
 
-fm_backend_validate "$TARGET_BACKEND" || exit 1
+if [ "$TARGET_BACKEND" != remote ]; then
+  fm_backend_validate "$TARGET_BACKEND" || exit 1
+fi
 
 # Classify a from-firstmate -> secondmate request. Only a task selector resolved
 # through this home's meta whose authoritative kind is secondmate is marked: the
@@ -469,11 +515,19 @@ if [ "${1:-}" = "--recover-claude-vim" ]; then
   [ "$#" -eq 1 ] || { echo "error: --recover-claude-vim accepts no text; it preserves any existing composer bytes" >&2; exit 1; }
   fm_send_recover_claude_vim || exit 1
 elif [ "${1:-}" = "--key" ]; then
-  if ! fm_backend_send_key "$TARGET_BACKEND" "$T" "$2" "$EXPECTED_LABEL"; then
-    echo "error: key '$2' not sent to $T ($TARGET_BACKEND send failed; tried $RESOLUTION_TRIED)" >&2
+  key=$2
+  semantic_key=$(fm_send_normalize_key "$key")
+  if [ "$TARGET_BACKEND" = remote ]; then
+    if ! "$SCRIPT_DIR/fm-on.sh" "$TARGET_REMOTE_ID" fm-remote-secondmate-control.sh key "$TARGET_REMOTE_ID" "$key" < /dev/null; then
+      echo "error: key '$key' not sent to remote secondmate $TARGET_REMOTE_ID; completion may be unknown" >&2
+      exit 1
+    fi
+  elif ! fm_backend_send_key "$TARGET_BACKEND" "$T" "$key" "$EXPECTED_LABEL"; then
+    echo "error: key '$key' not sent to $T ($TARGET_BACKEND send failed; tried $RESOLUTION_TRIED)" >&2
     exit 1
   fi
-  fm_send_record_interrupt "$2" || exit 1
+  fm_send_clear_after_interrupt "$semantic_key" || exit 1
+  fm_send_record_interrupt "$semantic_key" || exit 1
 else
   MESSAGE=$*
   if [ "${1:-}" = "--decision" ]; then
@@ -573,7 +627,25 @@ EOF
   sleep_s=${FM_SEND_SLEEP:-0.4}
   # Type once, submit, verify. Only exact empty confirms delivery; every other
   # verdict preserves the loud refusal boundary.
-  if ! verdict=$(fm_backend_send_text_submit "$TARGET_BACKEND" "$T" "$MESSAGE" "$retries" "$sleep_s" "$settle" "$EXPECTED_LABEL"); then
+  send_rc=0
+  if [ "$TARGET_BACKEND" = remote ]; then
+    if "$SCRIPT_DIR/fm-on.sh" "$TARGET_REMOTE_ID" fm-remote-secondmate-control.sh send "$TARGET_REMOTE_ID" "$MESSAGE" < /dev/null >/dev/null; then
+      verdict=empty
+    else
+      send_rc=$?
+      verdict=send-failed
+    fi
+  elif verdict=$(fm_backend_send_text_submit "$TARGET_BACKEND" "$T" "$MESSAGE" "$retries" "$sleep_s" "$settle" "$EXPECTED_LABEL"); then
+    :
+  else
+    send_rc=$?
+  fi
+  if [ "$send_rc" -ne 0 ]; then
+    if [ "$TARGET_BACKEND" = remote ] && [ "$send_rc" -eq 255 ] && [ -n "$PENDING_REPLY_CORR" ]; then
+      fm_pending_reply_mark_delivery_unknown "$STATE" "$PENDING_REPLY_CORR" || true
+      echo "error: text delivery to remote secondmate $TARGET_REMOTE_ID is unknown; do not resend - same-host reconciliation is required" >&2
+      exit 1
+    fi
     if [ "$PENDING_REPLY_CREATED" = 1 ] && [ -n "$PENDING_REPLY_CORR" ]; then
       fm_pending_reply_discard_undelivered "$STATE" "$PENDING_REPLY_CORR" || true
     fi
