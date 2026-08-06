@@ -77,6 +77,14 @@ FM_PAUSE_RESURFACE_SECS_DEFAULT=3600
 FM_CLASSIFY_RESOLVE_VERB_DEFAULT='resolved'
 FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT='captain-held'
 
+# The one-time stream marker that makes the answer-correlation rule
+# forward-compatible: openings recorded BEFORE it keep legacy plain keyed
+# closure, every opening after it requires a correlated token. Its stream id is
+# also the identity every occurrence instance is derived from.
+FM_CLASSIFY_DECISION_CUTOVER_MARK_PREFIX_DEFAULT='[fm-decision-answer-cutover:v1 stream='
+# The verb firstmate uses to carry an authorized answer back to a worker.
+FM_CLASSIFY_DECISION_VERB_DEFAULT='decision'
+
 # Return the last non-blank line of a status file (empty if missing/blank).
 last_status_line() {
   local f=$1
@@ -166,6 +174,10 @@ status_is_paused_or_captain_held() {  # <status-line>
 status_line_verb() {  # <status-line> -> leading verb word
   local v=${1%%:*}
   v=${v%%\[key=*}
+  # A malformed answer token with no preceding key token must not be read as
+  # part of the verb, or the line would classify as an unknown verb instead of
+  # an uncorrelated resolution the fold can refuse.
+  v=${v%%\[ans=*}
   v=${v#"${v%%[![:space:]]*}"}
   v=${v%"${v##*[![:space:]]}"}
   printf '%s' "$v"
@@ -190,7 +202,344 @@ _fm_decision_key() {  # <status-line> -> key slug, or "default" when no token
     *) printf 'default' ;;
   esac
 }
-# Drop the record for <key> from a newline-terminated "<key>\t<verb>\t<note>" set.
+# Print the answer token of a status line, or nothing when it carries none.
+# The token sits after the key token, so a line that carries "[ans=...]" without a
+# preceding "[key=...]" is malformed and prints nothing rather than correlating.
+_fm_decision_answer() {  # <status-line> -> answer token, or empty
+  local prefix=${1%%:*} a
+  case "$prefix" in
+    *\[key=*\]*\[ans=*\]*) : ;;
+    *) return 0 ;;
+  esac
+  a=${prefix#*\[ans=}
+  a=${a%%\]*}
+  case "$a" in
+    ''|*[!A-Za-z0-9]*) return 0 ;;
+    *) printf '%s' "$a" ;;
+  esac
+}
+
+# Format one opening-event position as the fixed-width identifier carried by
+# every answer token for that occurrence. Token-era streams bind it to their
+# self-described stream identity; legacy streams retain the historical position.
+fm_decision_hash_text() {
+  if command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 2>/dev/null | awk '{print $1}'
+  elif command -v sha256sum >/dev/null 2>&1; then
+    sha256sum 2>/dev/null | awk '{print $1}'
+  elif command -v openssl >/dev/null 2>&1; then
+    openssl dgst -sha256 2>/dev/null | awk '{print $NF}'
+  else
+    return 1
+  fi
+}
+
+fm_decision_instance_id() {  # <physical-line-number> [stream-id] -> 16 hex chars
+  local position=$1 stream=${2:-} raw
+  case "$position" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  [ "$position" -gt 0 ] 2>/dev/null || return 1
+  if [ -n "$stream" ]; then
+    [ "${#stream}" -eq 32 ] || return 1
+    case "$stream" in *[!a-f0-9]*) return 1 ;; esac
+    raw=$(printf '%s:%s' "$stream" "$position" | fm_decision_hash_text) || return 1
+    raw=$(printf '%s' "$raw" | cut -c1-16)
+    [ "${#raw}" -eq 16 ] || return 1
+    printf '%s' "$raw"
+    return 0
+  fi
+  printf '%016x' "$position"
+}
+
+# Print the answer-record file that pairs with a status file. fm-send writes one
+# record per minted token; the fold reads it to decide whether a resolution was
+# correlated. Kept beside the status stream so one task's records travel, and are
+# torn down, with that task's other per-task state.
+fm_decision_answers_file() {  # <status-file> -> answer-record file
+  printf '%s' "${1%.status}.decision-answers"
+}
+
+# 0 when <token> was minted for exactly this opening occurrence. A record line is
+# "<token>\t<key>\t<instance>"; the token embeds the same instance identifier,
+# and all three fields must match.
+fm_decision_answer_matches() {  # <answers-file> <token> <key> <instance>
+  local f=$1 token=$2 key=$3 instance=$4 rt rk ri
+  [ "${#instance}" -eq 16 ] || return 1
+  [ "${#token}" -eq 32 ] || return 1
+  case "$instance$token" in
+    *[!a-f0-9]*) return 1 ;;
+  esac
+  [ "${token:0:16}" = "$instance" ] || return 1
+  [ -f "$f" ] || return 1
+  while IFS=$'\t' read -r rt rk ri || [ -n "$rt" ]; do
+    [ "$rt" = "$token" ] || continue
+    [ "$rk" = "$key" ] || continue
+    [ "$ri" = "$instance" ] || continue
+    return 0
+  done < "$f"
+  return 1
+}
+
+# Mint one answer token: the fixed-width opening instance followed by 16 random
+# lowercase hex characters from the best source this host has.
+fm_decision_mint_answer_token() {  # <instance>
+  local instance=${1:-} raw=''
+  [ "${#instance}" -eq 16 ] || return 1
+  case "$instance" in
+    *[!a-f0-9]*) return 1 ;;
+  esac
+  raw=$(openssl rand -hex 8 2>/dev/null || true)
+  case "$raw" in
+    [a-f0-9][a-f0-9][a-f0-9][a-f0-9][a-f0-9][a-f0-9][a-f0-9][a-f0-9]*) : ;;
+    *)
+      raw=$(printf '%s' "$$-$(date +%s 2>/dev/null)-$RANDOM$RANDOM$RANDOM" \
+        | shasum -a 256 2>/dev/null | awk '{print $1}')
+      ;;
+  esac
+  raw=$(printf '%s' "$raw" | tr 'A-F' 'a-f' | tr -cd 'a-f0-9' | cut -c1-16)
+  [ "${#raw}" -eq 16 ] || return 1
+  printf '%s%s' "$instance" "$raw"
+}
+
+# Record a minted token against the open request it answers, then print it.
+# Called only after the caller has confirmed that request is open, which is what
+# makes an answer necessarily later than its request.
+fm_decision_record_answer() {  # <answers-file> <token> <key> <instance>
+  local f=$1 token=$2 key=$3 instance=$4 dir
+  [ "${#instance}" -eq 16 ] || return 1
+  [ "${#token}" -eq 32 ] || return 1
+  case "$instance$token" in
+    *[!a-f0-9]*) return 1 ;;
+  esac
+  [ "${token:0:16}" = "$instance" ] || return 1
+  dir=$(dirname "$f")
+  [ -d "$dir" ] || return 1
+  printf '%s\t%s\t%s\n' "$token" "$key" "$instance" >> "$f" \
+    || return 1
+  printf '%s' "$token"
+}
+
+# Revoke a minted token whose answer was NOT confirmed delivered, so a failed or
+# unconfirmed decision send leaves no standing authority behind. Without this, a
+# resend after an unconfirmed send mints a SECOND valid token for the same
+# request instance, and both remain able to close it - a retry would mint
+# duplicate authority (task fm-herdr-send-busy-duplicate, required work 4).
+#
+# Revoking is the safe direction even when the send may in fact have landed: an
+# answer that arrives carrying a revoked token simply fails to correlate, so the
+# request stays open and gets surfaced, which is this contract's established
+# preference over silently advancing past it.
+#
+# Rewrites the record file without the matching line. A missing file is success
+# (nothing to revoke). Returns non-zero only when a present file could not be
+# rewritten, which the caller must surface rather than ignore.
+fm_decision_revoke_answer() {  # <answers-file> <token> <key> <instance>
+  local f=$1 token=$2 key=$3 instance=$4 tmp rt rk ri
+  [ -f "$f" ] || return 0
+  tmp="$f.revoke.$$"
+  : > "$tmp" || return 1
+  while IFS=$'\t' read -r rt rk ri || [ -n "$rt" ]; do
+    [ -n "$rt" ] || continue
+    if [ "$rt" = "$token" ] && [ "$rk" = "$key" ] && [ "$ri" = "$instance" ]; then
+      continue
+    fi
+    printf '%s\t%s\t%s\n' "$rt" "$rk" "$ri" >> "$tmp" || { rm -f "$tmp"; return 1; }
+  done < "$f"
+  mv -f "$tmp" "$f" || { rm -f "$tmp"; return 1; }
+}
+
+# Print the message shape that carries an authorized answer to a worker. The
+# worker copies the same key and token onto its closing resolved line.
+fm_decision_answer_message() {  # <key> <token> <text>
+  printf '%s [key=%s] [ans=%s]: %s' \
+    "${FM_CLASSIFY_DECISION_VERB:-$FM_CLASSIFY_DECISION_VERB_DEFAULT}" "$1" "$2" "$3"
+}
+
+fm_decision_marker_line_id() {  # <marker-line>
+  local line=$1 prefix id
+  prefix=$FM_CLASSIFY_DECISION_CUTOVER_MARK_PREFIX_DEFAULT
+  case "$line" in "$prefix"*\]) ;; *) return 1 ;; esac
+  id=${line#"$prefix"}
+  id=${id%\]}
+  [ "${#id}" -eq 32 ] || return 1
+  case "$id" in *[!a-f0-9]*) return 1 ;; esac
+  printf '%s' "$id"
+}
+
+_fm_decision_stream_id_stream() {
+  local line id stream='' count=0
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      "$FM_CLASSIFY_DECISION_CUTOVER_MARK_PREFIX_DEFAULT"*) ;;
+      *) continue ;;
+    esac
+    id=$(fm_decision_marker_line_id "$line") || return 2
+    count=$((count + 1))
+    [ "$count" -eq 1 ] || return 2
+    stream=$id
+  done
+  [ "$count" -eq 1 ] || return 1
+  printf '%s' "$stream"
+}
+
+fm_decision_stream_id() {  # <status-file>
+  local f=$1
+  [ -f "$f" ] && [ ! -L "$f" ] || return 1
+  _fm_decision_stream_id_stream < "$f"
+}
+
+fm_decision_status_marker() {
+  local raw
+  raw=$(openssl rand -hex 16 2>/dev/null || true)
+  case "$raw" in
+    [a-f0-9][a-f0-9][a-f0-9][a-f0-9]*) ;;
+    *)
+      raw=$(printf '%s' "${BASHPID:-$$}-$(date +%s 2>/dev/null)-$RANDOM$RANDOM$RANDOM" \
+        | fm_decision_hash_text)
+      ;;
+  esac
+  raw=$(printf '%s' "$raw" | tr 'A-F' 'a-f' | tr -cd 'a-f0-9' | cut -c1-32)
+  [ "${#raw}" -eq 32 ] || return 1
+  printf '%s%s]\n' "$FM_CLASSIFY_DECISION_CUTOVER_MARK_PREFIX_DEFAULT" "$raw"
+}
+
+fm_decision_cutover_append_status() {  # <status-file> <marker-line> <state-device>
+  local f=$1 marker=$2 state_device=$3 marker_id
+  marker_id=$(fm_decision_marker_line_id "$marker") || return 1
+  # shellcheck disable=SC2016
+  perl -MFcntl=:DEFAULT,:flock,:mode -e '
+    my ($path, $marker, $expected_device, $lib, $bash, $marker_id) = @ARGV;
+    sysopen(my $file, $path, O_RDWR | O_APPEND | O_NOFOLLOW) or do {
+      print "identity-refused\n";
+      exit 0;
+    };
+    flock($file, LOCK_EX) or do {
+      print "identity-refused\n";
+      exit 0;
+    };
+
+    sub identity_ok {
+      my @descriptor = stat($file);
+      my @path = lstat($path);
+      return 0 unless @descriptor && @path;
+      return 0 unless S_ISREG($descriptor[2]) && S_ISREG($path[2]);
+      return 0 unless $descriptor[3] == 1 && $path[3] == 1;
+      return 0 unless "$descriptor[0]" eq "$expected_device";
+      return 0 unless $descriptor[0] == $path[0] && $descriptor[1] == $path[1];
+      return 1;
+    }
+
+    sub classifier {
+      my ($function) = @_;
+      sysseek($file, 0, 0) or die "seek";
+      pipe(my $reader, my $writer) or die "pipe";
+      my $pid = fork();
+      die "fork" unless defined $pid;
+      if ($pid == 0) {
+        close $reader;
+        open(STDIN, "<&", fileno($file)) or exit 125;
+        open(STDOUT, ">&", fileno($writer)) or exit 125;
+        close $writer;
+        exec $bash, "-c", q{. "$1"; "$2"}, "_", $lib, $function;
+        exit 125;
+      }
+      close $writer;
+      local $/;
+      my $output = <$reader>;
+      close $reader;
+      waitpid($pid, 0);
+      return ($? >> 8, defined($output) ? $output : "");
+    }
+
+    identity_ok() or do {
+      print "identity-refused\n";
+      exit 0;
+    };
+
+    for (1 .. 16) {
+      my @before = stat($file);
+      @before or die "stat";
+      my ($marker_status, $stream) = classifier("_fm_decision_stream_id_stream");
+      $stream =~ s/\n+\z//;
+      if ($marker_status == 0) {
+        print "current\t$stream\n";
+        exit 0;
+      }
+      if ($marker_status == 2) {
+        print "ambiguous\n";
+        exit 0;
+      }
+      $marker_status == 1 or die "marker classifier";
+
+      if ($before[7] > 0) {
+        sysseek($file, -1, 2) or die "tail seek";
+        sysread($file, my $last, 1) == 1 or die "tail read";
+        if ($last ne "\n") {
+          print "unterminated\n";
+          exit 0;
+        }
+      }
+
+      my ($decision_status) = classifier("_fm_status_stream_has_open_needs_decision");
+      if ($decision_status == 0) {
+        print "open-decision\n";
+        exit 0;
+      }
+      $decision_status == 1 or die "decision classifier";
+
+      my @after = stat($file);
+      @after or die "stat";
+      next unless $before[7] == $after[7];
+      identity_ok() or do {
+        print "identity-refused\n";
+        exit 0;
+      };
+
+      my $record = "$marker\n";
+      my $written = syswrite($file, $record);
+      unless (defined($written) && $written == length($record)) {
+        print "append-failed\n";
+        exit 1;
+      }
+      my ($confirm_status, $confirmed) = classifier("_fm_decision_stream_id_stream");
+      $confirmed =~ s/\n+\z//;
+      unless ($confirm_status == 0 && $confirmed eq $marker_id) {
+        print "append-unverified\n";
+        exit 1;
+      }
+      print "appended\t$confirmed\n";
+      exit 0;
+    }
+    print "busy\n";
+    exit 0;
+  ' "$f" "$marker" "$state_device" \
+    "$_FM_CLASSIFY_LIB_DIR/fm-classify-lib.sh" "${BASH:-bash}" "$marker_id" 2>/dev/null
+}
+
+fm_decision_cutover_ensure_status() {  # <status-file>
+  local f=$1 parent marker
+  parent=${f%/*}
+  [ "$parent" != "$f" ] || return 1
+  if [ ! -e "$parent" ] && [ ! -L "$parent" ]; then
+    mkdir -p "$parent" || return 1
+  fi
+  [ -d "$parent" ] && [ ! -L "$parent" ] || return 1
+  if [ -e "$f" ] || [ -L "$f" ]; then
+    [ -f "$f" ] && [ ! -L "$f" ] || return 1
+    return 0
+  fi
+  marker=$(fm_decision_status_marker) || return 1
+  if ( set -C; printf '%s\n' "$marker" > "$f" ) 2>/dev/null; then
+    fm_decision_stream_id "$f" >/dev/null || return 1
+    return 0
+  fi
+  [ -f "$f" ] && [ ! -L "$f" ] || return 1
+  return 0
+}
+
+# Drop the record for <key> from a newline-terminated
+# "<key>\t<verb>\t<instance>\t<authority>\t<note>" set.
 # Portable (no associative arrays) so the fold runs on bash 3.2 as well as 4+.
 _fm_decision_drop() {  # <open-set> <key>
   local set=$1 key=$2 line out=''
@@ -205,15 +554,57 @@ $set
 EOF
   printf '%s' "$out"
 }
-# Fold ONE status line into an existing "<key>\t<verb>\t<note>\n"-per-line open
-# set, applying the same needs-decision/blocked-opens, resolved/captain-held-closes
-# rule status_open_decisions documents above. Pure text transform, no file I/O.
-# This is the ONE place the per-line open/resolved rule is written; both the
+# Print the internal record currently held for <key>, or nothing.
+_fm_decision_get() {  # <open-set> <key>
+  local set=$1 key=$2 line
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    case "$line" in
+      "$key"$'\t'*) printf '%s' "$line"; return 0 ;;
+    esac
+  done <<EOF
+$set
+EOF
+  return 1
+}
+# Fold the WHOLE status stream into the set of decisions still open. Prints one
+# TAB-separated "<key>\t<verb>\t<summary>" line per still-open decision, in
+# most-recently-opened-last order; prints nothing when none are open.
+# "--with-instance" inserts the occurrence identifier before the summary for the
+# answer-issuance boundary. The internal "--with-authority" view also exposes
+# whether the opening sits before or after the cutover marker. Pure read of the
+# file and of the paired answer records; no mutation.
+# This is the durable open-set the fleet snapshot and any point-in-time consumer must use
+# instead of trusting the last status line.
+#
+# A post-cutover needs-decision request additionally requires a correlated
+# answer token to close (see the answer-correlation contract above), so an
+# uncorrelated resolution leaves it open. A blocked line still closes on a
+# plain keyed resolution: clearing a blocker is work, not an exercise of
+# authority.
+# Fold ONE status line into an existing open set, applying the same
+# needs-decision/blocked-opens, resolved/captain-held-closes rule
+# status_open_decisions documents above, plus the answer-correlation rule.
+# This is the ONE place the per-line open/resolved rule is written; the
 # whole-file fold (status_open_decisions) and the incremental cursor-backed fold
-# (status_open_decisions_incremental) below call this instead of re-deriving the
+# (status_open_decisions_incremental) both call this instead of re-deriving the
 # rule, so the two consumption strategies can never drift apart on semantics.
-_fm_decision_fold_line() {  # <open-set> <status-line> <resolve-verb> <held-verb>
-  local open=$1 line=$2 resolve=$3 held=$4 verb key note stripped
+#
+# The internal record is "<key>\t<verb>\t<instance>\t<authority>\t<note>". The
+# caller owns the cross-line state the rule needs - the physical line <position>,
+# the stream id assigned by a marker line, and whether that marker has been seen
+# (<authority> legacy or correlated) - because those are the only three facts a
+# resumable fold has to carry across a byte cursor. Reading them as arguments is
+# what lets the incremental fold reach byte-identical results to the whole-file
+# fold from a persisted checkpoint.
+#
+# Not a pure text transform in one respect: closing a correlated needs-decision
+# consults <answers-file> through fm_decision_answer_matches, because only that
+# record can prove a resolution carried authority minted for this exact opening.
+_fm_decision_fold_line() {  # <open-set> <line> <resolve> <held> <answers> <position> <stream-id> <authority>
+  local open=$1 line=$2 resolve=$3 held=$4 answers=$5 position=$6 stream=$7 authority=$8
+  local verb key note stripped instance ans
+  local held_rec held_fields held_verb held_instance held_authority
   stripped=${line//[[:space:]]/}
   [ -n "$stripped" ] || { printf '%s' "$open"; return 0; }
   verb=$(status_line_verb "$line")
@@ -221,16 +612,57 @@ _fm_decision_fold_line() {  # <open-set> <status-line> <resolve-verb> <held-verb
   case "$verb" in
     needs-decision|blocked)
       note=$(status_line_note "$line")
+      instance=$(fm_decision_instance_id "$position" "$stream") || {
+        printf '%s' "$open"; return 0
+      }
       open=$(_fm_decision_drop "$open" "$key")
       [ -n "$open" ] && open="${open}"$'\n'
-      open="${open}${key}"$'\t'"${verb}"$'\t'"${note}"$'\n'
+      open="${open}${key}"$'\t'"${verb}"$'\t'"${instance}"$'\t'"${authority}"$'\t'"${note}"$'\n'
       ;;
-    "$resolve"|"$held")
+    "$resolve")
+      # Only a correlated answer closes a request for AUTHORITY. A blocked line
+      # still closes on a plain keyed resolution: clearing a blocker is work,
+      # not an exercise of authority.
+      if held_rec=$(_fm_decision_get "$open" "$key"); then
+        held_fields=${held_rec#*$'\t'}
+        held_verb=${held_fields%%$'\t'*}
+        held_fields=${held_fields#*$'\t'}
+        held_instance=${held_fields%%$'\t'*}
+        held_fields=${held_fields#*$'\t'}
+        held_authority=${held_fields%%$'\t'*}
+        if [ "$held_verb" = needs-decision ] && [ "$held_authority" = correlated ]; then
+          ans=$(_fm_decision_answer "$line")
+          fm_decision_answer_matches "$answers" "$ans" "$key" "$held_instance" || {
+            printf '%s' "$open"; return 0
+          }
+        fi
+      fi
+      open=$(_fm_decision_drop "$open" "$key")
+      [ -n "$open" ] && open="${open}"$'\n'
+      ;;
+    "$held")
       open=$(_fm_decision_drop "$open" "$key")
       [ -n "$open" ] && open="${open}"$'\n'
       ;;
   esac
   printf '%s' "$open"
+}
+
+# Project the internal 5-field open set onto a caller-chosen view.
+# Default is the historical "<key>\t<verb>\t<note>" shape every existing
+# consumer and both scan wrappers already read.
+_fm_decision_project() {  # <open-set> [--with-instance|--with-authority]
+  local open=$1 view=${2:-} k v i a n
+  while IFS=$'\t' read -r k v i a n || [ -n "$k" ]; do
+    [ -n "$k" ] || continue
+    case "$view" in
+      --with-instance)  printf '%s\t%s\t%s\t%s\n' "$k" "$v" "$i" "$n" ;;
+      --with-authority) printf '%s\t%s\t%s\t%s\t%s\n' "$k" "$v" "$i" "$a" "$n" ;;
+      *)                printf '%s\t%s\t%s\n' "$k" "$v" "$n" ;;
+    esac
+  done <<EOF
+$open
+EOF
 }
 
 # Fold the WHOLE status stream into the set of decisions still open. Prints one
@@ -245,17 +677,45 @@ _fm_decision_fold_line() {  # <open-set> <status-line> <resolve-verb> <held-verb
 # before any read - a cheap builtin, unlike fm_wake_latest_event's O_NOFOLLOW
 # subprocess read, which exists for that function's much narrower payload-driven
 # path resolution rather than this directory-local glob.
-status_open_decisions() {  # <status-file>
-  local f=$1 line resolve held open=''
-  [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || return 0
+# Fold a status STREAM (stdin) into the still-open set. Separate from the
+# file-path entry point below because the cutover writer folds the very file
+# descriptor it holds locked, so it cannot reopen the path by name.
+_fm_status_open_decisions_stream() {  # <answers-file> [--with-instance|--with-authority]
+  local answers=$1 view=${2:-} line resolve held open=''
+  local position=0 stream='' authority=legacy marker_id
+  case "$view" in
+    ''|--with-instance|--with-authority) ;;
+    *) return 2 ;;
+  esac
   resolve=${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}
   held=${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}
   while IFS= read -r line || [ -n "$line" ]; do
-    open=$(_fm_decision_fold_line "$open" "$line" "$resolve" "$held")
-  done < "$f"
-  printf '%s' "$open"
+    position=$((position + 1))
+    # Assign the stream id only from a VALID marker. Assigning the command
+    # substitution unconditionally would clear it on every ordinary line,
+    # because a failed fm_decision_marker_line_id still substitutes empty -
+    # which silently demoted every post-cutover opening to a legacy positional
+    # instance while authority stayed correlated.
+    if marker_id=$(fm_decision_marker_line_id "$line"); then
+      stream=$marker_id
+      authority=correlated
+      continue
+    fi
+    open=$(_fm_decision_fold_line "$open" "$line" "$resolve" "$held" \
+      "$answers" "$position" "$stream" "$authority")
+  done
+  _fm_decision_project "$open" "$view"
 }
 
+status_open_decisions() {  # <status-file> [--with-instance|--with-authority]
+  local f=$1 view=${2:-} answers
+  [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || return 0
+  answers=$(fm_decision_answers_file "$f")
+  _fm_status_open_decisions_stream "$answers" "$view" < "$f"
+}
+
+# Print one row per folded open decision or blocker supervision occurrence:
+# "<file>\t<task>\t<verb>\t<instance>\t<key>\t<summary>".
 # Fleet-wide wrapper around status_open_decisions: scans every task's status
 # log under <state> and prefixes each still-open decision with its owning task
 # id, so a per-wake or per-session surface can print the consolidated open set
@@ -348,69 +808,90 @@ _fm_open_decisions_file_ident() {  # <file> -> "dev:inode", empty on I/O failure
 }
 
 status_open_decisions_incremental() {  # <status-file>
-  local f=$1 cf offset ident open='' trusted_open='' cursor_data first rest ident_line
-  local size cur_ident resolve held chunk_file chunk_size line
+  local f=$1 cf offset ident open='' trusted_open='' cursor_data rest header
+  local size cur_ident resolve held answers chunk_file chunk_size line
+  local position stream authority marker_id have_offset have_ident have_position
+  local have_stream have_authority
   [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || return 0
   cf=$(_fm_open_decisions_cursor_path "$f")
   offset=0
   ident=''
+  position=0
+  stream=''
+  authority=legacy
+  # The cursor header carries every piece of cross-line state the fold needs to
+  # resume: the byte offset and file identity, plus the physical line position,
+  # the stream id, and the legacy/correlated authority the marker established.
+  # A cursor missing any of them (for example one written before correlation was
+  # folded here) is treated as absent and re-folded from byte 0 rather than
+  # resumed against unknown state, because guessing a position would mint the
+  # wrong occurrence instance for every later opening.
   if [ -f "$cf" ] && [ -r "$cf" ] && [ ! -L "$cf" ]; then
     if cursor_data=$(LC_ALL=C command cat "$cf" 2>/dev/null); then
-      first=${cursor_data%%$'\n'*}
-      case "$first" in
-        offset=*)
-          offset=${first#offset=}
-          case "$offset" in
-            ''|*[!0-9]*) offset=0 ;;
-            *)
-              case "$cursor_data" in
-                *$'\n'*)
-                  rest=${cursor_data#*$'\n'}
-                  ident_line=${rest%%$'\n'*}
-                  case "$ident_line" in
-                    ident=*)
-                      ident=${ident_line#ident=}
-                      case "$rest" in
-                        *$'\n'*) open=${rest#*$'\n'} ;;
-                      esac
-                      trusted_open=$open
-                      ;;
-                    *) offset=0 ;;
-                  esac
-                  ;;
-                *) offset=0 ;;
-              esac
-              ;;
-          esac
-          ;;
-      esac
+      have_offset=0; have_ident=0; have_position=0; have_stream=0; have_authority=0
+      rest=$cursor_data
+      while [ -n "$rest" ]; do
+        header=${rest%%$'\n'*}
+        case "$header" in
+          offset=*)
+            offset=${header#offset=}
+            case "$offset" in ''|*[!0-9]*) offset=0 ;; *) have_offset=1 ;; esac
+            ;;
+          ident=*)    ident=${header#ident=};    have_ident=1 ;;
+          position=*)
+            position=${header#position=}
+            case "$position" in ''|*[!0-9]*) position=0 ;; *) have_position=1 ;; esac
+            ;;
+          stream=*)   stream=${header#stream=};  have_stream=1 ;;
+          authority=*)
+            authority=${header#authority=}
+            case "$authority" in legacy|correlated) have_authority=1 ;; esac
+            ;;
+          *) break ;;
+        esac
+        case "$rest" in
+          *$'\n'*) rest=${rest#*$'\n'} ;;
+          *) rest=''; break ;;
+        esac
+      done
+      if [ "$have_offset" = 1 ] && [ "$have_ident" = 1 ] && [ "$have_position" = 1 ] \
+        && [ "$have_stream" = 1 ] && [ "$have_authority" = 1 ]; then
+        open=$rest
+        trusted_open=$open
+      else
+        offset=0; ident=''; position=0; stream=''; authority=legacy; open=''
+      fi
     fi
   fi
 
   # A stat/size-read failure is a genuine I/O error, not "the file is empty" -
   # report the already-trusted persisted set unchanged rather than risking a
   # silent invalidation that would wipe it.
-  cur_ident=$(_fm_open_decisions_file_ident "$f") || { printf '%s' "$trusted_open"; return 0; }
-  [ -n "$cur_ident" ] || { printf '%s' "$trusted_open"; return 0; }
+  cur_ident=$(_fm_open_decisions_file_ident "$f") \
+    || { _fm_decision_project "$trusted_open"; return 0; }
+  [ -n "$cur_ident" ] || { _fm_decision_project "$trusted_open"; return 0; }
   size=$(LC_ALL=C wc -c < "$f" 2>/dev/null) \
-    || { printf '%s' "$trusted_open"; return 0; }
+    || { _fm_decision_project "$trusted_open"; return 0; }
   size=${size//[[:space:]]/}
-  case "$size" in ''|*[!0-9]*) printf '%s' "$trusted_open"; return 0 ;; esac
+  case "$size" in ''|*[!0-9]*) _fm_decision_project "$trusted_open"; return 0 ;; esac
 
   if [ -z "$ident" ] || [ "$ident" != "$cur_ident" ] || [ "$offset" -gt "$size" ]; then
     offset=0
     open=''
+    position=0
+    stream=''
+    authority=legacy
   fi
 
   if [ "$offset" -lt "$size" ]; then
     chunk_file="$cf.read.$$"
     tail -c "+$((offset + 1))" "$f" > "$chunk_file" 2>/dev/null \
-      || { rm -f "$chunk_file"; printf '%s' "$trusted_open"; return 0; }
+      || { rm -f "$chunk_file"; _fm_decision_project "$trusted_open"; return 0; }
     chunk_size=$(LC_ALL=C wc -c < "$chunk_file" 2>/dev/null) \
-      || { rm -f "$chunk_file"; printf '%s' "$trusted_open"; return 0; }
+      || { rm -f "$chunk_file"; _fm_decision_project "$trusted_open"; return 0; }
     chunk_size=${chunk_size//[[:space:]]/}
     case "$chunk_size" in
-      ''|*[!0-9]*) rm -f "$chunk_file"; printf '%s' "$trusted_open"; return 0 ;;
+      ''|*[!0-9]*) rm -f "$chunk_file"; _fm_decision_project "$trusted_open"; return 0 ;;
     esac
     # Test-only observability seam (off by default, no production behavior
     # change): when set, records exactly how many bytes THIS call folded, so a
@@ -420,13 +901,24 @@ status_open_decisions_incremental() {  # <status-file>
       && printf '%s\t%s\n' "$f" "$chunk_size" >> "$FM_OPEN_DECISIONS_READ_PROBE"
     resolve=${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}
     held=${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}
+    answers=$(fm_decision_answers_file "$f")
     while IFS= read -r line || [ -n "$line" ]; do
-      open=$(_fm_decision_fold_line "$open" "$line" "$resolve" "$held")
+      position=$((position + 1))
+      if marker_id=$(fm_decision_marker_line_id "$line"); then
+        stream=$marker_id
+        authority=correlated
+        continue
+      fi
+      open=$(_fm_decision_fold_line "$open" "$line" "$resolve" "$held" \
+        "$answers" "$position" "$stream" "$authority")
     done < "$chunk_file"
     rm -f "$chunk_file"
     {
       printf 'offset=%s\n' "$size"
       printf 'ident=%s\n' "$cur_ident"
+      printf 'position=%s\n' "$position"
+      printf 'stream=%s\n' "$stream"
+      printf 'authority=%s\n' "$authority"
       # An `if` (not `[ -n "$open" ] && printf ...`) so the group's exit status
       # is always 0 even when open is empty (fully resolved) - a bare `&&`
       # there would make the whole group fail on that condition, silently
@@ -434,7 +926,7 @@ status_open_decisions_incremental() {  # <status-file>
       if [ -n "$open" ]; then printf '%s' "$open"; fi
     } > "$cf.tmp.$$" && mv -f "$cf.tmp.$$" "$cf"
   fi
-  printf '%s' "$open"
+  _fm_decision_project "$open"
 }
 
 # Incremental sibling of scan_open_decisions: same fleet-wide directory walk and
@@ -458,6 +950,119 @@ EOF
   done
   return 0
 }
+
+status_open_needs_decisions() {  # <status-file>
+  local f=$1 key verb instance summary
+  while IFS=$'\t' read -r key verb instance summary || [ -n "$key" ]; do
+    [ "$verb" = needs-decision ] || continue
+    printf '%s\t%s\t%s\n' "$key" "$instance" "$summary"
+  done <<EOF
+$(status_open_decisions "$f" --with-instance)
+EOF
+}
+
+status_open_token_needs_decisions() {  # <status-file>
+  local f=$1 stream answers key verb instance authority summary
+  stream=$(fm_decision_stream_id "$f") || return 0
+  answers=$(fm_decision_answers_file "$f")
+  while IFS=$'\t' read -r key verb instance authority summary || [ -n "$key" ]; do
+    [ -n "$key" ] || continue
+    [ "$verb" = needs-decision ] || continue
+    [ "$authority" = correlated ] || continue
+    printf '%s\t%s.%s\t%s\n' "$key" "$stream" "$instance" "$summary"
+  done <<EOF
+$(_fm_status_open_decisions_stream "$answers" --with-authority < "$f")
+EOF
+}
+
+status_open_supervision_decisions() {  # <status-file>
+  local f=$1 stream raw key verb instance summary
+  stream=$(fm_decision_stream_id "$f" 2>/dev/null || true)
+  if [ -z "$stream" ]; then
+    [ -f "$f" ] && [ ! -L "$f" ] || return 0
+    raw=$(printf 'legacy-status:%s' "$f" | fm_decision_hash_text) || return 0
+    stream=$(printf '%s' "$raw" | cut -c1-32)
+    [ "${#stream}" -eq 32 ] || return 0
+  fi
+  while IFS=$'\t' read -r key verb instance summary || [ -n "$key" ]; do
+    [ -n "$key" ] || continue
+    printf '%s\t%s\t%s.%s\t%s\n' "$key" "$verb" "$stream" "$instance" "$summary"
+  done <<EOF
+$(status_open_decisions "$f" --with-instance)
+EOF
+}
+
+status_has_open_token_needs_decision() {  # <status-file>
+  local key _occurrence _summary
+  while IFS=$'\t' read -r key _occurrence _summary || [ -n "$key" ]; do
+    [ -n "$key" ] && return 0
+  done <<EOF
+$(status_open_token_needs_decisions "$1")
+EOF
+  return 1
+}
+
+status_latest_decision_is_open_occurrence() {  # <status-file> [needs-decision|blocked]
+  local f=$1 line marker stripped latest='' position=0 latest_position=0
+  local expected=${2:-} stream='' latest_stream='' key verb instance
+  local open_key open_verb open_instance _summary
+  [ -f "$f" ] && [ ! -L "$f" ] || return 1
+  while IFS= read -r line || [ -n "$line" ]; do
+    position=$((position + 1))
+    if marker=$(fm_decision_marker_line_id "$line"); then
+      stream=$marker
+      continue
+    fi
+    stripped=${line//[[:space:]]/}
+    [ -n "$stripped" ] || continue
+    latest=$line
+    latest_position=$position
+    latest_stream=$stream
+  done < "$f"
+  verb=$(status_line_verb "$latest")
+  case "$verb" in needs-decision|blocked) ;; *) return 1 ;; esac
+  [ -z "$expected" ] || [ "$verb" = "$expected" ] || return 1
+  [ "$expected" != needs-decision ] || [ -n "$latest_stream" ] || return 1
+  key=$(_fm_decision_key "$latest") || return 1
+  instance=$(fm_decision_instance_id "$latest_position" "$latest_stream") || return 1
+  while IFS=$'\t' read -r open_key open_verb open_instance _summary || [ -n "$open_key" ]; do
+    [ "$open_key" = "$key" ] || continue
+    [ "$open_verb" = "$verb" ] || continue
+    [ "$open_instance" = "$instance" ] || continue
+    return 0
+  done <<EOF
+$(status_open_decisions "$f" --with-instance)
+EOF
+  return 1
+}
+
+status_latest_needs_decision_is_open_token_occurrence() {  # <status-file>
+  fm_decision_stream_id "$1" >/dev/null || return 1
+  status_latest_decision_is_open_occurrence "$1" needs-decision
+}
+
+status_has_open_needs_decision() {  # <status-file>
+  local key _instance _summary
+  while IFS=$'\t' read -r key _instance _summary || [ -n "$key" ]; do
+    [ -n "$key" ] && return 0
+  done <<EOF
+$(status_open_needs_decisions "$1")
+EOF
+  return 1
+}
+
+_fm_status_stream_has_open_needs_decision() {
+  local open key _verb _instance _summary
+  open=$(_fm_status_open_decisions_stream /dev/null --with-instance)
+  while IFS=$'\t' read -r key _verb _instance _summary || [ -n "$key" ]; do
+    [ "$_verb" = needs-decision ] || continue
+    [ -n "$key" ] && return 0
+  done <<EOF
+$open
+EOF
+  return 1
+}
+
 
 # Fold material routed-work phases in the same keyed event stream.
 # A working or declared-pause event opens or replaces one phase for its key.
@@ -571,6 +1176,13 @@ crew_absorb_class() {  # <id>
   printf 'none'
 }
 
+# 0 if crew <id> shows POSITIVE evidence it is still working (crew_absorb_class
+# reports `working`). This is the "provably working" predicate at the heart of
+# absorb-only-when-provably-working: a no-verb turn-end or stale wake is absorbed
+# ONLY when this returns 0, and SURFACED otherwise (the crew may be done, waiting
+# on a decision, or wedged). For stale panes it is checked before trusting the
+# status log so a pre-validation captain-relevant line does not override an active
+# run. See crew_absorb_class for the exact working/paused/none decision.
 # 0 if crew <id> shows POSITIVE evidence it is still working (crew_absorb_class
 # reports `working`). This is the "provably working" predicate at the heart of
 # absorb-only-when-provably-working: a no-verb turn-end or stale wake is absorbed
