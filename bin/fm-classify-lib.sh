@@ -867,6 +867,7 @@ status_open_decisions_incremental() {  # <status-file>
   cf=$(_fm_open_decisions_cursor_path "$f")
   offset=0
   ident=''
+  answers_generation=''
   position=0
   stream=''
   authority=legacy
