@@ -111,7 +111,7 @@ POOL-ROUTE-OK
 The emitted payload contains only this script's path, the credential source path, and the variable name:
 
 ```json
-{"apiKeyHelper":"<repo>/bin/fm-claude-pool.sh secret --secret-file '<home>/.config/cliproxy/shell.zsh' --secret-var 'CLIPROXY_API_KEY'"}
+{"apiKeyHelper":"'<repo>/bin/fm-claude-pool.sh' secret --secret-file '<home>/.config/cliproxy/shell.zsh' --secret-var 'CLIPROXY_API_KEY'"}
 ```
 
 ## Compatibility axes reviewed
