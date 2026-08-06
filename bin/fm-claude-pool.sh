@@ -93,6 +93,9 @@
 #   6  the credential source is missing, unreadable, or does not define the variable
 #
 # Configuration: config/claude-pool, `key = value` lines, `#` comments.
+# docs/configuration.md "Claude pool route" is the operator owner for what this
+# file means and when to set it; the keys below are repeated here only so
+# `--help` is self-contained.
 #   base-url     pool base URL           (default http://127.0.0.1:8317)
 #   secret-file  credential source file  (default ~/.config/cliproxy/shell.zsh)
 #   secret-var   variable to extract     (default CLIPROXY_API_KEY)
