@@ -30,6 +30,8 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 # shellcheck source=tests/wake-helpers.sh
 . "$(dirname "${BASH_SOURCE[0]}")/wake-helpers.sh"
+# shellcheck source=/dev/null
+. "$ROOT/bin/fm-classify-lib.sh"
 
 SESSION_START="$ROOT/bin/fm-session-start.sh"
 BASE_PATH=${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
@@ -1012,6 +1014,36 @@ EOF
   pass "status tail is bounded to the configured line count, with the full log path always printed"
 }
 
+test_status_tail_excludes_decision_marker() {
+  local rec root home fakebin out marker
+  rec=$(new_world status-tail-decision-marker)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+  make_fake_tmux "$fakebin" "fm-sess:live"
+
+  marker=$(fm_decision_status_marker) || fail "could not create a valid decision stream marker"
+  printf 'window=fm-sess:live\nkind=ship\n' > "$home/state/task-marker.meta"
+  {
+    printf 'working: real event before marker\n'
+    printf '%s\n' "$marker"
+    printf 'working: real event after marker\n'
+  } > "$home/state/task-marker.status"
+
+  out=$(FM_SESSION_START_STATUS_TAIL=2 run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+
+  assert_contains "$out" "working: real event before marker" \
+    "the decision stream marker consumed a status-tail event slot"
+  assert_contains "$out" "working: real event after marker" \
+    "the status tail lost the real event after the decision stream marker"
+  assert_not_contains "$out" "$marker" \
+    "the decision stream marker leaked into the status tail"
+
+  pass "status tails preserve real events while excluding the decision stream marker"
+}
+
 # A crewmate writes its own status lines, so nothing upstream bounds their
 # length: an observed one ran 865 characters. The tail is a wake-EVENT view
 # whose full log path is printed beside it, so a long line is cut, marked, and
@@ -1972,6 +2004,7 @@ test_session_start_preserves_transiently_unreadable_tmux
 test_session_start_preserves_proven_bare_shell_recovery
 test_session_start_relaunches_herdr_husk_secondmate
 test_status_tail_bounding
+test_status_tail_excludes_decision_marker
 test_status_tail_line_cap
 test_orphan_status_logs_are_printed
 test_endpoint_liveness_tmux
