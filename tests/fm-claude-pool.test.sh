@@ -425,6 +425,24 @@ test_claude_pool_launch_carries_the_route_and_no_credential() {
   pass "the pool launch carries the route, the model, and no credential"
 }
 
+test_static_crew_harness_selects_the_pool_route() {
+  local rec id out launch
+  id=pool-static-k2
+  # The other spawn tests select the adapter per spawn. This one selects it the
+  # other supported way - the home's static crewmate harness - because that is a
+  # different resolution path (fm-harness.sh crew) and it is how a machine that
+  # has cut over to pooled capacity would actually be configured.
+  rec=$(make_spawn_case pool-static claude-pool "$id"); read_spawn_case "$rec"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$CASE_DIR" \
+    "$id" "$PROJ_DIR" --model claude-opus-5)
+  expect_code 0 "$?" "a statically configured claude-pool spawn should succeed: $out"
+  assert_contains "$out" "harness=claude-pool" "config/crew-harness did not select the pool adapter"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "ANTHROPIC_BASE_URL=" "the statically selected route lost its pool endpoint"
+  assert_contains "$launch" "apiKeyHelper" "the statically selected route lost its credential helper"
+  pass "config/crew-harness selects the pool route through the static resolution path"
+}
+
 test_claude_pool_meta_records_the_adapter_without_a_credential() {
   local rec id meta
   id=pool-meta-b2
@@ -613,6 +631,7 @@ test_the_config_file_refuses_to_hold_a_credential
 test_config_file_overrides_the_shipped_defaults
 test_secret_command_emits_the_credential_for_the_api_key_helper
 test_claude_pool_launch_carries_the_route_and_no_credential
+test_static_crew_harness_selects_the_pool_route
 test_claude_pool_meta_records_the_adapter_without_a_credential
 test_claude_pool_requires_an_explicit_model
 test_claude_pool_refuses_a_non_anthropic_model_before_any_endpoint
