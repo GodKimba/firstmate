@@ -89,6 +89,8 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 . "$SCRIPT_DIR/fm-busy-lib.sh"
 # shellcheck source=bin/fm-nm-run-lib.sh
 . "$SCRIPT_DIR/fm-nm-run-lib.sh"
+# shellcheck source=bin/fm-timeout-lib.sh
+. "$SCRIPT_DIR/fm-timeout-lib.sh"
 
 SUPERVISION_OUTPUT=0
 if [ "${1:-}" = --supervision ]; then
@@ -472,16 +474,14 @@ CI_CHECKS_QUERY='(.statusCheckRollup // []) as $c
   elif any($c[]; ((.status // "") != "COMPLETED") and ((.state // "") != "SUCCESS")) then "pending"
   else "passing" end'
 
-# Bounded gh call, same timeout cascade as nm_run. A home with no bounding tool
-# refuses the probe outright rather than risking an unbounded network wait: an
+# Bounded gh call through the shared timeout owner (bin/fm-timeout-lib.sh), which
+# always has a mechanism - down to a pure-Bash process-group watchdog - so this
+# probe can never become an unbounded network wait on any supported host. A bound
+# that trips returns 124 and the caller reports the checks unreadable, because an
 # unverifiable answer is never green-ready.
 gh_bounded() {  # <args...>
-  case "$HAVE_TIMEOUT" in
-    timeout)  GH_PROMPT_DISABLED=1 GH_NO_UPDATE_NOTIFIER=1 timeout "$FM_CREW_STATE_GH_TIMEOUT" gh "$@" ;;
-    gtimeout) GH_PROMPT_DISABLED=1 GH_NO_UPDATE_NOTIFIER=1 gtimeout "$FM_CREW_STATE_GH_TIMEOUT" gh "$@" ;;
-    perl)     GH_PROMPT_DISABLED=1 GH_NO_UPDATE_NOTIFIER=1 perl -e 'my $t = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { setpgrp(0, 0); exec @ARGV } local $SIG{ALRM} = sub { kill "TERM", -$pid; select undef, undef, undef, 0.2; kill "KILL", -$pid; exit 124 }; alarm $t; waitpid $pid, 0; exit($? >> 8)' "$FM_CREW_STATE_GH_TIMEOUT" gh "$@" ;;
-    *)        return 124 ;;
-  esac
+  GH_PROMPT_DISABLED=1 GH_NO_UPDATE_NOTIFIER=1 \
+    fm_run_timed "$FM_CREW_STATE_GH_TIMEOUT" gh "$@"
 }
 
 # The PR a green-ready claim is about, most authoritative source first. The

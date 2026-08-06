@@ -528,6 +528,10 @@ if [ -f "$FM_HOME/$SUB_HOME_MARKER" ]; then
           "$PRIMARY_HOME_CANDIDATE" "$FM_HOME" "$SECOND_MATE_ID"); then
         PUBLIC_FOLLOWUP_STATE="$PUBLIC_FOLLOWUP_HOME/state"
         PUBLIC_FOLLOWUP_PARENT_UNRESOLVED=0
+        if [ "$FORCE" != "--force" ] \
+          && fm_pf_relay_active "$PUBLIC_FOLLOWUP_HOME"; then
+          PUBLIC_FOLLOWUP_RELAY_ACTIVE=1
+        fi
       else
         PUBLIC_FOLLOWUP_HOME=
         PUBLIC_FOLLOWUP_STATE=
@@ -568,6 +572,11 @@ if [ -f "$FM_HOME/$SUB_HOME_MARKER" ]; then
   fi
 elif [ "$KIND" = secondmate ]; then
   PUBLIC_FOLLOWUP_WORK_HOME="secondmate:$ID"
+  if [ "$FORCE" != "--force" ] && fm_pf_relay_active "$FM_HOME"; then
+    PUBLIC_FOLLOWUP_RELAY_ACTIVE=1
+  fi
+elif [ "$FORCE" != "--force" ] && fm_pf_relay_active "$FM_HOME"; then
+  PUBLIC_FOLLOWUP_RELAY_ACTIVE=1
 fi
 
 default_branch() {
@@ -2415,6 +2424,7 @@ if [ "$FORCE" != "--force" ] && [ "$PUBLIC_FOLLOWUP_PARENT_UNRESOLVED" = 1 ]; th
 fi
 if [ "$FORCE" != "--force" ] \
   && [ -n "$PUBLIC_FOLLOWUP_STATE" ] \
+  && [ "$PUBLIC_FOLLOWUP_RELAY_ACTIVE" = 1 ] \
   && fm_pf_has_registrations "$PUBLIC_FOLLOWUP_STATE"; then
   if ! PUBLIC_FOLLOWUP_BLOCKING=$(FM_HOME="$PUBLIC_FOLLOWUP_HOME" FM_STATE_OVERRIDE="$PUBLIC_FOLLOWUP_STATE" \
       "$SCRIPT_DIR/fm-public-followup.sh" guard-work "$PUBLIC_FOLLOWUP_WORK_HOME" "$ID" 2>/dev/null); then
