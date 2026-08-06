@@ -444,9 +444,21 @@ print_status_tail() {
   # observed line ran 865 characters. Cap each one the way the wake digest's
   # OPEN DECISIONS section does; the lede carries the state word and the key,
   # and the full log path above reaches the rest.
+  #
+  # The decision stream marker is machine state, not a wake event: it carries no
+  # verb and no note, so a stream that was marked recently would otherwise spend
+  # one of the few tail slots on a line the agent can never act on. Reading one
+  # extra line first keeps the visible tail exactly STATUS_TAIL events long.
   while IFS= read -r line || [ -n "$line" ]; do
     fm_cap_line "$line"
-  done < <(tail -n "$STATUS_TAIL" "$status")
+  done < <(
+    tail -n "$((STATUS_TAIL + 1))" "$status" \
+      | while IFS= read -r line || [ -n "$line" ]; do
+          fm_decision_marker_line_id "$line" >/dev/null 2>&1 && continue
+          printf '%s\n' "$line"
+        done \
+      | tail -n "$STATUS_TAIL"
+  )
 }
 
 hash_file() {
