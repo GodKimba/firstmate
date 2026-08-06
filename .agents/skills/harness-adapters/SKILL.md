@@ -1,6 +1,6 @@
 ---
 name: harness-adapters
-description: Agent-only reference for firstmate harness operations. Use before spawning or recovering a crewmate or secondmate, handling a trust dialog, sending a harness-specific skill invocation, interrupting or exiting an agent, resuming an exited agent, or verifying a new harness adapter. Contains verified facts for claude, codex, opencode, pi, pi-signed, grok, and kimi.
+description: Agent-only reference for firstmate harness operations. Use before spawning or recovering a crewmate or secondmate, handling a trust dialog, sending a harness-specific skill invocation, interrupting or exiting an agent, resuming an exited agent, or verifying a new harness adapter. Contains verified facts for claude, claude-pool, codex, opencode, pi, pi-signed, grok, and kimi.
 user-invocable: false
 metadata:
   internal: true
@@ -225,6 +225,31 @@ Claude Code's stdin payload to a Stop hook carries a `stop_hook_active` boolean 
 A project-level `.claude/settings.json` only takes effect when Claude Code's project root is that exact directory - it does not walk up from a subdirectory looking for one, so firstmate launches the primary from the repo root.
 After those settings are loaded, hook command resolution is still cwd-sensitive because Claude Code runs commands through `/bin/sh` against the session's current cwd; keep the tracked commands anchored through `"$CLAUDE_PROJECT_DIR"/bin/...` and see `docs/turnend-guard.md` for the verified Stop-hook details.
 Claude Code's primary watcher protocol is Stop-owned: the auto-arm hook fires on every Stop and foregrounds `bin/fm-watch-arm.sh` when the home is eligible and still needs supervision, and its exit-2 `asyncRewake` rewake is the wake; the model drains and handles wakes but never runs a routine re-arm command.
+
+## claude-pool (VERIFIED 2026-08-06; the same Claude CLI on the local CLIProxyAPI pool)
+
+`claude-pool` is a worker-launch adapter, not a second Claude harness.
+It runs the identical Claude CLI against the captain's local CLIProxyAPI pool instead of the ambient native login, so **every fact in the `claude` section above applies unchanged**: busy state, exit command, interrupt and Vim recovery, and skill invocation.
+Only the credential route differs.
+
+| Fact | Value |
+|---|---|
+| Selection | Explicit only: `--harness claude-pool`, `config/crew-harness`, `config/secondmate-harness`, or a dispatch profile. Never a fallback for `claude`. |
+| Model | Required. The spawn refuses without an explicit `--model`, and refuses any model the pool's catalog does not list as `owned_by: anthropic`. |
+| Effort | Full `low`..`max` range, exactly as `claude`. |
+| Credential | Claude's `apiKeyHelper` via `--settings`, resolved by `bin/fm-claude-pool.sh`. Never in argv, meta, or the pane. |
+| Own-harness detection | Reports `claude`, correctly - the running CLI is claude. Detection never returns `claude-pool`. |
+| Primary session | Not supported. Crewmate and secondmate launches only. |
+
+Two operating cautions this entry exists to preserve:
+
+- The pool serves OpenAI models on the same Anthropic-shaped endpoint and answers them with HTTP 200, so reaching the pool is not evidence that a Claude model is running.
+  This is exactly how the older `claude-sol` shell function ran `gpt-5.6-sol` behind the Claude CLI.
+  Never bypass the catalog family check to "just get a worker started".
+- A wrong credential or an unreachable pool surfaces at the worker only as a bare `Execution error` after tens of seconds of retries.
+  If a claude-pool worker looks wedged early in its life, read `bin/fm-claude-pool.sh check --model <model>` before treating it as a stuck agent.
+
+`docs/configuration.md` owns the operator contract and `docs/verification/claude-pool-route.md` owns the evidence.
 
 ## codex (VERIFIED 2026-06-11, codex-cli 0.139.0)
 

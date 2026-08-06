@@ -17,6 +17,11 @@
         { "harness": "codex", "model": "gpt-5.5", "effort": "high" }
       ],
       "why": "Firstmate compares every candidate with current relevant quota and pace before dispatch, so use a strong coding profile."
+    },
+    {
+      "when": "The task wants a strong Claude model but the native Claude login should stay free for the primary session.",
+      "use": { "harness": "claude-pool", "model": "claude-opus-5", "effort": "high" },
+      "why": "claude-pool spends pooled Claude capacity through the local CLIProxyAPI. The model must be one the pool serves as an Anthropic model, and a broken pool route refuses rather than falling back to the native login."
     }
   ],
   "default": [

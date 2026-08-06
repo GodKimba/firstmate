@@ -355,6 +355,43 @@ Open it only from its local path; it carries no credential and no full account a
 
 GitHub stays with `gh-axi`; this view is subscription quota only.
 
+## Claude pool route (`claude-pool` / config/claude-pool)
+
+`claude-pool` is a worker harness adapter that runs the ordinary Claude CLI against the local CLIProxyAPI pool instead of the ambient native Claude login.
+It exists so workers can spend pooled Claude subscription capacity while the native login stays available for the primary session.
+It is selected exactly like any other adapter - `config/crew-harness`, `config/secondmate-harness`, a `config/crew-dispatch.json` profile, or `fm-spawn.sh --harness claude-pool` - and it changes nothing about any other adapter.
+Selecting `claude` continues to use the native login unchanged.
+
+The route requires an explicit `--model` naming a model the pool serves.
+Before creating any endpoint, `fm-spawn.sh` validates that model through [`bin/fm-claude-pool.sh`](../bin/fm-claude-pool.sh), which reads the pool's own `/v1/models` catalog and requires the id to be present with `owned_by: anthropic`.
+This check is not a formality: the pool serves Anthropic and OpenAI models on the same Anthropic-shaped endpoint and answers both, so without it a launch could run a GPT model behind the Claude CLI.
+Validation happens before launch because a broken route fails slowly and opaquely at the worker rather than visibly.
+
+Every failure is terminal for that spawn: a missing model, an unknown model, a non-Anthropic model, an unreachable pool, and a missing credential source are each reported with their own reason.
+None of them falls back to the native Claude login, another harness, or another model.
+Correct the route or select a different harness explicitly.
+
+`config/claude-pool` is an optional local, gitignored file of `key = value` lines that overrides the shipped defaults.
+It holds paths, names, and a URL only, and the script refuses a credential-shaped value rather than letting a key be stored in a config surface.
+
+| key | default | meaning |
+| --- | --- | --- |
+| `base-url` | `http://127.0.0.1:8317` | the local pool endpoint |
+| `secret-file` | `~/.config/cliproxy/shell.zsh` | the file the pool key is read from |
+| `secret-var` | `CLIPROXY_API_KEY` | the variable to extract from that file |
+
+The credential never reaches a command line.
+The Claude CLI obtains it through its `apiKeyHelper` setting, which invokes `bin/fm-claude-pool.sh secret`, so it is absent from the launch command, the process table, the pane, and task metadata.
+The source file is parsed, never sourced, so a worker launch cannot execute an operator's interactive shell configuration and does not depend on an interactive shell having run.
+That is what makes the route work from the non-interactive launch path a remote second mate uses.
+`config/claude-pool` is inherited into secondmate homes, so a secondmate's own crewmates resolve the same route.
+
+The proxy alone selects the pooled account.
+Firstmate names, reserves, and reports no account, and a passing check discloses `binds_account: false`; [`docs/verification/pool-account-routing.md`](verification/pool-account-routing.md) owns that evidence.
+`bin/fm-claude-pool.sh --help` owns the exact commands, exit codes, and environment overrides, and [`docs/verification/claude-pool-route.md`](verification/claude-pool-route.md) owns the empirical facts this route rests on.
+
+`claude-pool` is a crewmate and secondmate launch adapter only; the primary-session harness set in [README requirements](../README.md#requirements) is unchanged.
+
 ## X mode (.env)
 
 X mode lets a firstmate instance answer public `@myfirstmate` mentions and act on normal reversible mention requests through firstmate's normal lifecycle.
