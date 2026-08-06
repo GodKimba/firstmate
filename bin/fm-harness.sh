@@ -13,6 +13,12 @@
 #                                        config/secondmate-harness, or empty when absent.
 #        fm-harness.sh secondmate-effort   print the optional EFFORT token from
 #                                        config/secondmate-harness, or empty when absent.
+# "claude-pool" is a valid CONFIGURED value for the crew and secondmate modes
+# above (the Claude CLI routed through the local CLIProxyAPI pool; see
+# bin/fm-claude-pool.sh). It is deliberately never a DETECTED value: the running
+# process is the ordinary claude executable, so own-harness detection reports
+# "claude" for a pool-routed agent, which is correct - detection answers "which
+# CLI am I", not "which credential route launched me".
 # config/secondmate-harness format: a single line "<harness> [<model>] [<effort>]",
 # whitespace-separated. A bare "<harness>" (today's format) behaves exactly as before:
 # harness only, no model/effort. Only the first non-empty, non-comment line is parsed.

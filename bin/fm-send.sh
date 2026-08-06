@@ -352,10 +352,16 @@ fm_send_recover_claude_vim() {
     echo "error: --recover-claude-vim requires a recorded task selector" >&2
     return 1
   }
-  [ "$TARGET_HARNESS" = claude ] || {
-    echo "error: --recover-claude-vim is only valid for a recorded Claude task (target harness=${TARGET_HARNESS:-unknown})" >&2
-    return 1
-  }
+  # Both Claude adapters run the same CLI and so share its Vim-mode composer
+  # quirk; claude-pool differs only in which credential the CLI authenticates
+  # with, which this recovery never touches.
+  case "$TARGET_HARNESS" in
+    claude|claude-pool) ;;
+    *)
+      echo "error: --recover-claude-vim is only valid for a recorded Claude task (target harness=${TARGET_HARNESS:-unknown})" >&2
+      return 1
+      ;;
+  esac
   fm_backend_supports_claude_vim_recovery "$TARGET_BACKEND" || {
     echo "error: --recover-claude-vim is unsupported on backend '$TARGET_BACKEND'; no key was sent" >&2
     return 1

@@ -202,7 +202,7 @@ The full cmux home label also includes a short hash of the resolved `FM_ROOT` pa
 
 ## Harness support
 
-claude, codex, opencode, pi, pi-signed, grok, and kimi are empirically verified for crewmate and secondmate launches; [README requirements](../README.md#requirements) own the set supported for the primary session.
+claude, claude-pool, codex, opencode, pi, pi-signed, grok, and kimi are empirically verified for crewmate and secondmate launches; [README requirements](../README.md#requirements) own the set supported for the primary session.
 New harnesses get verified through a supervised trial task before joining the set.
 The verified adapter knowledge - each harness's busy-state source, interrupt and exit commands, skill-invocation syntax, and per-harness quirks - lives in [`.agents/skills/harness-adapters/SKILL.md`](../.agents/skills/harness-adapters/SKILL.md).
 Launch mechanics, including the verified command templates, live in [`bin/fm-spawn.sh`](../bin/fm-spawn.sh).
@@ -312,7 +312,7 @@ When a running home advances and its loaded instruction surface (`AGENTS.md`, `b
 If that send fails, bootstrap keeps an idempotent retry marker and emits `NUDGE_SECONDMATES:` with the failure reason.
 The same bootstrap run emits `SECONDMATE_LIVENESS:` only when a registered secondmate is skipped or its relaunch fails; already-live and successfully relaunched secondmates are handled silently.
 For a mid-session inherited local-material edit where tracked-file sync is not needed, run `bin/fm-config-push.sh`.
-It uses the same live secondmate discovery and propagation helper as bootstrap, prints each live home's `crew-dispatch.json`, `crew-harness`, `backlog-backend`, `backend`, `herdr-presentation-spaces`, `startup-memory-budget`, and `data/captain-shared.md` result as `pushed`, `unchanged`, `skipped`, or `error`, and exits non-zero for real propagation errors or config-reread send failures.
+It uses the same live secondmate discovery and propagation helper as bootstrap, prints each live home's declared inherited-item results as `pushed`, `unchanged`, `skipped`, or `error`, and exits non-zero for real propagation errors or config-reread send failures.
 When an allowlisted config item changes for an already-running home, it sends the literal-content reread pointer described in [`secondmate-provisioning`](../.agents/skills/secondmate-provisioning/SKILL.md); unchanged allowlisted config sends no pointer unless a previous delivery is pending.
 The locked bootstrap inheritance pass uses the same per-home changed-set and reread path for already-running homes; see `secondmate-provisioning` for the single contract owner.
 That live discovery starts from `state/*.meta` records with `kind=secondmate`; `data/secondmates.md` only backfills `home=` for older or incomplete meta records.
@@ -354,6 +354,43 @@ The panel artifact is private local operational detail about paid subscriptions.
 Open it only from its local path; it carries no credential and no full account address, but it must not be published, shared, or attached to an issue, a pull request, or a commit.
 
 GitHub stays with `gh-axi`; this view is subscription quota only.
+
+## Claude pool route (`claude-pool` / config/claude-pool)
+
+`claude-pool` is a worker harness adapter that runs the ordinary Claude CLI against the local CLIProxyAPI pool instead of the ambient native Claude login.
+It exists so workers can spend pooled Claude subscription capacity while the native login stays available for the primary session.
+It is selected exactly like any other adapter - `config/crew-harness`, `config/secondmate-harness`, a `config/crew-dispatch.json` profile, or `fm-spawn.sh --harness claude-pool` - and it changes nothing about any other adapter.
+Selecting `claude` continues to use the native login unchanged.
+
+The route requires an explicit `--model` naming a model the pool serves.
+Before creating any endpoint, `fm-spawn.sh` validates that model through [`bin/fm-claude-pool.sh`](../bin/fm-claude-pool.sh), which reads the pool's own `/v1/models` catalog and requires the id to be present with `owned_by: anthropic`.
+This check is not a formality: the pool serves Anthropic and OpenAI models on the same Anthropic-shaped endpoint and answers both, so without it a launch could run a GPT model behind the Claude CLI.
+Validation happens before launch because a broken route fails slowly and opaquely at the worker rather than visibly.
+
+Every failure is terminal for that spawn: a missing model, an unknown model, a non-Anthropic model, an unreachable pool, and a missing credential source are each reported with their own reason.
+None of them falls back to the native Claude login, another harness, or another model.
+Correct the route or select a different harness explicitly.
+
+`config/claude-pool` is an optional local, gitignored file of `key = value` lines that overrides the shipped defaults.
+It holds paths, names, and a URL only, and the script refuses a credential-shaped value rather than letting a key be stored in a config surface.
+
+| key | default | meaning |
+| --- | --- | --- |
+| `base-url` | `http://127.0.0.1:8317` | the local pool endpoint |
+| `secret-file` | `~/.config/cliproxy/shell.zsh` | the file the pool key is read from |
+| `secret-var` | `CLIPROXY_API_KEY` | the variable to extract from that file |
+
+The credential never reaches a command line.
+The Claude CLI obtains it through its `apiKeyHelper` setting, which invokes `bin/fm-claude-pool.sh secret`, so it is absent from the launch command, the process table, the pane, and task metadata.
+The source file is parsed, never sourced, so a worker launch cannot execute an operator's interactive shell configuration and does not depend on an interactive shell having run.
+That is what makes the route work from the non-interactive launch path a remote second mate uses.
+`config/claude-pool` is inherited into secondmate homes, so a secondmate's own crewmates resolve the same route.
+
+The proxy alone selects the pooled account.
+Firstmate names, reserves, and reports no account, and a passing check discloses `binds_account: false`; [`docs/verification/pool-account-routing.md`](verification/pool-account-routing.md) owns that evidence.
+`bin/fm-claude-pool.sh --help` owns the exact commands, exit codes, and environment overrides, and [`docs/verification/claude-pool-route.md`](verification/claude-pool-route.md) owns the empirical facts this route rests on.
+
+`claude-pool` is a crewmate and secondmate launch adapter only; the primary-session harness set in [README requirements](../README.md#requirements) is unchanged.
 
 ## X mode (.env)
 

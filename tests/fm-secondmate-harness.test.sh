@@ -12,13 +12,11 @@
 #      this knob existed (full backward-compat). fm-spawn.sh resolves a secondmate
 #      launch through that mode, durably (every respawn re-resolves), while an
 #      explicit per-spawn harness arg still wins.
-#   B) Inheritance. The primary pushes a declared, extensible set of LOCAL
-#      (gitignored) config items - config/crew-dispatch.json, config/crew-harness,
-#      config/backlog-backend, config/backend, config/herdr-presentation-spaces, and
-#      config/startup-memory-budget -
-#      down into each secondmate home's config/, so the secondmate's OWN crewmates,
-#      dispatch profiles, backlog backend, runtime-backend default, and Herdr
-#      presentation opt-in inherit the primary's settings. It is primary-authoritative
+#   B) Inheritance. The primary pushes the declared, extensible set of LOCAL
+#      (gitignored) config items owned by FM_INHERITABLE_CONFIG in
+#      bin/fm-config-inherit-lib.sh down into each secondmate home's config/, so
+#      the secondmate home and its OWN crewmates inherit the primary's settings.
+#      It is primary-authoritative
 #      (re-pushed at secondmate spawn, on the bootstrap secondmate sweep, and by
 #      config push).
 #      config/secondmate-harness is deliberately NOT inherited (secondmates do

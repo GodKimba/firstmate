@@ -1,6 +1,6 @@
 ---
 name: harness-adapters
-description: Agent-only reference for firstmate harness operations. Use before spawning or recovering a crewmate or secondmate, handling a trust dialog, sending a harness-specific skill invocation, interrupting or exiting an agent, resuming an exited agent, or verifying a new harness adapter. Contains verified facts for claude, codex, opencode, pi, pi-signed, grok, and kimi.
+description: Agent-only reference for firstmate harness operations. Use before spawning or recovering a crewmate or secondmate, handling a trust dialog, sending a harness-specific skill invocation, interrupting or exiting an agent, resuming an exited agent, or verifying a new harness adapter. Contains verified facts for claude, claude-pool, codex, opencode, pi, pi-signed, grok, and kimi.
 user-invocable: false
 metadata:
   internal: true
@@ -122,7 +122,7 @@ The supported launch-profile flags below are verified locally; each row records 
 
 | Harness | Model flag | Effort flag | Notes |
 |---|---|---|---|
-| claude | `--model <model>` | `--effort <low\|medium\|high\|xhigh\|max>` | Verified on Claude Code 2.1.196. |
+| claude / claude-pool | `--model <model>` | `--effort <low\|medium\|high\|xhigh\|max>` | Both adapters use the identical Claude CLI flags; verified on Claude Code 2.1.196. |
 | codex | `--model <model>` | `-c 'model_reasoning_effort="<low\|medium\|high\|xhigh>"'` | Verified on codex-cli 0.142.1. The installed binary schema contains `model_reasoning_effort`, the active config uses it, and the bundled model catalog advertises only low/medium/high/xhigh. `max` is omitted. |
 | grok | `--model <model>` | `--reasoning-effort <low\|medium\|high>` | Verified on grok 0.2.99 (2026-07-13). `--effort` is an alias, but firstmate's profile axis is reasoning effort. As of 0.2.99 the ceiling is `high`; both `xhigh` and `max` are rejected with `use one of: high, medium, low`, so firstmate omits them. |
 | pi / pi-signed | `--model <model>` | `--thinking <low\|medium\|high\|xhigh\|max>` | Verified 2026-07-27 on Pi and pi-signed 0.82.0. Both expose the same accepted thinking levels and completed the same model-qualified max-thinking smoke. |
@@ -142,6 +142,7 @@ Use the discovery surface in the current authenticated environment because suppo
 | Harness | Authoritative discovery surface |
 |---|---|
 | claude | Open the current interactive session's `/model` picker; `claude --help` documents the accepted alias or full-model-name input shape. |
+| claude-pool | Run `bin/fm-claude-pool.sh check --model <id>`; it accepts only an id the pool's current `/v1/models` catalog reports with `owned_by: anthropic`. |
 | codex | Open the current interactive session's `/model` picker. |
 | opencode | Run `opencode models [provider]`, which lists available provider/model identifiers. |
 | pi / pi-signed | Run the selected executable as `<executable> --list-models [search]`; Pi's installed `docs/models.md` owns how built-in, extension-registered, and custom provider/model entries reach that list. |
@@ -160,7 +161,7 @@ This preserves launch success instead of passing a known-bad value.
 Send the validation skill using the target harness's skill invocation form.
 Natural language is acceptable if uncertain.
 
-- claude: `/<skill>`, for example `/no-mistakes`.
+- claude and claude-pool: `/<skill>`, for example `/no-mistakes`.
 - codex: `$<skill>`, for example `$no-mistakes`; `/<skill>` is claude-only and codex rejects it as "Unrecognized command".
 - opencode: no separate verified skill invocation beyond normal slash-command behavior; use natural language if the exact skill command is uncertain.
 - pi and pi-signed: no separate verified skill invocation beyond normal command behavior; use natural language if the exact skill command is uncertain.
@@ -198,12 +199,12 @@ The applicability review is explicit so this recovery contract cannot silently s
 
 | Axis | Result |
 |---|---|
-| Claude on tmux | Supported through the shared tmux composer classifier and Enter-only submit core. |
-| Claude on Herdr | Supported through the shared Herdr composer locator, fresh pane capture, native post-Enter agent-state proof, and no `send-text` call on pending recovery. |
-| Claude on Zellij | Unaffected and refused before input because Zellij has no positive shared composer-state read. |
-| Claude on Orca | Unaffected and refused before input because Orca exposes no Escape primitive. |
-| Claude on cmux | Unaffected and refused before input because this bare Claude Vim composer and interruption proof have not been validated there. |
-| Codex, OpenCode, Pi, pi-signed, Grok, and Kimi | Unaffected and refused before backend input because the command requires recorded `harness=claude`; their existing interrupt keys and ordinary sends do not change. |
+| claude / claude-pool on tmux | Supported through the shared tmux composer classifier and Enter-only submit core. |
+| claude / claude-pool on Herdr | Supported through the shared Herdr composer locator, fresh pane capture, native post-Enter agent-state proof, and no `send-text` call on pending recovery. |
+| claude / claude-pool on Zellij | Unaffected and refused before input because Zellij has no positive shared composer-state read. |
+| claude / claude-pool on Orca | Unaffected and refused before input because Orca exposes no Escape primitive. |
+| claude / claude-pool on cmux | Unaffected and refused before input because this bare Claude Vim composer and interruption proof have not been validated there. |
+| Codex, OpenCode, Pi, pi-signed, Grok, and Kimi | Unaffected and refused before backend input because the command requires recorded `harness=claude` or `harness=claude-pool`; their existing interrupt keys and ordinary sends do not change. |
 
 First launch in a fresh worktree, or first ever on a machine, may show a trust or bypass-permissions confirmation.
 After every spawn, peek the pane within about 20 seconds.
@@ -211,7 +212,7 @@ If such a dialog is showing, accept it from an active firstmate session using `F
 
 Claude renders a predicted-next-prompt suggestion as dim/faint text inside an otherwise-empty composer after a turn completes.
 A plain `tmux capture-pane` cannot tell that ghost text apart from typed text.
-Firstmate launches every claude crewmate and secondmate with `CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false`, scoped to firstmate-launched agents through `bin/fm-spawn.sh`, so it never touches the captain's global config.
+Firstmate launches every claude and claude-pool crewmate and secondmate with `CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false`, scoped to firstmate-launched agents through `bin/fm-spawn.sh`, so it never touches the captain's global config.
 The CLI's `--prompt-suggestions` flag is print/SDK-mode only and does not suppress the interactive composer ghost text, verified empirically on v2.1.186.
 As defense in depth for any pane that flag cannot reach, including the captain's own firstmate composer that away-mode reads, the shared `fm_composer_strip_ghost` extractor in `bin/fm-composer-lib.sh` removes dim/faint SGR 2 ghost runs before pending-input classification on both ANSI-capable readers (tmux and herdr).
 Its broader dark-TRUECOLOR placeholder handling and dark-theme tradeoff are documented in `docs/herdr-backend.md` "Composer and injection safety", with active captures in `docs/verification/runtime-backends.md`.
@@ -225,6 +226,31 @@ Claude Code's stdin payload to a Stop hook carries a `stop_hook_active` boolean 
 A project-level `.claude/settings.json` only takes effect when Claude Code's project root is that exact directory - it does not walk up from a subdirectory looking for one, so firstmate launches the primary from the repo root.
 After those settings are loaded, hook command resolution is still cwd-sensitive because Claude Code runs commands through `/bin/sh` against the session's current cwd; keep the tracked commands anchored through `"$CLAUDE_PROJECT_DIR"/bin/...` and see `docs/turnend-guard.md` for the verified Stop-hook details.
 Claude Code's primary watcher protocol is Stop-owned: the auto-arm hook fires on every Stop and foregrounds `bin/fm-watch-arm.sh` when the home is eligible and still needs supervision, and its exit-2 `asyncRewake` rewake is the wake; the model drains and handles wakes but never runs a routine re-arm command.
+
+## claude-pool (VERIFIED 2026-08-06; the same Claude CLI on the local CLIProxyAPI pool)
+
+`claude-pool` is a worker-launch adapter, not a second Claude harness.
+It runs the identical Claude CLI against the captain's local CLIProxyAPI pool instead of the ambient native login, so **every worker-operation fact in the `claude` section above applies unchanged**: busy state, exit command, interrupt and Vim recovery, and skill invocation.
+Only the credential route differs.
+
+| Fact | Value |
+|---|---|
+| Selection | Explicit only: `--harness claude-pool`, `config/crew-harness`, `config/secondmate-harness`, or a dispatch profile. Never a fallback for `claude`. |
+| Model | Required. The spawn refuses without an explicit `--model`, and refuses any model the pool's catalog does not list as `owned_by: anthropic`. |
+| Effort | Full `low`..`max` range, exactly as `claude`. |
+| Credential | Claude's `apiKeyHelper` via `--settings`, resolved by `bin/fm-claude-pool.sh`. Never in argv, meta, or the pane. |
+| Own-harness detection | Reports `claude`, correctly - the running CLI is claude. Detection never returns `claude-pool`. |
+| Primary session | Not supported. Crewmate and secondmate launches only. |
+
+Two operating cautions this entry exists to preserve:
+
+- The pool serves OpenAI models on the same Anthropic-shaped endpoint and answers them with HTTP 200, so reaching the pool is not evidence that a Claude model is running.
+  This is exactly how the older `claude-sol` shell function ran `gpt-5.6-sol` behind the Claude CLI.
+  Never bypass the catalog family check to "just get a worker started".
+- A wrong credential or an unreachable pool surfaces at the worker only as a bare `Execution error` after tens of seconds of retries.
+  If a claude-pool worker looks wedged early in its life, read `bin/fm-claude-pool.sh check --model <model>` before treating it as a stuck agent.
+
+`docs/configuration.md` owns the operator contract and `docs/verification/claude-pool-route.md` owns the evidence.
 
 ## codex (VERIFIED 2026-06-11, codex-cli 0.139.0)
 

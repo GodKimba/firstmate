@@ -70,11 +70,18 @@
 #   profile consultation. A --secondmate spawn is exempt and resolves the SECONDMATE
 #   harness (config/secondmate-harness -> config/crew-harness -> own), so the
 #   secondmate-vs-crewmate split is DURABLE across every respawn (recovery,
-#   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|pi-signed|grok|kimi)
+#   /updatefirstmate, restart). A bare adapter name (claude|claude-pool|codex|opencode|pi|pi-signed|grok|kimi)
 #   overrides it for this spawn (either kind). A non-flag string containing
 #   whitespace is treated as a RAW launch command - the escape hatch for verifying
 #   new adapters. pi-signed launches that exact executable name from PATH and
 #   refuses before endpoint creation when it is unavailable; it never falls back to pi.
+#   claude-pool is the same shape for the Claude CLI: it launches claude against
+#   the local CLIProxyAPI pool, requires an explicit --model, and refuses before
+#   endpoint creation unless bin/fm-claude-pool.sh proves that pool serves that
+#   exact model as an Anthropic model. It never falls back to the native claude
+#   login, to another harness, or to another model. Its credential reaches the
+#   CLI through an apiKeyHelper, so no launch word, meta field, or pane line
+#   carries one.
 #   config/secondmate-harness may also carry an optional model and effort as extra
 #   whitespace-separated tokens ("<harness> [<model>] [<effort>]"). For a
 #   --secondmate spawn, those tokens apply only when this spawn also resolves its
@@ -452,7 +459,7 @@ FIRSTMATE_HOME=
 
 if [ "$KIND" = secondmate ]; then
   case "${POS[1]:-}" in
-    ''|claude|codex|opencode|pi|pi-signed|grok|kimi)
+    ''|claude|claude-pool|codex|opencode|pi|pi-signed|grok|kimi)
       ARG3=${POS[1]:-}
       ;;
     *' '*)
@@ -490,6 +497,20 @@ launch_template() {
     # var is the correct control. The dim-aware composer reader in fm-tmux-lib.sh is
     # the defense-in-depth backstop for any pane this flag cannot reach.
     claude) printf '%s' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+    # claude-pool: the same Claude CLI, pointed at the captain's local
+    # CLIProxyAPI pool instead of the ambient native login. Only three things
+    # differ from the `claude` arm above, and each is deliberate:
+    #   ANTHROPIC_BASE_URL sends requests to the pool. It is a URL, not a secret.
+    #   -u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN drop any inherited ambient
+    #     Anthropic credential so the route cannot silently authenticate as
+    #     something other than the pool key this launch resolved.
+    #   --settings carries an apiKeyHelper that invokes bin/fm-claude-pool.sh, so
+    #     the credential is fetched by the CLI at need and never appears in this
+    #     launch command, the process table, the pane, or task metadata.
+    # --settings ADDS settings; it does not replace the per-worktree
+    # .claude/settings.local.json this script writes for the busy-state hook.
+    # bin/fm-claude-pool.sh owns the pool contract; this is only its launch shape.
+    claude-pool) printf '%s' 'env -u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN ANTHROPIC_BASE_URL=__POOLBASEURL__ CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions --settings __POOLSETTINGS__ __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
     codex)
       if [ "$kind" = secondmate ]; then
         printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
@@ -641,7 +662,7 @@ model_flag_for_harness() {
   local harness=$1 model=$2
   [ -n "$model" ] && [ "$model" != default ] || return 0
   case "$harness" in
-    claude|codex|opencode|pi|pi-signed|grok|kimi)
+    claude|claude-pool|codex|opencode|pi|pi-signed|grok|kimi)
       printf -- '--model %s ' "$(shell_quote "$model")"
       ;;
   esac
@@ -651,7 +672,7 @@ effort_flag_for_harness() {
   local harness=$1 effort=$2
   [ -n "$effort" ] && [ "$effort" != default ] || return 0
   case "$harness" in
-    claude)
+    claude|claude-pool)
       case "$effort" in
         low|medium|high|xhigh|max) printf -- '--effort %s ' "$(shell_quote "$effort")" ;;
       esac
@@ -687,6 +708,51 @@ effort_flag_for_harness() {
     # task metadata but never reaches the launch command.
   esac
 }
+
+# --- claude-pool route validation -------------------------------------------
+#
+# The pool route is validated BEFORE any endpoint exists, because both of its
+# runtime failure modes are silent and slow at the worker: an unreachable pool or
+# a rejected credential makes the Claude CLI retry and then print a bare
+# "Execution error" minutes later, and a wrong-family model id succeeds outright
+# while running a GPT model behind the Claude CLI. Neither is something a
+# supervisor can read off a pane, so both are turned into a loud refusal here,
+# while the only cost of a spawn that would have worked is one catalog read.
+#
+# A refusal is terminal for this spawn. Nothing below substitutes the native
+# `claude` adapter, another harness, or another model: selecting claude-pool is
+# an explicit request for pooled Claude capacity, so a broken route must be
+# reported and fixed rather than silently served from somewhere else.
+#
+# bin/fm-claude-pool.sh owns the route contract; this block only enforces that a
+# claude-pool launch cannot be constructed without a passing check.
+if [ "$HARNESS" = claude-pool ]; then
+  POOL_SH="$SCRIPT_DIR/fm-claude-pool.sh"
+  [ -x "$POOL_SH" ] || { echo "error: the claude-pool route requires $POOL_SH" >&2; exit 1; }
+  # The pool serves many models and Claude's own default-model resolution knows
+  # nothing about which of them this pool exposes, so an implicit default would
+  # be a guess. Require the model to be named.
+  if [ -z "$MODEL" ] || [ "$MODEL" = default ]; then
+    echo "error: the claude-pool harness requires an explicit --model naming a Claude model the pool serves (for example --model claude-opus-5); it never guesses a default and never falls back to the native Claude login" >&2
+    exit 1
+  fi
+  if POOL_CHECK=$("$POOL_SH" check --model "$MODEL" 2>&1); then
+    :
+  else
+    POOL_RC=$?
+    printf 'error: the claude-pool route is not usable for model %s (fm-claude-pool.sh check exit %s)\n' "$MODEL" "$POOL_RC" >&2
+    printf '%s\n' "$POOL_CHECK" >&2
+    echo "error: refusing to spawn; correct the pool route or select a different harness explicitly" >&2
+    exit 1
+  fi
+  # Both substitutions carry only a URL, this script's own path, the credential
+  # SOURCE path, and the variable NAME. No credential value is ever placed in the
+  # launch command, so it cannot reach the process table, the pane, or meta.
+  POOL_BASE_URL=$("$POOL_SH" base-url) || { echo "error: cannot resolve the claude-pool base URL" >&2; exit 1; }
+  POOL_SETTINGS=$("$POOL_SH" settings-json) || { echo "error: cannot resolve the claude-pool settings payload" >&2; exit 1; }
+  LAUNCH=${LAUNCH//__POOLBASEURL__/$(shell_quote "$POOL_BASE_URL")}
+  LAUNCH=${LAUNCH//__POOLSETTINGS__/$(shell_quote "$POOL_SETTINGS")}
+fi
 
 case "$LAUNCH" in
   *__KIMIBIN__*)
@@ -2059,9 +2125,17 @@ LAUNCH=${LAUNCH//__OPINPUT__/$sq_opinput}
 # Forward firstmate's own resolved store onto the claude launch so the crewmate
 # uses the same credential/config firstmate is authenticated with. Only when set;
 # an unset value is the single-store default and needs no prefix.
-if [ "$HARNESS" = claude ] && [ -n "${CLAUDE_CONFIG_DIR:-}" ]; then
-  LAUNCH="CLAUDE_CONFIG_DIR=$(shell_quote "$CLAUDE_CONFIG_DIR") $LAUNCH"
-fi
+# claude-pool runs the same executable and needs the same store for everything
+# that is NOT the credential (settings, history, plugins), so it is forwarded
+# identically. The pool route's own credential still comes from its apiKeyHelper,
+# never from this store.
+case "$HARNESS" in
+  claude|claude-pool)
+    if [ -n "${CLAUDE_CONFIG_DIR:-}" ]; then
+      LAUNCH="CLAUDE_CONFIG_DIR=$(shell_quote "$CLAUDE_CONFIG_DIR") $LAUNCH"
+    fi
+    ;;
+esac
 if [ "$KIND" = secondmate ]; then
   sq_home=$(shell_quote "$PROJ_ABS")
   # A secondmate runs its OWN primary firstmate session, so it must NOT carry the

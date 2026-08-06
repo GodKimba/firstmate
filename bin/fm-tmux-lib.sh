@@ -102,7 +102,10 @@ fm_busy_lines_match() {  # [harness]
     regex=$FM_BUSY_REGEX
   else
     case "$harness" in
-      claude) regex=$FM_TMUX_CLAUDE_BUSY_REGEX_DEFAULT ;;
+      # claude-pool is the same Claude CLI on a different credential route, so it
+      # renders the identical busy signature. This is a shared signature, not a
+      # borrowed one.
+      claude|claude-pool) regex=$FM_TMUX_CLAUDE_BUSY_REGEX_DEFAULT ;;
       codex) regex=$FM_TMUX_CODEX_BUSY_REGEX_DEFAULT ;;
       opencode) regex=$FM_TMUX_OPENCODE_BUSY_REGEX_DEFAULT ;;
       pi|pi-signed) regex=$FM_TMUX_PI_BUSY_REGEX_DEFAULT ;;
