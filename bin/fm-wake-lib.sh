@@ -80,20 +80,74 @@ fm_path_age() {
   echo $(( $(date +%s) - m ))
 }
 
+# Identity-verified match between a pid and a pid/pid-identity lock directory.
+# Generic because the away supervisor holds TWO such locks - the watcher lock and
+# its own daemon lock - and both must be proven by identity, not by pid reuse.
+# On success FM_PID_LOCK_MATCHED_IDENTITY carries the verified identity.
+FM_PID_LOCK_MATCHED_IDENTITY=
+fm_pid_lock_matches_pid() {
+  local lockdir=$1 pid=$2 lock_pid lock_identity current_identity
+  FM_PID_LOCK_MATCHED_IDENTITY=
+  lock_pid=$(cat "$lockdir/pid" 2>/dev/null || true)
+  lock_identity=$(cat "$lockdir/pid-identity" 2>/dev/null || true)
+  [ "$lock_pid" = "$pid" ] || return 1
+  [ -n "$lock_identity" ] || return 1
+  current_identity=$(fm_pid_identity "$pid") || return 1
+  [ "$current_identity" = "$lock_identity" ] || return 1
+  FM_PID_LOCK_MATCHED_IDENTITY=$current_identity
+}
+
+fm_pid_parent() {
+  local pid=$1 parent
+  case "$pid" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  parent=$(LC_ALL=C ps -p "$pid" -o ppid= 2>/dev/null | tr -d '[:space:]') || return 1
+  case "$parent" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  printf '%s\n' "$parent"
+}
+
 FM_WATCHER_MATCHED_IDENTITY=
 fm_watcher_lock_matches_pid() {
-  local state=$1 watch_path=$2 pid=$3 home=${4:-$FM_HOME} lockdir lock_home lock_path lock_identity current_identity
+  local state=$1 watch_path=$2 pid=$3 home=${4:-$FM_HOME} lockdir lock_home lock_path
   FM_WATCHER_MATCHED_IDENTITY=
   lockdir="$state/.watch.lock"
   lock_home=$(cat "$lockdir/fm-home" 2>/dev/null || true)
   lock_path=$(cat "$lockdir/watcher-path" 2>/dev/null || true)
-  lock_identity=$(cat "$lockdir/pid-identity" 2>/dev/null || true)
   [ "$lock_home" = "$home" ] || return 1
   [ "$lock_path" = "$watch_path" ] || return 1
-  [ -n "$lock_identity" ] || return 1
-  current_identity=$(fm_pid_identity "$pid") || return 1
-  [ "$current_identity" = "$lock_identity" ] || return 1
-  FM_WATCHER_MATCHED_IDENTITY=$lock_identity
+  fm_pid_lock_matches_pid "$lockdir" "$pid" || return 1
+  FM_WATCHER_MATCHED_IDENTITY=$FM_PID_LOCK_MATCHED_IDENTITY
+}
+
+# Is this home's identity-verified watcher lock held on behalf of the away
+# supervisor? Proven through the daemon's own lock and the watcher's real parent,
+# never from an environment variable an unrelated process could carry.
+fm_watcher_lock_away_supervised() {
+  local state=$1 watch_path=${2:-} pid=${3:-} home=${4:-$FM_HOME}
+  local lockdir lock_owner owner_pid owner_identity watcher_parent
+  lockdir="$state/.watch.lock"
+  [ -n "$watch_path" ] && [ -n "$pid" ] || return 1
+  fm_watcher_lock_matches_pid "$state" "$watch_path" "$pid" "$home" || return 1
+  lock_owner=$(cat "$lockdir/owner" 2>/dev/null || true)
+  case "$lock_owner" in
+    away-supervisor)
+      owner_pid=$(cat "$lockdir/owner-pid" 2>/dev/null || true)
+      owner_identity=$(cat "$lockdir/owner-pid-identity" 2>/dev/null || true)
+      [ -n "$owner_pid" ] && [ -n "$owner_identity" ] || return 1
+      watcher_parent=$(fm_pid_parent "$pid") || return 1
+      [ "$watcher_parent" = "$owner_pid" ] || return 1
+      fm_pid_lock_matches_pid "$state/.supervise-daemon.lock" "$owner_pid" || return 1
+      [ "$FM_PID_LOCK_MATCHED_IDENTITY" = "$owner_identity" ]
+      ;;
+    '')
+      if [ -e "$state/.afk" ]; then return 0; fi
+      return 1
+      ;;
+    *) return 1 ;;
+  esac
 }
 
 FM_WATCHER_HEALTHY_PID=

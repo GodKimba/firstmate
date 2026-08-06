@@ -854,6 +854,21 @@ printf '%s\n' "$WATCH_PATH" > "$WATCH_LOCK/watcher-path" || true
 FM_WATCH_DELIVERY_PID=$WATCHER_PID
 FM_WATCH_DELIVERY_IDENTITY=$(fm_pid_identity "$WATCHER_PID" 2>/dev/null || true)
 printf '%s\n' "$FM_WATCH_DELIVERY_IDENTITY" > "$WATCH_LOCK/pid-identity" 2>/dev/null || true
+# Record who started this cycle so an arm path can tell a daemon-owned watcher
+# from an ordinary one. Written only when the claimed owner's own daemon lock
+# verifies by identity, and torn down as a set if any part fails, so a partial
+# record can never read as away-supervised.
+if [ "${FM_WATCH_OWNER:-}" = away-supervisor ] \
+  && fm_pid_lock_matches_pid "$STATE/.supervise-daemon.lock" "$PPID"; then
+  WATCH_OWNER_IDENTITY=$FM_PID_LOCK_MATCHED_IDENTITY
+  if printf '%s\n' "$PPID" > "$WATCH_LOCK/owner-pid" \
+    && printf '%s\n' "$WATCH_OWNER_IDENTITY" > "$WATCH_LOCK/owner-pid-identity" \
+    && printf '%s\n' away-supervisor > "$WATCH_LOCK/owner"; then
+    :
+  else
+    rm -f "$WATCH_LOCK/owner" "$WATCH_LOCK/owner-pid" "$WATCH_LOCK/owner-pid-identity" 2>/dev/null || true
+  fi
+fi
 
 [ -e "$STATE/.last-heartbeat" ] || touch "$STATE/.last-heartbeat"
 
