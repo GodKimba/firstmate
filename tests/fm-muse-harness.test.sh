@@ -105,7 +105,20 @@ set -u
 exec "$FM_FAKE_MUSE_VERSIONED" -c 'result=$($FM_FAKE_HARNESS_PROBE); printf "%s" "$result" > "$FM_FAKE_HARNESS_RESULT"'
 SH
   chmod +x "$fakebin/muse"
-  fm_fake_exit0 "$fakebin" treehouse gh-axi gh
+  fm_fake_exit0 "$fakebin" gh-axi gh
+  # Teardown asks the provider which return route a worktree is on before it
+  # returns anything, and a bare exit-0 stub answers with no route at all, which
+  # this home's teardown correctly refuses. These cases are about the muse
+  # harness, not about generic-pool return, so the stub reports the ordinary
+  # managed route and nothing else.
+  cat > "$fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  firstmate-return-route) printf 'managed' ;;
+esac
+exit 0
+SH
+  chmod +x "$fakebin/treehouse"
   printf '%s\n' "$fakebin"
 }
 
