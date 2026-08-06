@@ -13,6 +13,9 @@ set -u
 # shellcheck source=tests/wake-helpers.sh
 . "$(dirname "${BASH_SOURCE[0]}")/wake-helpers.sh"
 
+# shellcheck source=/dev/null
+. "$ROOT/bin/fm-classify-lib.sh"
+
 DRAIN="$ROOT/bin/fm-wake-drain.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-wake-drain-open-decisions-cursor-tests)
@@ -270,8 +273,109 @@ SH
   pass "a cursor-cache read failure refolds the authoritative status file without hiding an open decision"
 }
 
+test_append_after_size_snapshot_is_folded_once() {
+  local dir state fakebin status out probe appended real_tail before_bytes probe_bytes
+  local key verb instance summary token
+  dir=$(make_case cursor-snapshot-bound)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  status="$state/task6.status"
+  out="$dir/drain.out"
+  probe="$dir/probe.tsv"
+  appended="$dir/appended"
+  real_tail=$(command -v tail)
+  fm_decision_cutover_ensure_status "$status" \
+    || fail "could not establish the cursor snapshot fixture"
+  before_bytes=$(LC_ALL=C wc -c < "$status" | tr -d '[:space:]')
+  : > "$probe"
+  cat > "$fakebin/tail" <<SH
+#!/usr/bin/env bash
+if [ "\${*: -1}" = "$status" ] && [ ! -e "$appended" ]; then
+  : > "$appended"
+  printf '%s\n' 'needs-decision [key=snapshot]: choose the bounded read' >> "$status"
+fi
+exec "$real_tail" "\$@"
+SH
+  chmod +x "$fakebin/tail"
+
+  FM_STATE_OVERRIDE="$state" FM_OPEN_DECISIONS_READ_PROBE="$probe" \
+    PATH="$fakebin:$PATH" "$DRAIN" > "$out" \
+    || fail "drain with an append between the size snapshot and content read failed"
+  probe_bytes=$(last_probe_bytes "$probe" "$status")
+  [ "$probe_bytes" = "$before_bytes" ] \
+    || fail "snapshot-bounded drain folded $probe_bytes bytes instead of the snapshotted $before_bytes"
+
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" \
+    || fail "drain of the post-snapshot append failed"
+  grep -F 'task6' "$out" | grep -F '[key=snapshot]' >/dev/null \
+    || fail "the post-snapshot decision did not surface on the next drain"
+  instance=''
+  while IFS=$'\t' read -r key verb instance summary || [ -n "$key" ]; do
+    [ "$key" = snapshot ] && [ "$verb" = needs-decision ] && break
+    instance=''
+  done <<EOF
+$(status_open_decisions "$status" --with-instance)
+EOF
+  [ -n "$instance" ] || fail "the authoritative fold did not expose the snapshot decision instance"
+  token=$(fm_decision_mint_answer_token "$instance") \
+    || fail "could not mint the snapshot decision token"
+  fm_decision_record_answer "$(fm_decision_answers_file "$status")" \
+    "$token" snapshot "$instance" >/dev/null \
+    || fail "could not record the snapshot decision token"
+  printf 'resolved [key=snapshot] [ans=%s]: bounded read confirmed\n' "$token" >> "$status"
+
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" \
+    || fail "snapshot decision resolution drain failed"
+  assert_not_contains "$(command cat "$out")" "[key=snapshot]" \
+    "the cursor assigned the post-snapshot append a duplicate physical position"
+  pass "bytes appended after the size snapshot are folded exactly once"
+}
+
+test_answer_revocation_invalidates_closed_cursor() {
+  local dir state status out key verb instance summary token
+  dir=$(make_case cursor-answer-revocation)
+  state="$dir/state"
+  status="$state/task7.status"
+  out="$dir/drain.out"
+  fm_decision_cutover_ensure_status "$status" \
+    || fail "could not establish the answer-revocation cursor fixture"
+  printf '%s\n' 'needs-decision [key=retry]: confirm the send' >> "$status"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" \
+    || fail "initial answer-revocation drain failed"
+
+  instance=''
+  while IFS=$'\t' read -r key verb instance summary || [ -n "$key" ]; do
+    [ "$key" = retry ] && [ "$verb" = needs-decision ] && break
+    instance=''
+  done <<EOF
+$(status_open_decisions "$status" --with-instance)
+EOF
+  [ -n "$instance" ] || fail "the answer-revocation fixture did not expose an instance"
+  token=$(fm_decision_mint_answer_token "$instance") \
+    || fail "could not mint the answer-revocation token"
+  fm_decision_record_answer "$(fm_decision_answers_file "$status")" \
+    "$token" retry "$instance" >/dev/null \
+    || fail "could not record the answer-revocation token"
+  printf 'resolved [key=retry] [ans=%s]: send appeared delivered\n' "$token" >> "$status"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" \
+    || fail "correlated-resolution drain failed"
+  assert_not_contains "$(command cat "$out")" "[key=retry]" \
+    "a live correlated answer failed to close the incremental decision"
+
+  fm_decision_revoke_answer "$(fm_decision_answers_file "$status")" \
+    "$token" retry "$instance" \
+    || fail "could not revoke the unconfirmed answer token"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" \
+    || fail "post-revocation drain failed"
+  grep -F 'task7' "$out" | grep -F '[key=retry]' | grep -F 'confirm the send' >/dev/null \
+    || fail "answer revocation left the cursor permanently closed: $(command cat "$out")"
+  pass "answer-record revocation invalidates the cursor and resurfaces the decision"
+}
+
 test_truncated_log_falls_back_to_a_full_refold_not_a_dropped_decision
 test_same_size_rewrite_is_detected_via_inode_identity
 test_read_failure_never_silently_returns_empty
 test_cursor_cache_read_failure_refolds_authoritative_status
+test_append_after_size_snapshot_is_folded_once
+test_answer_revocation_invalidates_closed_cursor
 test_buried_decision_survives_many_growing_drains_and_resolution_clears_it

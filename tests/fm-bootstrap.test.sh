@@ -898,6 +898,36 @@ test_crew_dispatch_active_rules_are_verbose_bootstrap_info() {
   pass "bootstrap surfaces active crew-dispatch rules only as verbose BOOTSTRAP_INFO"
 }
 
+test_crew_dispatch_missing_jq_is_actionable() {
+  local case_dir fakebin bash_env out
+  case_dir="$TMP_ROOT/dispatch-missing-jq"
+  mkdir -p "$case_dir/home/config"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  printf '%s\n' '{"default":{"harness":"codex"}}' > "$case_dir/home/config/crew-dispatch.json"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  bash_env="$case_dir/no-jq.bash"
+  cat > "$bash_env" <<'SH'
+command() {
+  if [ "${1:-}" = -v ] && [ "${2:-}" = jq ]; then
+    return 1
+  fi
+  builtin command "$@"
+}
+jq() {
+  return 127
+}
+SH
+
+  out=$(PATH="$fakebin:$BASE_PATH" BASH_ENV="$bash_env" FM_HOME="$case_dir/home" \
+    FM_ROOT_OVERRIDE="$case_dir/home" FM_FAKE_TREEHOUSE_LEASE_HELP=1 \
+    "$ROOT/bin/fm-bootstrap.sh")
+  assert_contains "$out" "MISSING: jq (install:" \
+    "dispatch configuration without jq must print an actionable install diagnostic"
+  assert_not_contains "$out" "CREW_DISPATCH: invalid" \
+    "missing jq must not misclassify dispatch configuration as invalid"
+  pass "bootstrap reports missing jq for configured crew dispatch"
+}
+
 test_crew_dispatch_validation() {
   local label body expect mode case_dir fakebin out n
   n=0
@@ -974,4 +1004,5 @@ test_fleet_sync_timeout_is_computed_before_launch
 test_routine_bootstrap_confirmations_are_silent
 test_routine_bootstrap_contract_runs_under_system_bash
 test_crew_dispatch_active_rules_are_verbose_bootstrap_info
+test_crew_dispatch_missing_jq_is_actionable
 test_crew_dispatch_validation

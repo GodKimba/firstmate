@@ -1568,6 +1568,24 @@ SH
   pass "the portable timeout path force-kills a command that ignores TERM"
 }
 
+test_perl_timeout_preserves_child_signal_status() {
+  local toolbin status=0 mechanism real
+  toolbin="$TMP_ROOT/perl-signal-status"
+  mkdir -p "$toolbin"
+  for real in bash perl; do
+    ln -s "$(command -v "$real")" "$toolbin/$real"
+  done
+  mechanism=$(PATH="$toolbin" bash -c \
+    '. "$1"; fm_timeout_mechanism' _ "$ROOT/bin/fm-timeout-lib.sh")
+  [ "$mechanism" = perl ] || fail "the signal-status fixture selected '$mechanism' instead of perl"
+
+  PATH="$toolbin" bash -c \
+    '. "$1"; fm_run_timed 5 bash -c '\''kill -TERM $$'\''' \
+    _ "$ROOT/bin/fm-timeout-lib.sh" || status=$?
+  expect_code 143 "$status" "perl timeout natural SIGTERM status"
+  pass "the perl timeout preserves a naturally signaled child's exit status"
+}
+
 test_runtime_bound_leaves_a_healthy_digest_untouched() {
   local rec root home fakebin out
   rec=$(new_world runtime-bound-healthy)
@@ -1974,6 +1992,7 @@ test_pi_diagnostic_rejects_missing_turnend_guard_marker
 test_pi_diagnostic_rejects_previous_session_loaded_marker
 test_runtime_bound_truncates_loudly_and_exits_zero
 test_portable_timeout_escalates_term_resistant_process
+test_perl_timeout_preserves_child_signal_status
 test_runtime_bound_leaves_a_healthy_digest_untouched
 test_runtime_bound_leaves_harness_ancestry_headroom
 test_reemit_skips_startup_sweeps_but_keeps_the_wake_drain

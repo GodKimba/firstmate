@@ -839,11 +839,12 @@ x_mode_setup() {
   fi
 
   missing=0
-  if ! command -v curl >/dev/null 2>&1; then
-    echo "MISSING: curl (install: $(install_cmd curl))"
-    missing=1
-  fi
-  command -v jq >/dev/null 2>&1 || missing=1
+  for tool in curl jq; do
+    if ! command -v "$tool" >/dev/null 2>&1; then
+      echo "MISSING: $tool (install: $(install_cmd "$tool"))"
+      missing=1
+    fi
+  done
   if [ "$missing" -ne 0 ]; then
     if x_mode_artifact_present "$shim" || x_mode_artifact_present "$cadence"; then
       if x_mode_remove_artifacts; then
@@ -894,7 +895,10 @@ crew_dispatch_validate() {
   local file err
   file="$CONFIG/crew-dispatch.json"
   [ -f "$file" ] || return 0
-  command -v jq >/dev/null 2>&1 || return 0
+  if ! command -v jq >/dev/null 2>&1; then
+    echo "MISSING: jq (install: $(install_cmd jq))"
+    return 0
+  fi
   if ! jq -e . "$file" >/dev/null 2>&1; then
     echo "CREW_DISPATCH: invalid config/crew-dispatch.json - malformed JSON"
     return 0

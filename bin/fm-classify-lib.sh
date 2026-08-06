@@ -784,7 +784,8 @@ EOF
 # persisted running open-set, via the exact same _fm_decision_fold_line rule
 # status_open_decisions uses - so the two strategies can never disagree on what
 # is open. Cost is bounded by NEW appends since the last drain, not by the
-# status file's total lifetime size.
+# status file's total lifetime size, except when paired answer authority changes
+# and requires a full re-fold.
 #
 # Correctness invariant (unchanged from the whole-file fold): an open decision
 # is dropped ONLY by an explicit resolved/captain-held line for its exact key,
@@ -795,8 +796,9 @@ EOF
 # Cursor invalidation is deliberately minimal, matching how status files are
 # ACTUALLY used in this repo: every one is created once (`>`) and only ever
 # appended to (`>>`) - never replaced, renamed, or rewritten in place. So the
-# only two ways a cursor can go stale are a shrink (truncated) or the file at
-# this path being a different file than before (replaced/rotated/recreated),
+# only two status-stream ways a cursor can go stale are a shrink (truncated) or
+# the file at this path being a different file than before
+# (replaced/rotated/recreated),
 # which a changed device+inode makes an O(1) check via a single `stat` call -
 # no content hashing, no re-reading the consumed prefix. Either signal falls
 # back to a full re-fold of the whole current file from byte 0 - byte for byte
@@ -804,6 +806,9 @@ EOF
 # from that clean baseline. A same-inode, same-size, in-place byte edit is NOT
 # detected; that is a deliberately accepted gap because no code path in this
 # repo ever does that to a status file.
+# The paired answer record is also mutable authority input, so its absent or
+# device+inode+size generation is carried by the cursor and any change likewise
+# forces a full re-fold.
 #
 # The other real failure mode is OUR OWN read failing (a stat/wc/tail I/O
 # error), not a malformed writer: every such read here is checked, and on
@@ -838,11 +843,26 @@ _fm_open_decisions_file_ident() {  # <file> -> "dev:inode", empty on I/O failure
   fi
 }
 
+_fm_open_decisions_answers_generation() {  # <answers-file>
+  local f=$1 ident size
+  if [ ! -e "$f" ]; then
+    printf 'absent'
+    return 0
+  fi
+  [ -f "$f" ] && [ -r "$f" ] || return 1
+  ident=$(_fm_open_decisions_file_ident "$f") || return 1
+  [ -n "$ident" ] || return 1
+  size=$(LC_ALL=C wc -c < "$f" 2>/dev/null) || return 1
+  size=${size//[[:space:]]/}
+  case "$size" in ''|*[!0-9]*) return 1 ;; esac
+  printf '%s:%s' "$ident" "$size"
+}
+
 status_open_decisions_incremental() {  # <status-file>
-  local f=$1 cf offset ident open='' trusted_open='' cursor_data rest header
-  local size cur_ident resolve held answers chunk_file chunk_size line
+  local f=$1 cf offset ident answers_generation open='' trusted_open='' cursor_data rest header
+  local size cur_ident cur_answers_generation resolve held answers chunk_file chunk_size read_size line
   local position stream authority marker_id have_offset have_ident have_position
-  local have_stream have_authority
+  local have_stream have_authority have_answers_generation
   [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || return 0
   cf=$(_fm_open_decisions_cursor_path "$f")
   offset=0
@@ -860,6 +880,7 @@ status_open_decisions_incremental() {  # <status-file>
   if [ -f "$cf" ] && [ -r "$cf" ] && [ ! -L "$cf" ]; then
     if cursor_data=$(LC_ALL=C command cat "$cf" 2>/dev/null); then
       have_offset=0; have_ident=0; have_position=0; have_stream=0; have_authority=0
+      have_answers_generation=0
       rest=$cursor_data
       while [ -n "$rest" ]; do
         header=${rest%%$'\n'*}
@@ -869,6 +890,10 @@ status_open_decisions_incremental() {  # <status-file>
             case "$offset" in ''|*[!0-9]*) offset=0 ;; *) have_offset=1 ;; esac
             ;;
           ident=*)    ident=${header#ident=};    have_ident=1 ;;
+          answers-generation=*)
+            answers_generation=${header#answers-generation=}
+            [ -n "$answers_generation" ] && have_answers_generation=1
+            ;;
           position=*)
             position=${header#position=}
             case "$position" in ''|*[!0-9]*) position=0 ;; *) have_position=1 ;; esac
@@ -886,11 +911,12 @@ status_open_decisions_incremental() {  # <status-file>
         esac
       done
       if [ "$have_offset" = 1 ] && [ "$have_ident" = 1 ] && [ "$have_position" = 1 ] \
-        && [ "$have_stream" = 1 ] && [ "$have_authority" = 1 ]; then
+        && [ "$have_stream" = 1 ] && [ "$have_authority" = 1 ] \
+        && [ "$have_answers_generation" = 1 ]; then
         open=$rest
         trusted_open=$open
       else
-        offset=0; ident=''; position=0; stream=''; authority=legacy; open=''
+        offset=0; ident=''; answers_generation=''; position=0; stream=''; authority=legacy; open=''
       fi
     fi
   fi
@@ -905,8 +931,12 @@ status_open_decisions_incremental() {  # <status-file>
     || { _fm_decision_project "$trusted_open"; return 0; }
   size=${size//[[:space:]]/}
   case "$size" in ''|*[!0-9]*) _fm_decision_project "$trusted_open"; return 0 ;; esac
+  answers=$(fm_decision_answers_file "$f")
+  cur_answers_generation=$(_fm_open_decisions_answers_generation "$answers") \
+    || { _fm_decision_project "$trusted_open"; return 0; }
 
-  if [ -z "$ident" ] || [ "$ident" != "$cur_ident" ] || [ "$offset" -gt "$size" ]; then
+  if [ -z "$ident" ] || [ "$ident" != "$cur_ident" ] || [ "$offset" -gt "$size" ] \
+    || [ "$answers_generation" != "$cur_answers_generation" ]; then
     offset=0
     open=''
     position=0
@@ -916,7 +946,9 @@ status_open_decisions_incremental() {  # <status-file>
 
   if [ "$offset" -lt "$size" ]; then
     chunk_file="$cf.read.$$"
-    tail -c "+$((offset + 1))" "$f" > "$chunk_file" 2>/dev/null \
+    read_size=$((size - offset))
+    tail -c "+$((offset + 1))" "$f" 2>/dev/null \
+      | LC_ALL=C head -c "$read_size" > "$chunk_file" \
       || { rm -f "$chunk_file"; _fm_decision_project "$trusted_open"; return 0; }
     chunk_size=$(LC_ALL=C wc -c < "$chunk_file" 2>/dev/null) \
       || { rm -f "$chunk_file"; _fm_decision_project "$trusted_open"; return 0; }
@@ -924,6 +956,8 @@ status_open_decisions_incremental() {  # <status-file>
     case "$chunk_size" in
       ''|*[!0-9]*) rm -f "$chunk_file"; _fm_decision_project "$trusted_open"; return 0 ;;
     esac
+    [ "$chunk_size" = "$read_size" ] \
+      || { rm -f "$chunk_file"; _fm_decision_project "$trusted_open"; return 0; }
     # Test-only observability seam (off by default, no production behavior
     # change): when set, records exactly how many bytes THIS call folded, so a
     # test can assert the incremental path stays bounded by new appends rather
@@ -932,7 +966,6 @@ status_open_decisions_incremental() {  # <status-file>
       && printf '%s\t%s\n' "$f" "$chunk_size" >> "$FM_OPEN_DECISIONS_READ_PROBE"
     resolve=${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}
     held=${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}
-    answers=$(fm_decision_answers_file "$f")
     while IFS= read -r line || [ -n "$line" ]; do
       position=$((position + 1))
       if marker_id=$(fm_decision_marker_line_id "$line"); then
@@ -947,6 +980,7 @@ status_open_decisions_incremental() {  # <status-file>
     {
       printf 'offset=%s\n' "$size"
       printf 'ident=%s\n' "$cur_ident"
+      printf 'answers-generation=%s\n' "$cur_answers_generation"
       printf 'position=%s\n' "$position"
       printf 'stream=%s\n' "$stream"
       printf 'authority=%s\n' "$authority"
