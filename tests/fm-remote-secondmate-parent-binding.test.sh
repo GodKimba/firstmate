@@ -225,17 +225,29 @@ write_child_meta() {
   fm_write_meta "$REMOTE_HOME/state/work-child.meta" \
     "window=firstmate:fm-work-child" "endpoint_task_id=work-child" \
     "worktree=$CHILD_WT" "project=$CHILD_WT" "harness=codex" "kind=ship" \
-    "mode=local-only" "yolo=off"
+    "acquisition_branch=fm/work-child" "mode=local-only" "yolo=off"
 }
 mkdir -p "$TMP_ROOT/childfake"
-for t in tmux treehouse no-mistakes gh gh-axi tasks-axi; do
+for t in tmux no-mistakes gh gh-axi tasks-axi; do
   printf '#!/usr/bin/env bash\nexit 0\n' > "$TMP_ROOT/childfake/$t"
   chmod +x "$TMP_ROOT/childfake/$t"
 done
+# Teardown resolves the return route before returning anything, and a bare
+# exit-0 stub answers with no route at all.
+cat > "$TMP_ROOT/childfake/treehouse" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in firstmate-return-route) printf managed ;; esac
+exit 0
+SH
+chmod +x "$TMP_ROOT/childfake/treehouse"
 
 run_child_teardown() { # <extra env assignments...>
   local out rc=0
   write_child_meta
+  # A ship task owns its acquisition branch and teardown proves the copy is
+  # still on it, so each case restores that starting state: an earlier teardown
+  # in this fixture legitimately leaves the copy detached.
+  git -C "$CHILD_WT" checkout -q -B fm/work-child
   out=$(env "$@" PATH="$TMP_ROOT/childfake:$PATH" \
     FM_HOME="$REMOTE_HOME" FM_STATE_OVERRIDE="$REMOTE_HOME/state" \
     FM_DATA_OVERRIDE="$REMOTE_HOME/data" FM_CONFIG_OVERRIDE="$REMOTE_HOME/config" \
