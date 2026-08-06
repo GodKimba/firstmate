@@ -623,7 +623,7 @@ test_every_harness_stamps_the_crewmate_launch_identity() {
     id="profile-identity-$harness-z17"
     rec=$(make_spawn_case "profile-identity-$harness" "$harness" "$id")
     read_case_record "$rec"
-    out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+    out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
     status=$?
     expect_code 0 "$status" "$harness ship spawn should succeed"
     launch=$(cat "$LAUNCH_LOG")

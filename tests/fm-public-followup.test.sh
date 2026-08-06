@@ -29,6 +29,21 @@ command -v tasks-axi >/dev/null 2>&1 || { echo "skip: tasks-axi not found"; exit
 # A fakebin `curl` standing in for the relay. It logs every call so a test can
 # prove exactly how many public posts happened, and honours FAKE_FOLLOWUP_CODE so
 # a transport failure can be simulated.
+# Teardown asks the provider which return route a worktree is on before it
+# returns anything, and a bare exit-0 stub answers with no route at all. These
+# cases are about parent bindings and public commitments, not about generic-pool
+# return, so the stub reports the ordinary managed route and nothing else.
+fake_managed_treehouse() {  # <fakebin>
+  cat > "$1/treehouse" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  firstmate-return-route) printf 'managed' ;;
+esac
+exit 0
+SH
+  chmod +x "$1/treehouse"
+}
+
 make_fake_curl() {  # <home>
   local fakebin
   fakebin=$(fm_fakebin "$1")
@@ -862,7 +877,8 @@ test_secondmate_teardown_resolves_parent_from_durable_record_when_env_lost() {
   child=$(cd "$child" && pwd -P)
   parent_resolved=$(cd "$parent" && pwd -P)
   make_fake_curl "$child" >/dev/null
-  fm_fake_exit0 "$child/fakebin" tmux treehouse no-mistakes gh gh-axi
+  fm_fake_exit0 "$child/fakebin" tmux no-mistakes gh gh-axi
+  fake_managed_treehouse "$child/fakebin"
 
   assert_local_secondmate_parent_record "$child" "$parent_resolved"
 
@@ -899,7 +915,8 @@ test_secondmate_teardown_durable_record_missing_parent_registration_still_refuse
   child=$(cd "$child" && pwd -P)
   parent_resolved=$(cd "$parent" && pwd -P)
   make_fake_curl "$child" >/dev/null
-  fm_fake_exit0 "$child/fakebin" tmux treehouse no-mistakes gh gh-axi
+  fm_fake_exit0 "$child/fakebin" tmux no-mistakes gh gh-axi
+  fake_managed_treehouse "$child/fakebin"
   assert_local_secondmate_parent_record "$child" "$parent_resolved"
   fm_write_meta "$child/state/work-child.meta" \
     "window=firstmate:fm-work-child" "endpoint_task_id=work-child" \
@@ -930,18 +947,22 @@ test_secondmate_teardown_durable_record_with_unknown_field_succeeds() {
   child=$(cd "$child" && pwd -P)
   parent_resolved=$(cd "$parent" && pwd -P)
   make_fake_curl "$child" >/dev/null
-  fm_fake_exit0 "$child/fakebin" tmux treehouse no-mistakes gh gh-axi
+  fm_fake_exit0 "$child/fakebin" tmux no-mistakes gh gh-axi
+  fake_managed_treehouse "$child/fakebin"
   assert_local_secondmate_parent_record "$child" "$parent_resolved"
   printf 'some_future_field=value\n' >> "$child/.fm-secondmate-parent"
   parent_alias="$TMP_ROOT/teardown-durable-clean-parent-alias"
   ln -s "$parent" "$parent_alias"
   fm_write_meta "$parent/state/mate.meta" "kind=secondmate" "home=$child"
-  fm_git_init_commit "$child/projects/worktree"
+  # A ship task owns an acquisition branch, and teardown proves the worktree is
+  # still on it before returning anything, so the fixture is a real linked
+  # worktree on that branch rather than a bare repo sitting on main.
+  fm_git_worktree "$child/projects/project" "$child/projects/worktree" fm/work-clean
   printf 'manual\n' > "$child/config/backlog-backend"
   fm_write_meta "$child/state/work-clean.meta" \
     "window=firstmate:fm-work-clean" "endpoint_task_id=work-clean" \
-    "worktree=$child/projects/worktree" "project=$child/projects/worktree" \
-    "kind=ship" "mode=local-only"
+    "worktree=$child/projects/worktree" "project=$child/projects/project" \
+    "acquisition_branch=fm/work-clean" "kind=ship" "mode=local-only"
 
   rc=0
   out=$(PATH="$child/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$child" \
@@ -965,15 +986,19 @@ test_secondmate_teardown_rejects_conflicting_live_and_durable_parent_bindings() 
   child=$(cd "$child" && pwd -P)
   parent_resolved=$(cd "$durable_parent" && pwd -P)
   make_fake_curl "$child" >/dev/null
-  fm_fake_exit0 "$child/fakebin" tmux treehouse no-mistakes gh gh-axi
+  fm_fake_exit0 "$child/fakebin" tmux no-mistakes gh gh-axi
+  fake_managed_treehouse "$child/fakebin"
   assert_local_secondmate_parent_record "$child" "$parent_resolved"
   fm_write_meta "$durable_parent/state/mate.meta" "kind=secondmate" "home=$child"
-  fm_git_init_commit "$child/projects/worktree"
+  # A ship task owns an acquisition branch, and teardown proves the worktree is
+  # still on it before returning anything, so the fixture is a real linked
+  # worktree on that branch rather than a bare repo sitting on main.
+  fm_git_worktree "$child/projects/project" "$child/projects/worktree" fm/work-conflict
   printf 'manual\n' > "$child/config/backlog-backend"
   fm_write_meta "$child/state/work-conflict.meta" \
     "window=firstmate:fm-work-conflict" "endpoint_task_id=work-conflict" \
-    "worktree=$child/projects/worktree" "project=$child/projects/worktree" \
-    "kind=ship" "mode=local-only"
+    "worktree=$child/projects/worktree" "project=$child/projects/project" \
+    "acquisition_branch=fm/work-conflict" "kind=ship" "mode=local-only"
 
   PATH="$child/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$child" \
     FM_STATE_OVERRIDE="$child/state" FM_DATA_OVERRIDE="$child/data" \
@@ -997,7 +1022,8 @@ test_secondmate_teardown_rejects_unsafe_durable_parent_records() {
       || fail "real secondmate seeding failed for $case_name"
     child=$(cd "$child" && pwd -P)
     make_fake_curl "$child" >/dev/null
-    fm_fake_exit0 "$child/fakebin" tmux treehouse no-mistakes gh gh-axi
+    fm_fake_exit0 "$child/fakebin" tmux no-mistakes gh gh-axi
+  fake_managed_treehouse "$child/fakebin"
     fm_write_meta "$child/state/work-child.meta" \
       "window=firstmate:fm-work-child" "endpoint_task_id=work-child" \
       "worktree=$child" "project=$child" "kind=ship" "mode=local-only"

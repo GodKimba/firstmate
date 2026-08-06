@@ -206,8 +206,14 @@ test_promote_requires_and_records_the_delivery_contract() {
   mkdir -p "$home/state"
   meta="$home/state/promote-d1.meta"
 
+  # Promotion acquires this task's branch in the real scout copy, so the fixture
+  # is a genuine detached worktree of a real project rather than a path string.
+  fm_git_worktree "$home/project" "$home/wt" scout-base
+  git -C "$home/wt" checkout -q --detach scout-base
+
   write_scout_meta() {
-    printf 'window=fm-promote-d1\nkind=scout\nworktree=/tmp/wt\n' > "$meta"
+    printf 'window=fm-promote-d1\nkind=scout\nworktree=%s\nproject=%s\nacquisition_branch=-\n' \
+      "$home/wt" "$home/project" > "$meta"
   }
 
   write_scout_meta

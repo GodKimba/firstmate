@@ -200,17 +200,29 @@ test_owned_lock_is_silent() {
 # passes down, so this heredoc stays QUOTED. An unquoted one would command-
 # substitute the backticks in the nudge text and really run session start.
 make_pi_extension_fixture() {
-  local repo="$TMP_ROOT/$1-repo" home="$TMP_ROOT/$1-home"
+  local repo="$TMP_ROOT/$1-repo" home="$TMP_ROOT/$1-home" wrapper
   mkdir -p "$repo/.pi/extensions/lib" "$repo/bin" "$home/state"
   cp "$ROOT/.pi/extensions/fm-primary-turnend-guard.ts" "$repo/.pi/extensions/"
   cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" \
     "$ROOT/.pi/extensions/lib/fm-pi-tool-result-images.ts" "$repo/.pi/extensions/lib/"
-  cat > "$repo/bin/fm-sessionstart-nudge.sh" <<'SH'
+  # The operational-input library shells out to this script to classify and
+  # encode what the extension injects, resolving it relative to the extension's
+  # own location. Without it in the fixture repo, every injection fails silently
+  # inside the extension's own catch and the case reads as "no nudge".
+  cp "$ROOT/bin/fm-operational-input.sh" "$repo/bin/fm-operational-input.sh"
+  # The extension calls the RUN wrapper for every session-open reason it maps,
+  # and that wrapper delegates to the nudge on the context-preserving ones. Both
+  # are stubbed to the same observable shape so these cases stay about the
+  # extension's own gate - whether it spawns a wrapper at all - rather than
+  # about which wrapper the run tier happens to route to.
+  for wrapper in fm-sessionstart-run.sh fm-sessionstart-nudge.sh; do
+    cat > "$repo/bin/$wrapper" <<'SH'
 #!/usr/bin/env bash
 printf 'spawned\n' >> "${FM_HOME:?}/wrapper.log"
 cat "${FM_HOME:?}/nudge-line"
 SH
-  chmod +x "$repo/bin/fm-sessionstart-nudge.sh"
+    chmod +x "$repo/bin/$wrapper"
+  done
   printf '%s\n' "$NUDGE_LINE" > "$home/nudge-line"
   : > "$home/wrapper.log"
   printf '%s|%s\n' "$repo" "$home"
@@ -435,7 +447,10 @@ test_pi_large_sessionstart_digest_is_delivered_loudly() {
   git -C "$fixture" commit -q --allow-empty -m init
   : > "$fixture/AGENTS.md"
   cp "$ROOT/.pi/extensions/fm-primary-turnend-guard.ts" "$fixture/.pi/extensions/"
-  cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" "$fixture/.pi/extensions/lib/"
+  # Both libs the extension imports: the tool-result image normalizer comes with
+  # the operational-input helper, or the extension cannot load at all.
+  cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" \
+    "$ROOT/.pi/extensions/lib/fm-pi-tool-result-images.ts" "$fixture/.pi/extensions/lib/"
   cp "$ROOT/bin/fm-sessionstart-run.sh" "$ROOT/bin/fm-sessionstart-nudge.sh" \
     "$ROOT/bin/fm-primary-scope-lib.sh" "$ROOT/bin/fm-gate-refuse-lib.sh" \
     "$ROOT/bin/fm-operational-input.sh" "$fixture/bin/"

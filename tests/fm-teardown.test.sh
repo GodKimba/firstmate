@@ -1749,6 +1749,7 @@ test_scout_promotion_records_exact_acquisition_branch() {
 
     FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$case_dir" \
       FM_STATE_OVERRIDE="$case_dir/state" "$PROMOTE" task-x1 \
+      --mode no-mistakes --yolo off \
       > "$case_dir/promote.stdout" 2> "$case_dir/promote.stderr" \
       || fail "scout-promotion-$style: promotion failed"
 
@@ -1790,6 +1791,7 @@ test_scout_promotion_refuses_unproven_branch_identity() {
     set +e
     FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$case_dir" \
       FM_STATE_OVERRIDE="$case_dir/state" "$PROMOTE" task-x1 \
+      --mode no-mistakes --yolo off \
       > "$case_dir/promote.stdout" 2> "$case_dir/promote.stderr"
     rc=$?
     set -e
@@ -1845,6 +1847,7 @@ test_scout_promotion_accepts_registered_symlink_project() {
 
     FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$case_dir" \
       FM_STATE_OVERRIDE="$case_dir/state" "$PROMOTE" task-x1 \
+      --mode no-mistakes --yolo off \
       > "$case_dir/promote.stdout" 2> "$case_dir/promote.stderr" \
       || fail "scout-promotion-path-$style: promotion failed"$'\n'"$(cat "$case_dir/promote.stderr")"
 
@@ -1922,6 +1925,7 @@ test_scout_promotion_refuses_aliased_identity() {
     set +e
     FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$case_dir" \
       FM_STATE_OVERRIDE="$case_dir/state" "$PROMOTE" task-x1 \
+      --mode no-mistakes --yolo off \
       > "$case_dir/promote.stdout" 2> "$case_dir/promote.stderr"
     rc=$?
     set -e
@@ -1955,6 +1959,7 @@ SH
   set +e
   PATH="$case_dir/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$case_dir" \
     FM_STATE_OVERRIDE="$case_dir/state" "$PROMOTE" task-x1 \
+    --mode no-mistakes --yolo off \
     > "$case_dir/promote.stdout" 2> "$case_dir/promote.stderr"
   rc=$?
   set -e
@@ -3546,6 +3551,11 @@ exec "$REAL_PS_FOR_TEST" "$@"
 SH
   cat > "$case_dir/fakebin/treehouse" <<EOF
 #!/usr/bin/env bash
+# Teardown resolves the return route before it returns anything, so the stub
+# answers that question as the ordinary managed route and logs only the return.
+case "\${1:-}" in
+  firstmate-return-route) printf 'managed'; exit 0 ;;
+esac
 printf 'returned\n' > "$case_dir/treehouse.log"
 EOF
   chmod +x "$case_dir/fakebin/lsof" "$case_dir/fakebin/ps" "$case_dir/fakebin/treehouse"
@@ -3582,6 +3592,11 @@ test_run_abort_precedes_process_reap_precedes_worktree_removal() {
   # real observed state, not a source-text or line-number correlation.
   cat > "$case_dir/fakebin/treehouse" <<EOF
 #!/usr/bin/env bash
+# The return-route question is asked before the return itself, so it must not be
+# recorded as ordering evidence for the return step.
+case "\${1:-}" in
+  firstmate-return-route) printf 'managed'; exit 0 ;;
+esac
 if [ -s "$abort_log" ]; then echo "abort-already-happened" >> "$case_dir/order.log"; fi
 if ! kill -0 $pid 2>/dev/null; then echo "reap-already-happened" >> "$case_dir/order.log"; fi
 exit 0
