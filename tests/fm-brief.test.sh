@@ -682,7 +682,7 @@ test_keyed_decision_examples_use_authoritative_placement() {
     id="brief-keyed-decision-$kind"
     case "$kind" in
       ship)
-        FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate >/dev/null 2>&1
+        FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate --mode no-mistakes >/dev/null 2>&1
         ;;
       scout)
         FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate --scout >/dev/null 2>&1

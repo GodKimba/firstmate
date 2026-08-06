@@ -1193,7 +1193,11 @@ crew_absorb_class() {  # <id>
   if [ "$state" = paused ]; then printf 'paused'; return; fi
   if [ "$state" = working ]; then
     src=${line#*source: }; src=${src%% *}
-    case "$src" in run-step|pane) printf 'working'; return ;; esac
+    # ci-withheld is a trusted wait, not an unknown: bin/fm-crew-state.sh reports
+    # it when a "checks green" claim has no corroborating check runs, which means
+    # the crew is still waiting on the forge rather than finished. Absorbing it
+    # keeps that wait quiet without ever letting the unverified claim read as done.
+    case "$src" in run-step|pane|ci-withheld) printf 'working'; return ;; esac
   fi
   printf 'none'
 }
