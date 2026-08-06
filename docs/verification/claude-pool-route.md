@@ -88,7 +88,7 @@ PROBE-OK
 ```
 
 The helper receives no argument carrying a value and returns the credential on stdout, so it never enters argv.
-`curl --config <file>` provides the same property for the catalog fetch: the `header = "Authorization: Bearer ..."` line lives in a mode-0600 file inside a mode-0700 private directory.
+`curl -q --config <file>` provides the same property for the catalog fetch: `-q` is the first option so ambient curl configuration is disabled, and the `header = "Authorization: Bearer ..."` line lives in a mode-0600 file inside a mode-0700 private directory.
 
 `--settings` adds settings rather than replacing them, so it does not disturb the per-worktree `.claude/settings.local.json` that `fm-spawn.sh` writes for busy-state reporting.
 
@@ -134,14 +134,27 @@ The emitted payload contains only this script's path, the credential source path
 ## Reproducing these checks
 
 Each check is read-only apart from two four-token model calls, and none prints a credential.
-`$KEY` below is read from the configured source; never echo it.
+The credential is written only to a mode-0600 curl config inside a mode-0700 private directory by the existing helper, then removed with that private directory.
 
 ```sh
-curl -sS -H "Authorization: Bearer $KEY" http://127.0.0.1:8317/v1/models | jq -r '.data[].id'
-curl -sS -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8317/v1/models   # 401, unauthenticated
-curl -sS -H "x-api-key: $KEY" -H "anthropic-version: 2023-06-01" -H 'content-type: application/json' \
+POOL_CURL_DIR=$(mktemp -d "${TMPDIR:-/tmp}/fm-claude-pool-verify.XXXXXX")
+chmod 700 "$POOL_CURL_DIR"
+(
+  umask 077
+  bin/fm-claude-pool.sh secret | awk '{
+    printf "header = \"Authorization: Bearer %s\"\n", $0
+    printf "header = \"x-api-key: %s\"\n", $0
+  }' > "$POOL_CURL_DIR/auth.conf"
+)
+chmod 600 "$POOL_CURL_DIR/auth.conf"
+
+curl -q -sS --config "$POOL_CURL_DIR/auth.conf" http://127.0.0.1:8317/v1/models | jq -r '.data[].id'
+curl -q -sS -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8317/v1/models   # 401, unauthenticated
+curl -q -sS --config "$POOL_CURL_DIR/auth.conf" -H "anthropic-version: 2023-06-01" -H 'content-type: application/json' \
   -d '{"model":"claude-opus-5","max_tokens":4,"messages":[{"role":"user","content":"hi"}]}' \
   http://127.0.0.1:8317/v1/messages | jq '{model, stop_reason}'
+rm -f "$POOL_CURL_DIR/auth.conf"
+rmdir "$POOL_CURL_DIR"
 env -i HOME="$HOME" PATH="$PATH" zsh -c  'echo ${CLIPROXY_API_KEY:-UNSET}'   # UNSET
 env -i HOME="$HOME" PATH="$PATH" zsh -ic 'echo ${CLIPROXY_API_KEY:+set}'     # set
 ```

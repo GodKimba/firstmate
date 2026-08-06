@@ -736,7 +736,9 @@ if [ "$HARNESS" = claude-pool ]; then
     echo "error: the claude-pool harness requires an explicit --model naming a Claude model the pool serves (for example --model claude-opus-5); it never guesses a default and never falls back to the native Claude login" >&2
     exit 1
   fi
-  if ! POOL_CHECK=$("$POOL_SH" check --model "$MODEL" 2>&1); then
+  if POOL_CHECK=$("$POOL_SH" check --model "$MODEL" 2>&1); then
+    :
+  else
     POOL_RC=$?
     printf 'error: the claude-pool route is not usable for model %s (fm-claude-pool.sh check exit %s)\n' "$MODEL" "$POOL_RC" >&2
     printf '%s\n' "$POOL_CHECK" >&2

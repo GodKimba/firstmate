@@ -275,7 +275,7 @@ load_secret() {
 fetch_catalog() {  # <dest>
   local dest=$1 code
   ( umask 077; printf 'header = "Authorization: Bearer %s"\n' "$(cat "$SECRET_TMP/key")" > "$SECRET_TMP/curlrc" ) || return 1
-  code=$(curl -sS --max-time "$FETCH_TIMEOUT" --config "$SECRET_TMP/curlrc" \
+  code=$(curl -q -sS --max-time "$FETCH_TIMEOUT" --config "$SECRET_TMP/curlrc" \
     -o "$dest" -w '%{http_code}' "$BASE_URL/v1/models" 2>"$SECRET_TMP/curl.err") || code=000
   rm -f "$SECRET_TMP/curlrc"
   printf '%s\n' "$code"
@@ -376,7 +376,7 @@ cmd_settings_json() {
   done
   command -v jq >/dev/null 2>&1 || die "jq is required"
   jq -nc --arg helper "$SCRIPT_DIR/fm-claude-pool.sh" --arg f "$secret_file" --arg v "$secret_var" \
-    '{apiKeyHelper: ($helper + " secret --secret-file " + ($f|@sh) + " --secret-var " + ($v|@sh))}'
+    '{apiKeyHelper: (($helper|@sh) + " secret --secret-file " + ($f|@sh) + " --secret-var " + ($v|@sh))}'
 }
 
 cmd_source() {

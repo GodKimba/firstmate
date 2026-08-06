@@ -234,13 +234,15 @@ test_the_credential_source_is_parsed_and_never_executed() {
 }
 
 test_the_credential_never_reaches_curl_argv() {
-  local rec
+  local rec first_arg rest
   rec=$(make_pool_case argv); read_pool_case "$rec"
   run_pool "$CASE_DIR" "$FAKEBIN" check --model claude-opus-5 >/dev/null
   expect_code 0 "$?" "validation should pass so curl is actually exercised"
   assert_present "$CASE_DIR/curl-argv.log" "the fake curl was never invoked"
   assert_no_grep "$FIXTURE_KEY" "$CASE_DIR/curl-argv.log" \
     "the credential appeared in curl's argv, where any process table can read it"
+  read -r first_arg rest < "$CASE_DIR/curl-argv.log"
+  [ "$first_arg" = -q ] || fail "curl did not disable ambient configuration with its first option"
   assert_grep "--config" "$CASE_DIR/curl-argv.log" "curl was not given a config file"
   # It must genuinely have travelled: proving absence from argv is only
   # meaningful alongside proving presence in the config file.
@@ -315,6 +317,23 @@ test_secret_command_emits_the_credential_for_the_api_key_helper() {
   [ "$out" = "$FIXTURE_KEY" ] || fail "the apiKeyHelper channel did not emit the credential (got: '$out')"
   assert_absent "$CASE_DIR/SOURCED-SENTINEL" "the helper executed the source file instead of parsing it"
   pass "the apiKeyHelper channel emits exactly the credential"
+}
+
+test_settings_helper_quotes_its_executable_path() {
+  local rec helper_dir helper_dir_real helper settings helper_command out
+  rec=$(make_pool_case helper-path); read_pool_case "$rec"
+  helper_dir="$CASE_DIR/route with spaces"
+  mkdir -p "$helper_dir"
+  ln -s "$POOL_SH" "$helper_dir/fm-claude-pool.sh"
+  helper_dir_real=$(cd "$helper_dir" && pwd -P)
+  helper="$helper_dir_real/fm-claude-pool.sh"
+  settings=$(PATH="$FAKEBIN:$PATH" FM_HOME="$CASE_DIR/home" FM_CONFIG_OVERRIDE="$CASE_DIR/home/config" \
+    "$helper" settings-json --secret-file "$CASE_DIR/secret-source.zsh" --secret-var CLIPROXY_API_KEY)
+  helper_command=$(printf '%s\n' "$settings" | jq -r '.apiKeyHelper')
+  assert_contains "$helper_command" "'$helper'" "the apiKeyHelper executable path is not shell-quoted"
+  out=$(PATH="$FAKEBIN:$PATH" sh -c "$helper_command")
+  [ "$out" = "$FIXTURE_KEY" ] || fail "the quoted apiKeyHelper command did not execute from a path with spaces"
+  pass "the apiKeyHelper executable path is shell-safe"
 }
 
 # --- C) launch construction -------------------------------------------------
@@ -392,7 +411,7 @@ run_spawn() {  # <home> <wt> <fakebin> <launchlog> <case-dir> <spawn args...>
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" TMUX="fake,1,0" \
     CLAUDE_CONFIG_DIR="${FM_TEST_CLAUDE_CONFIG_DIR:-}" \
-    FM_CLAUDE_POOL_SECRET_FILE="$dir/secret-source.zsh" \
+    FM_CLAUDE_POOL_SECRET_FILE="${FM_TEST_SECRET_FILE:-$dir/secret-source.zsh}" \
     FM_CLAUDE_POOL_BASE_URL="${FM_TEST_BASE_URL:-http://127.0.0.1:8317}" \
     FM_FAKE_CURL_CATALOG="$dir/catalog.json" \
     FM_FAKE_CURL_CODE="${FM_TEST_CURL_CODE:-200}" \
@@ -479,9 +498,39 @@ test_claude_pool_refuses_a_non_anthropic_model_before_any_endpoint() {
   status=$?
   [ "$status" -ne 0 ] || fail "a GPT model behind the Claude CLI must be refused"
   assert_contains "$out" "not usable for model gpt-5.6-sol" "the refusal did not name the rejected model"
+  assert_contains "$out" "fm-claude-pool.sh check exit 5" "the refusal lost the wrong-family preflight status"
   assert_absent "$HOME_DIR/state/$id.meta" "the refusal happened after a task record already existed"
   [ ! -s "$LAUNCH_LOG" ] || fail "the refusal happened after a launch was already typed"
   pass "a non-Anthropic model is refused before any endpoint or record exists"
+}
+
+test_claude_pool_refuses_an_unknown_model_with_its_preflight_status() {
+  local rec id out status
+  id=pool-unknown-d5
+  rec=$(make_spawn_case pool-unknown claude "$id"); read_spawn_case "$rec"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$CASE_DIR" \
+    "$id" "$PROJ_DIR" --harness claude-pool --model claude-not-in-this-pool)
+  status=$?
+  [ "$status" -ne 0 ] || fail "an unknown model must refuse the spawn"
+  assert_contains "$out" "fm-claude-pool.sh check exit 4" "the refusal lost the unknown-model preflight status"
+  assert_absent "$HOME_DIR/state/$id.meta" "the unknown-model refusal happened after a task record already existed"
+  [ ! -s "$LAUNCH_LOG" ] || fail "the unknown-model refusal happened after a launch was already typed"
+  pass "an unknown model refusal reports its real preflight status"
+}
+
+test_claude_pool_refuses_a_missing_credential_with_its_preflight_status() {
+  local rec id out status
+  id=pool-nocred-e6
+  rec=$(make_spawn_case pool-nocred claude "$id"); read_spawn_case "$rec"
+  out=$(FM_TEST_SECRET_FILE="$CASE_DIR/absent.zsh" \
+    run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$CASE_DIR" \
+      "$id" "$PROJ_DIR" --harness claude-pool --model claude-opus-5)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a missing credential must refuse the spawn"
+  assert_contains "$out" "fm-claude-pool.sh check exit 6" "the refusal lost the credential-source preflight status"
+  assert_absent "$HOME_DIR/state/$id.meta" "the credential refusal happened after a task record already existed"
+  [ ! -s "$LAUNCH_LOG" ] || fail "the credential refusal happened after a launch was already typed"
+  pass "a missing credential refusal reports its real preflight status"
 }
 
 test_claude_pool_refuses_an_unreachable_pool_before_any_endpoint() {
@@ -492,6 +541,7 @@ test_claude_pool_refuses_an_unreachable_pool_before_any_endpoint() {
     "$id" "$PROJ_DIR" --harness claude-pool --model claude-opus-5)
   status=$?
   [ "$status" -ne 0 ] || fail "an unreachable pool must refuse the spawn"
+  assert_contains "$out" "fm-claude-pool.sh check exit 3" "the refusal lost the unreachable-pool preflight status"
   assert_contains "$out" "did not serve its model catalog" "the refusal did not explain the pool fault"
   assert_absent "$HOME_DIR/state/$id.meta" "the refusal happened after a task record already existed"
   pass "an unreachable pool is refused before any endpoint or record exists"
@@ -560,7 +610,7 @@ test_the_pool_launch_depends_on_no_interactive_shell_state() {
   assert_not_contains "$launch" "\$CLIPROXY_API_KEY" \
     "the launch expands an ambient credential variable that a non-interactive shell does not have"
   # The helper must be an absolute path for the same reason.
-  assert_contains "$launch" "$ROOT/bin/fm-claude-pool.sh secret" \
+  assert_contains "$launch" "$ROOT/bin/fm-claude-pool.sh" \
     "the credential helper is not an absolute, self-describing command"
   pass "the pool launch carries everything it needs and reads no interactive shell state"
 }
@@ -630,11 +680,14 @@ test_the_route_claims_no_pooled_account
 test_the_config_file_refuses_to_hold_a_credential
 test_config_file_overrides_the_shipped_defaults
 test_secret_command_emits_the_credential_for_the_api_key_helper
+test_settings_helper_quotes_its_executable_path
 test_claude_pool_launch_carries_the_route_and_no_credential
 test_static_crew_harness_selects_the_pool_route
 test_claude_pool_meta_records_the_adapter_without_a_credential
 test_claude_pool_requires_an_explicit_model
 test_claude_pool_refuses_a_non_anthropic_model_before_any_endpoint
+test_claude_pool_refuses_an_unknown_model_with_its_preflight_status
+test_claude_pool_refuses_a_missing_credential_with_its_preflight_status
 test_claude_pool_refuses_an_unreachable_pool_before_any_endpoint
 test_a_refused_pool_route_never_falls_back_to_native_claude
 test_native_claude_launch_is_unchanged_by_the_pool_adapter
