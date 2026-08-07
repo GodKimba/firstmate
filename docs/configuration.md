@@ -473,8 +473,8 @@ Work routed elsewhere reports a typed terminal result with `bin/fm-public-follow
 A terminal event's id is derived from its identity tuple, so a duplicate report, a retry, or a replay after restart resolves to the same event and changes nothing.
 
 Activation is the same `.env` `FMX_PAIRING_TOKEN` contract as the rest of Relay, with no second flag.
-A home without that token runs one file test and stops: no `tasks-axi` call, no backlog or request-context scan, and no `state/public-followup/` directory.
-Ordinary startup, polling, cleanup, and silent read-side subcommands also produce no output; commands that require an active relay report that configuration error after the same gate.
+A home that never registered a commitment stops at an O(1) durable-state presence check: no `tasks-axi` call, no backlog or request-context scan, and no `state/public-followup/` directory.
+Removing the token does not erase an existing registration: terminal emission and cleanup guards continue locally, startup surfaces the open commitment, and outward delivery reports the missing authorization.
 A relay-enabled home with no registered commitment stops at an O(1) directory presence check, so the empty state costs no CLI call and adds no periodic scan.
 Unreconciled terminal results ride the existing 30-second relay poll rather than a new process or timer: `bin/fm-x-poll.sh` compares the pending-event signature against `surfaced` and wakes firstmate once per new result set.
 The session-start digest separately prints a "Public commitments awaiting delivery" subsection from disk whenever this home still owes a registered reply, so compaction, restart, and temporary token loss are non-events.

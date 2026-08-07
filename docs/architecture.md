@@ -199,7 +199,7 @@ The helper's header owns the exact signal detection, relocated-home limitation, 
 
 ## Two task shapes
 
-Ship tasks change projects and ship by project mode (`no-mistakes`, `direct-PR`, or `local-only`); scout tasks leave standalone investigation reports at `data/<id>/report.md` and never push.
+Ship tasks change projects and ship by their selected task delivery mode (`no-mistakes`, `direct-PR`, or `local-only`); scout tasks leave standalone investigation reports at `data/<id>/report.md` and never push.
 The intake and authority contract in `AGENTS.md` owns when separate scout research is warranted.
 
 ## Dispatch profiles
@@ -313,7 +313,8 @@ The mechanism boundary is deliberately narrow.
 `bin/fm-public-followup.sh` composes those three and adds nothing of its own beyond relation-scoped registration, a private terminal-event inbox, and the idempotent delivery sequence.
 Work routed to another home reports a *typed* terminal result through `bin/fm-public-followup-emit.sh`; firstmate never recovers the source home, work id, outcome, or deliverables by parsing a free-form `done:` sentence, and the child never learns the thread.
 Because a terminal event's id is derived from its identity tuple rather than generated, duplicate reports and restart replay converge without coordination.
-Reconciliation rides the existing relay poll and the session-start digest instead of a new watcher, daemon, or timer, and both are gated on the same `.env` activation contract so a home that never opted into the relay executes none of it.
+Reconciliation rides the existing relay poll and the session-start digest instead of a new watcher, daemon, or timer.
+The poll is Relay-gated, but a recorded commitment remains locally visible and cleanup-guarded if outward Relay authorization disappears; a home that never registered one executes none of this.
 The [Relay configuration reference](configuration.md#promised-public-replies-statepublic-followup) owns the operator-facing contract, and the `fmx-respond` skill owns the procedure.
 
 ## Project memory belongs to projects

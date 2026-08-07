@@ -1208,8 +1208,8 @@ EOF
   assert_not_contains "$out" "SECONDMATE_LIVENESS:" "successful Herdr husk recovery should stay non-actionable"
   assert_contains "$(cat "$log")" "pane close p-old" "session start did not close the confirmed Herdr husk"
   assert_contains "$(cat "$log")" "tab create" "session start did not relaunch the Herdr secondmate"
-  assert_contains "$out" "endpoint: alive (backend=herdr window=firstmate:p-new)" \
-    "the later fleet read did not preserve the relaunched Herdr session and pane endpoint"
+  assert_contains "$out" "endpoint: alive (backend=herdr window=default:p-new)" \
+    "the later fleet read did not confirm the relaunched Herdr endpoint"
   assert_grep 'herdr_pane_id=p-new' "$home/state/$SESSION_START_HERDR_SECOND_MATE_ID.meta" \
     "the real respawn path did not record the replacement Herdr pane"
   pass "session start: a confirmed Herdr husk is closed and relaunched"
