@@ -1173,7 +1173,7 @@ cleanup_stale_lock_for_safety_check() {
 }
 
 treehouse_return_route() {
-  local dir=$1 cd_dir=$2 out rc
+  local dir=$1 cd_dir=$2 out rc version
   if out=$( ( cd "$cd_dir" && treehouse firstmate-return-route "$dir" ) 2>&1); then
     rc=0
   else
@@ -1183,6 +1183,16 @@ treehouse_return_route() {
      && [ "$out" = "firstmate-return-route: unsupported-current-main" ]; then
     printf 'managed'
     return 0
+  fi
+  # Stock semver Treehouse releases do not carry this fork's router command.
+  # Accept only their exact structural absence; every other router error refuses.
+  if [ "$rc" -eq 1 ] \
+     && printf '%s\n' "$out" | grep -F 'unknown command "firstmate-return-route"' >/dev/null; then
+    version=$(treehouse --version 2>/dev/null || true)
+    if printf '%s\n' "$version" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+      printf 'managed'
+      return 0
+    fi
   fi
   if [ "$rc" -ne 0 ]; then
     echo "REFUSED: treehouse return router failed with exit $rc for $dir." >&2
@@ -2453,6 +2463,11 @@ validate_worktree_teardown_safety_with_lock_recovery() {
   return "$safety_rc"
 }
 
+if [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
+  TEARDOWN_ALLOW_GENERATED_ARTIFACTS=1
+  validate_worktree_teardown_safety_with_lock_recovery || exit 1
+fi
+
 # Every landed/discard-work refusal above has now passed (or --force skipped
 # them). Fix 1 and Fix 2 (see script header) run here, unconditionally on
 # --force, and before ANY destructive step below - a still-parked run or a
@@ -2805,6 +2820,9 @@ if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ] && [ "$TREEHOUSE_ENDPOINT
       "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID" \
       "$TMUX_WINDOW_ID" 2>/dev/null || true
   fi
+fi
+if [ "$KIND" = secondmate ] && [ "$BACKEND" = herdr ] && [ "$TREEHOUSE_ENDPOINT_QUIESCED" != 1 ]; then
+  quiesce_treehouse_task_endpoint || exit 1
 fi
 if [ "$HERDR_PRESENTATION_RETIRE_CANDIDATE" = 1 ]; then
   if [ "$(fm_backend_herdr_pane_agent_state "$HERDR_PRESENTATION_SESSION" "$HERDR_PRESENTATION_PANE")" = dead ]; then

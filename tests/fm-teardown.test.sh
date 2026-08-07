@@ -1488,6 +1488,39 @@ SH
   pass "managed compatibility requires an explicit current-main capability-gap result"
 }
 
+test_stock_treehouse_without_router_preserves_managed_return() {
+  local case_dir rc
+  case_dir=$(make_case stock-managed-route)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit "$case_dir" "landed stock-route work"
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  git -C "$case_dir/project" fetch -q origin
+  cat > "$case_dir/fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "${FM_FAKE_TREEHOUSE_LOG:?}"
+case "${1:-}" in
+  firstmate-return-route)
+    printf 'Error: unknown command "firstmate-return-route" for "treehouse"\n' >&2
+    exit 1
+    ;;
+  --version) printf 'v2.0.1\n' ;;
+  return) exit 0 ;;
+esac
+exit 90
+SH
+  chmod +x "$case_dir/fakebin/treehouse"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "stock-managed-route: a stock release without the fork router must retain managed return"
+  grep -F 'return --force' "$case_dir/treehouse.log" >/dev/null \
+    || fail "stock-managed-route: stock Treehouse did not preserve managed return"
+  pass "stock Treehouse releases without the fork router retain managed return"
+}
+
 test_router_failures_preserve_generic_worktrees() {
   local case_dir mode rc wt state
   for mode in error empty false-capability; do
@@ -3662,6 +3695,7 @@ test_exact_generated_artifact_is_removed_before_final_validation
 test_switched_branch_refuses_without_deleting_acquisition_branch
 test_generic_return_removes_exact_worktree_without_force
 test_explicit_current_main_capability_gap_preserves_managed_return
+test_stock_treehouse_without_router_preserves_managed_return
 test_router_failures_preserve_generic_worktrees
 test_generic_postcondition_failure_restores_worktree
 test_report_gated_scout_cleanup_remains_supported

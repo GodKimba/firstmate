@@ -21,6 +21,13 @@ ACCOUNT_ID_MARK='ACCOUNTIDMARKER'
 # A pinned clock keeps every relative reset string deterministic.
 PINNED_NOW=1785265200  # 2026-07-28T19:00:00Z
 
+file_mode() {
+  case "$(uname -s)" in
+    Darwin|FreeBSD) stat -f '%Lp' "$1" ;;
+    *) stat -c '%a' "$1" ;;
+  esac
+}
+
 # --- fixtures ---------------------------------------------------------------
 
 # make_pool <dir>: a pool with one enabled Claude account, one enabled Codex
@@ -440,7 +447,7 @@ test_panel_is_self_contained_local_and_private() {
     "the panel lost its no-cross-provider-equivalence explanation"
   assert_contains "$body" "Do not publish or share it" "the panel lost its privacy notice"
 
-  [ "$(stat -f '%Lp' "$panel" 2>/dev/null || stat -c '%a' "$panel")" = 600 ] \
+  [ "$(file_mode "$panel")" = 600 ] \
     || fail "the panel is not written with private permissions"
 
   mkdir "$root/outside"

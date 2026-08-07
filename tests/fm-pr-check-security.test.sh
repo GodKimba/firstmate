@@ -885,6 +885,7 @@ test_concurrent_watcher_sees_only_complete_publication() {
   while [ "$n" -le 3 ]; do
     dir=$(make_case "concurrent-$n")
     write_task_meta "$dir"
+    printf 'harness=grok\n' >> "$dir/home/state/task-a.meta"
     cat > "$dir/fakebin/cp" <<SH
 #!/usr/bin/env bash
 '$REAL_CP' "\$@" || exit 1

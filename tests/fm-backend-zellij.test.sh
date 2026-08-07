@@ -877,7 +877,7 @@ test_teardown_passes_recorded_tab_id_to_zellij_kill() {
   cat > "$fb/tasks-axi" <<'SH'
 #!/usr/bin/env bash
 case "${1:-} ${2:-}" in
-  "--version ") printf '%s\n' 'tasks-axi 0.2.2' ;;
+  "--version ") printf '%s\n' 'tasks-axi 0.2.4' ;;
   "update --help") printf '%s\n' 'usage: tasks-axi update --archive-body' ;;
   "mv --help") printf '%s\n' 'usage: tasks-axi mv [<id>...]' ;;
   "hold --help") printf '%s\n' 'usage: tasks-axi hold --kind captain' ;;

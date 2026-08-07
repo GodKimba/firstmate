@@ -211,6 +211,8 @@ else
   git -C "$WORKTREE" clean -fd >/dev/null 2>&1 \
     || die "could not clean the authorized disposable worktree"
 fi
+git -C "$WORKTREE" clean -fdX >/dev/null 2>&1 \
+  || die "could not clean ignored files from the authorized disposable worktree"
 
 tracked=$(git -C "$WORKTREE" status --porcelain --untracked-files=no 2>/dev/null) \
   || die "cannot inspect tracked worktree state"
