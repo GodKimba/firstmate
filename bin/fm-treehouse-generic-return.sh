@@ -211,6 +211,8 @@ else
   git -C "$WORKTREE" clean -fd >/dev/null 2>&1 \
     || die "could not clean the authorized disposable worktree"
 fi
+git -C "$WORKTREE" clean -fdX >/dev/null 2>&1 \
+  || die "could not clean ignored files from the authorized disposable worktree"
 
 tracked=$(git -C "$WORKTREE" status --porcelain --untracked-files=no 2>/dev/null) \
   || die "cannot inspect tracked worktree state"
@@ -263,9 +265,16 @@ STATE_REMOVED=$(mktemp "$POOL/.fm-treehouse-state.removed.XXXXXXXX") \
   || die "cannot prepare generic Treehouse state postcondition"
 cp -p "$STATE_FILE" "$STATE_BACKUP" \
   || die "cannot snapshot generic Treehouse pool state"
-state_mode=$(stat -f '%Lp' "$STATE_FILE" 2>/dev/null \
-  || stat -c '%a' "$STATE_FILE" 2>/dev/null) \
-  || die "cannot inspect generic Treehouse pool state mode"
+case "$(uname -s 2>/dev/null || true)" in
+  Darwin|FreeBSD)
+    state_mode=$(stat -f '%Lp' "$STATE_FILE" 2>/dev/null) \
+      || die "cannot inspect generic Treehouse pool state mode"
+    ;;
+  *)
+    state_mode=$(stat -c '%a' "$STATE_FILE" 2>/dev/null) \
+      || die "cannot inspect generic Treehouse pool state mode"
+    ;;
+esac
 jq --arg path "$WORKTREE" '
   .worktrees |= map(if .path == $path then . + {destroying: true} else . end)
 ' "$STATE_FILE" >"$STATE_MARKED" \

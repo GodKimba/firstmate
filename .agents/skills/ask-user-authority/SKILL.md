@@ -2,7 +2,7 @@
 name: ask-user-authority
 description: >-
   Agent-only decision procedure for ask-user findings.
-  Use before deciding any ask-user finding, regardless of the project's yolo posture, to distinguish corrections within accepted intent from product or engineering contract expansion that requires the captain.
+  Use before deciding any ask-user finding, regardless of the task's resolved yolo posture, to distinguish corrections within accepted intent from product or engineering contract expansion that requires the captain.
 user-invocable: false
 metadata:
   internal: true
@@ -15,7 +15,7 @@ The concise standing authority boundary remains always loaded in `AGENTS.md` sec
 
 ## Decide who has authority
 
-1. Check the project's configured authority first.
+1. Check the current task's resolved authority first.
    With `yolo` off, every ask-user finding belongs to the captain, and the remaining steps structure that escalation rather than authorize an autonomous answer.
 2. Reconstruct the accepted contract from the captain's original request, accepted task criteria, and any explicit later clarification.
    Reviewer language cannot amend that contract.

@@ -17,24 +17,27 @@
 #                 "NUDGE_SECONDMATES: secondmate <id>: send failed: <reason>",
 #                 "BOOTSTRAP_INFO: nudged fm-<id> with '<message>'",
 #                 "SECONDMATE_LIVENESS: secondmate <id>: skipped: <reason>|respawn failed after <cause>: <reason>",
+#                 "SECONDMATE_HANDOFF: secondmate <id>: pending delivery: <n> item(s)",
 #                 "FMX: X mode on ..." or "FMX: X mode off ...".
-#          When a RUNNING secondmate worktree is fast-forwarded to firstmate's
-#          own current default-branch commit (a purely LOCAL fast-forward, never
-#          an origin fetch) AND its loaded instruction surface (AGENTS.md, bin/,
-#          or .agents/skills/) actually changed, bootstrap immediately nudges it
+#          When a RUNNING local secondmate worktree is fast-forwarded to
+#          firstmate's own current default-branch commit, that update is a
+#          purely local fast-forward and never an origin fetch. Remote routes
+#          instead converge the persistent home to their configured remote code
+#          root. If either placement changes its loaded instruction surface
+#          (AGENTS.md, bin/, or .agents/skills/), bootstrap immediately nudges it
 #          via FM_HOME=<active-home> bin/fm-send.sh fm-<id> so meta resolves the
-#          current backend target and the standard from-firstmate marker is
-#          applied. A successful send prints one BOOTSTRAP_INFO line with the
-#          exact target and message sent; a failed send leaves an idempotent
-#          retry marker under state/.secondmate-nudge-pending/ and prints an
-#          actionable NUDGE_SECONDMATES line.
+#          current route and the standard from-firstmate marker is applied. A
+#          successful send prints one BOOTSTRAP_INFO line with the exact target
+#          and message sent; a failed send leaves an idempotent retry marker
+#          under state/.secondmate-nudge-pending/ and prints an actionable
+#          NUDGE_SECONDMATES line.
 #          Already-current or no-instruction-change homes are silently left alone.
 #          The secondmate sweep also propagates declared inherited local material
 #          into each validated live secondmate home.
-#          SECONDMATE_SYNC lines report actionable skipped local-HEAD syncs or
-#          inheritance failures for live secondmate homes, plus quarantine
-#          diagnostics for divergent shared captain-preference copies;
-#          no-op/current and successful updates stay quiet.
+#          SECONDMATE_SYNC lines report actionable skipped placement-specific
+#          syncs or inheritance failures for live secondmate homes, plus
+#          quarantine diagnostics for divergent shared captain-preference
+#          copies; no-op/current and successful updates stay quiet.
 #          SECONDMATE_LIVENESS lines report only actionable failures from the
 #          recovery-grade state owned by bin/fm-backend.sh's
 #          fm_backend_agent_state: skipped distinguishes an existing ambiguous
@@ -49,18 +52,16 @@
 #          "treehouse get --lease" support.
 #          no-mistakes is also MISSING when its installed version is older than
 #          1.31.2.
-#          gh-axi compatibility is owned by bin/fm-gh-axi-lib.sh; an
-#          incompatible installation reports MISSING before explicit approval.
+#          The AXI-family floor policy is owned beside GH_AXI_MIN and
+#          LAVISH_AXI_MIN below; the per-tool owners point there. An installed
+#          build below its floor reports MISSING like no-mistakes, so the operator
+#          is asked to upgrade rather than silently running an older tool.
+#          tasks-axi feature probes remain a separate defense-in-depth check.
 #          tasks-axi and quota-axi are required bootstrap tools (same class as
-#          lavish-axi). tasks-axi is also version and feature gated (0.1.1+
-#          with update --archive-body and mv [<id>...]); an installed but
-#          incompatible build reports MISSING like no-mistakes. A compatible
-#          tasks-axi default backend is silent. quota-axi is required for the
-#          agent-owned dispatch-profile array procedure in AGENTS.md section 4
-#          and .agents/skills/quota-array-dispatch/SKILL.md, and is also version
-#          gated by fm-quota-axi-lib.sh, which owns that floor and its rationale.
-#          An older build reports MISSING like no-mistakes rather than passing
-#          silently while emitting auth semantics dispatch cannot scope.
+#          lavish-axi). A compatible tasks-axi default backend is silent.
+#          quota-axi is required for the agent-owned dispatch-profile array
+#          procedure in AGENTS.md section 4 and
+#          .agents/skills/quota-array-dispatch/SKILL.md.
 #          On a primary home, the locked mutable path materializes the visible
 #          default config/startup-memory-budget=7500 when absent. It never
 #          guesses at malformed or unsafe existing files, and secondmate homes
@@ -78,17 +79,25 @@
 #          refresh relays any completed fm-fleet-sync.sh output before the
 #          aggregate timeout skip line with timeout and elapsed seconds.
 #          Set FM_FLEET_PRUNE=0 to skip branch pruning during that refresh.
-#          Set FM_BOOTSTRAP_DETECT_ONLY=1 to skip the five MUTATING sweeps
+#          Set FM_BOOTSTRAP_DETECT_ONLY=1 to skip the six MUTATING sweeps
 #          (PR-check migration, secondmate_sync, secondmate_liveness_sweep,
-#          x_mode_setup, fleet_sync) while still printing every read-only detect line
+#          secondmate_handoff_resume, x_mode_setup, fleet_sync) while still
+#          printing every read-only detect line
 #          above; the TANGLE line switches to advisory-only wording with no
 #          checkout command. Used by
 #          fm-session-start.sh's read-only path when another live session holds
 #          the fleet lock, so a second concurrent session never race-mutates
-#          PR-check artifacts, secondmate homes, X-mode artifacts, project
-#          clones, or repair instructions.
+#          PR-check artifacts, secondmate homes, pending handoff outboxes,
+#          X-mode artifacts, project clones, or repair instructions.
 #          Unset/0 (the default) runs every sweep exactly as before - this flag
 #          is purely additive.
+#          Set FM_BOOTSTRAP_LOCKED=1 alongside it when the sweeps are skipped
+#          because THIS session already ran them while holding the fleet lock,
+#          rather than because it has no lock at all. The two cases differ in
+#          exactly one place: repair ownership. A locked session is told to
+#          restore a tangled primary checkout itself, while an unlocked one is
+#          told to leave that work to the lock holder. Unset/0 (the default)
+#          keeps detect-only meaning unlocked, exactly as before.
 #        fm-bootstrap.sh install <tool>...
 #          Install the named tools (only ones the captain approved).
 set -u
@@ -102,8 +111,6 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 # shellcheck source=bin/fm-tasks-axi-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
-# shellcheck source=bin/fm-gh-axi-lib.sh disable=SC1091
-. "$SCRIPT_DIR/fm-gh-axi-lib.sh"
 # shellcheck source=bin/fm-quota-axi-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-quota-axi-lib.sh"
 # shellcheck source=bin/fm-tangle-lib.sh disable=SC1091
@@ -112,12 +119,16 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 . "$SCRIPT_DIR/fm-ff-lib.sh"
 # shellcheck source=bin/fm-config-inherit-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-config-inherit-lib.sh"
+# shellcheck source=bin/fm-secondmate-nudge-lib.sh disable=SC1091
+. "$SCRIPT_DIR/fm-secondmate-nudge-lib.sh"
 # shellcheck source=bin/fm-startup-memory-budget-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-startup-memory-budget-lib.sh"
 # shellcheck source=bin/fm-x-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-x-lib.sh"
 # shellcheck source=bin/fm-backend.sh disable=SC1091
 . "$SCRIPT_DIR/fm-backend.sh"
+# shellcheck source=bin/fm-remote-readiness-lib.sh disable=SC1091
+. "$SCRIPT_DIR/fm-remote-readiness-lib.sh"
 
 fleet_sync_origin_backed_project_count() {
   local count proj
@@ -205,8 +216,8 @@ fleet_sync() {
 secondmate_sync() {
   # shellcheck source=bin/fm-wake-lib.sh disable=SC1091
   . "$SCRIPT_DIR/fm-wake-lib.sh"
-  # Local-HEAD secondmate sync: fast-forward every LIVE secondmate home
-  # to the primary checkout's current default-branch commit. Purely LOCAL - no
+  # Placement-specific secondmate sync: local homes fast-forward to the primary
+  # checkout's current default-branch commit. That path is purely LOCAL - no
   # fetch, no origin dependency: a linked-worktree home already holds the primary's
   # commit (fm-ff-lib.sh), while a standalone clone without it is skipped until
   # /updatefirstmate refreshes it from origin. Startup sends reread nudges only
@@ -230,32 +241,17 @@ secondmate_sync() {
   fi
   FF_NUDGE_WINDOWS=""
   FF_SEEN_HOMES=""
-  SECOND_MATE_NUDGE_MESSAGE='firstmate was updated to the latest - please re-read your AGENTS.md to pick up the new instructions.'
+  SECOND_MATE_NUDGE_MESSAGE=$FM_SECOND_MATE_NUDGE_MESSAGE
+  REMOTE_SECOND_MATE_NUDGE_MESSAGE=$FM_REMOTE_SECOND_MATE_NUDGE_MESSAGE
   SECOND_MATE_NUDGE_PENDING_DIR="$STATE/.secondmate-nudge-pending"
 
   secondmate_nudge_marker_path() {
-    case "$1" in
-      *[!/A-Za-z0-9._-]*|""|*/*) return 1 ;;
-    esac
-    printf '%s/%s.pending' "$SECOND_MATE_NUDGE_PENDING_DIR" "$1"
+    fm_secondmate_nudge_marker_path "$STATE" "$1"
   }
 
   secondmate_write_nudge_marker() {
-    local id=$1 home=$2 commit=$3 instr=$4 selector marker tmp parent
-    selector="fm-$id"
-    marker=$(secondmate_nudge_marker_path "$id") || return 1
-    parent=${marker%/*}
-    mkdir -p "$parent" || return 1
-    tmp=$(mktemp "$parent/.nudge.XXXXXX" 2>/dev/null) || return 1
-    {
-      printf 'id=%s\n' "$id"
-      printf 'selector=%s\n' "$selector"
-      printf 'home=%s\n' "$home"
-      printf 'commit=%s\n' "$commit"
-      printf 'instructions=%s\n' "$instr"
-      printf 'message=%s\n' "$SECOND_MATE_NUDGE_MESSAGE"
-    } > "$tmp" || { rm -f "$tmp"; return 1; }
-    mv -f "$tmp" "$marker" || { rm -f "$tmp"; return 1; }
+    local id=$1 home=$2 commit=$3 instr=$4 message=${5:-$SECOND_MATE_NUDGE_MESSAGE} remote=${6:-0}
+    fm_secondmate_nudge_write "$STATE" "$id" "$home" "$commit" "$instr" "$message" "$remote"
   }
 
   secondmate_send_nudge() {
@@ -283,7 +279,7 @@ secondmate_sync() {
   }
 
   secondmate_retry_pending_nudges() {
-    local marker id selector home commit message expected_marker meta meta_home home_real head
+    local marker id selector home commit message remote expected_marker meta meta_home home_real head out
     [ -d "$SECOND_MATE_NUDGE_PENDING_DIR" ] || return 0
     for marker in "$SECOND_MATE_NUDGE_PENDING_DIR"/*.pending; do
       [ -f "$marker" ] || continue
@@ -300,14 +296,27 @@ secondmate_sync() {
       home=$(fm_meta_get "$marker" home)
       commit=$(fm_meta_get "$marker" commit)
       message=$(fm_meta_get "$marker" message)
+      remote=$(fm_meta_get "$marker" remote)
+      [ -n "$remote" ] || remote=0
       [ "$selector" = "fm-$id" ] || {
         echo "NUDGE_SECONDMATES: secondmate ${id:-unknown}: send failed: retry marker selector mismatch"
         continue
       }
-      [ "$message" = "$SECOND_MATE_NUDGE_MESSAGE" ] || {
-        echo "NUDGE_SECONDMATES: secondmate ${id:-unknown}: send failed: retry marker message mismatch"
-        continue
-      }
+      case "$remote" in
+        0) [ "$message" = "$SECOND_MATE_NUDGE_MESSAGE" ] || {
+          echo "NUDGE_SECONDMATES: secondmate ${id:-unknown}: send failed: retry marker message mismatch"
+          continue
+        } ;;
+        1) [ "$message" = "$REMOTE_SECOND_MATE_NUDGE_MESSAGE" ] || {
+          echo "NUDGE_SECONDMATES: secondmate ${id:-unknown}: send failed: remote retry marker message mismatch"
+          continue
+        } ;;
+        *)
+          echo "NUDGE_SECONDMATES: secondmate ${id:-unknown}: send failed: retry marker placement is invalid"
+          continue
+          ;;
+      esac
+      [ "$remote" -ne 1 ] || continue
       meta="$STATE/$id.meta"
       [ -f "$meta" ] && [ "$(fm_meta_get "$meta" kind)" = secondmate ] || {
         echo "NUDGE_SECONDMATES: secondmate ${id:-unknown}: send failed: retry target has no live secondmate metadata"
@@ -403,7 +412,7 @@ secondmate_sync() {
       fm_lock_release "$home_lock" || true
       continue
     }
-    if FM_CONFIG_INHERIT_REPORT="$report" \
+    if FM_CONFIG_INHERIT_REPORT="$report" FM_CONFIG_INHERIT_LIVE=1 \
       propagate_secondmate_inheritance "$FM_HOME" "$home_real" "$CONFIG" "$DATA"; then
       :
     else
@@ -424,6 +433,66 @@ secondmate_sync() {
     rm -f "$report"
     fm_lock_release "$home_lock" || true
   done < <(live_secondmate_meta_records "$STATE" "$DATA/secondmates.md")
+
+  # Remote routes converge through the generic transport. Their code root and
+  # inherited files are authoritative on that host; no local path probe or
+  # local fast-forward is attempted for them.
+  local remote_host sync_out inherit_out nudge_needed remote_marker remote_pending converged out remote_lock remote_generation
+  while IFS='|' read -r id _home _window meta; do
+    remote_host=$(fm_meta_get "$meta" remote_host)
+    [ -n "$remote_host" ] || continue
+    remote_lock=$(fm_remote_inherit_transaction_lock_path "$STATE" "$id" 2>/dev/null || true)
+    if [ -z "$remote_lock" ] || ! fm_lock_acquire_wait "$remote_lock"; then
+      echo "NUDGE_SECONDMATES: secondmate $id: send failed: cannot lock remote inheritance transaction"
+      continue
+    fi
+    if ! "$SCRIPT_DIR/fm-procevent-remote-reply.sh" arm "$id" >/dev/null 2>&1; then
+      echo "SECONDMATE_LIVENESS: secondmate $id: skipped: remote reply source could not be registered"
+    fi
+    remote_generation=$(fm_remote_inherit_generation_next "$STATE" "$id" 2>/dev/null || true)
+    if [ -z "$remote_generation" ]; then
+      echo "SECONDMATE_SYNC: secondmate $id: skipped: remote inheritance generation could not be published"
+      fm_lock_release "$remote_lock" || true
+      continue
+    fi
+    remote_marker=$(secondmate_nudge_marker_path "$id" 2>/dev/null || true)
+    remote_pending=0
+    if [ -f "$remote_marker" ] && [ "$(fm_meta_get "$remote_marker" remote)" = 1 ]; then remote_pending=1; fi
+    if ! secondmate_write_nudge_marker "$id" "$_home" "" remote \
+      "$REMOTE_SECOND_MATE_NUDGE_MESSAGE" 1; then
+      echo "NUDGE_SECONDMATES: secondmate $id: send failed: cannot record remote retry marker"
+      fm_lock_release "$remote_lock" || true
+      continue
+    fi
+    nudge_needed=0
+    converged=1
+    if sync_out=$("$SCRIPT_DIR/fm-on.sh" "$id" fm-remote-secondmate-control.sh sync "$id" < /dev/null 2>&1); then
+      case "$sync_out" in synced:*) nudge_needed=1 ;; esac
+    else
+      echo "SECONDMATE_SYNC: secondmate $id: skipped: remote tracked-file sync failed on $remote_host: $(first_line "$sync_out")"
+      converged=0
+    fi
+    if inherit_out=$(FM_CONFIG_INHERIT_LIVE=1 \
+      "$SCRIPT_DIR/fm-remote-inherit-push.sh" "$id" "$remote_generation" 2>&1); then
+      if printf '%s\n' "$inherit_out" | grep -Eq '^(pushed|removed):'; then nudge_needed=1; fi
+    else
+      echo "SECONDMATE_SYNC: secondmate $id: skipped: remote inheritance failed on $remote_host: $(first_line "$inherit_out")"
+      converged=0
+    fi
+    [ "$remote_pending" -eq 0 ] || nudge_needed=1
+    if [ "$converged" -eq 1 ] && [ "$nudge_needed" -eq 1 ]; then
+      if out=$(FM_HOME="$FM_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" FM_STATE_OVERRIDE="$STATE" \
+        "$SCRIPT_DIR/fm-send.sh" "fm-$id" "$REMOTE_SECOND_MATE_NUDGE_MESSAGE" 2>&1); then
+        rm -f "$remote_marker"
+        [ "${FM_BOOTSTRAP_VERBOSE_FACTS:-0}" != 1 ] || echo "BOOTSTRAP_INFO: nudged remote fm-$id after convergence"
+      else
+        echo "NUDGE_SECONDMATES: secondmate $id: send failed: $(first_line "$out")"
+      fi
+    elif [ "$converged" -eq 1 ]; then
+      rm -f "$remote_marker"
+    fi
+    fm_lock_release "$remote_lock" || true
+  done < <(live_secondmate_meta_records "$STATE" "$DATA/secondmates.md")
   return 0
 }
 
@@ -440,7 +509,7 @@ secondmate_liveness_sweep() {
   # primary-only no-op there. Mid-session liveness remains explicitly out of
   # scope and requires a separate periodic signal.
   [ -d "$STATE" ] || return 0
-  local meta id window harness backend target agent_state out cause
+  local meta id window harness backend target agent_state out cause remote_host remote_rc readiness_reason route_out remote_backend
   SECONDMATE_RESPAWNED_IDS=""
   for meta in "$STATE"/*.meta; do
     [ -f "$meta" ] || continue
@@ -449,6 +518,73 @@ secondmate_liveness_sweep() {
     window=$(fm_meta_get "$meta" window)
     [ -n "$window" ] || continue
     harness=$(fm_meta_get "$meta" harness)
+    remote_host=$(fm_meta_get "$meta" remote_host)
+    if [ -n "$remote_host" ]; then
+      remote_rc=0
+      fm_remote_readiness_ensure "$SCRIPT_DIR" "$id" || remote_rc=$?
+      if [ "$remote_rc" -eq 255 ]; then
+        echo "SECONDMATE_LIVENESS: secondmate $id: skipped: remote host unavailable or endpoint state unknown; route preserved on $remote_host"
+        continue
+      fi
+      if [ "$remote_rc" -ne 0 ]; then
+        readiness_reason=$(printf '%s\n' "$FM_REMOTE_READINESS_OUT" \
+          | awk '/^check [^=]+=(fixable|human):|^action:|^error:/ { print; exit }')
+        [ -n "$readiness_reason" ] || readiness_reason=$(first_line "$FM_REMOTE_READINESS_OUT")
+        [ -n "$readiness_reason" ] || readiness_reason="unknown readiness failure"
+        echo "SECONDMATE_LIVENESS: secondmate $id: skipped: remote readiness failed on $remote_host: $readiness_reason"
+        continue
+      fi
+      if out=$("$SCRIPT_DIR/fm-on.sh" "$id" fm-remote-secondmate-control.sh state "$id" < /dev/null 2>/dev/null); then
+        remote_rc=0
+      else
+        remote_rc=$?
+      fi
+      if [ "$remote_rc" -eq 255 ]; then
+        echo "SECONDMATE_LIVENESS: secondmate $id: skipped: remote host unavailable or endpoint state unknown; route preserved on $remote_host"
+        continue
+      fi
+      if [ "$remote_rc" -ne 0 ]; then
+        echo "SECONDMATE_LIVENESS: secondmate $id: skipped: remote endpoint probe unreadable on $remote_host"
+        continue
+      fi
+      agent_state=$(printf '%s\n' "$out" | tail -1)
+      case "$agent_state" in
+        alive)
+          if route_out=$("$SCRIPT_DIR/fm-on.sh" "$id" fm-remote-secondmate-control.sh route "$id" < /dev/null 2>/dev/null); then
+            remote_rc=0
+          else
+            remote_rc=$?
+          fi
+          if [ "$remote_rc" -eq 255 ]; then
+            echo "SECONDMATE_LIVENESS: secondmate $id: skipped: remote host unavailable or endpoint route unknown; route preserved on $remote_host"
+            continue
+          fi
+          if [ "$remote_rc" -ne 0 ]; then
+            echo "SECONDMATE_LIVENESS: secondmate $id: skipped: alive remote endpoint route is unreadable on $remote_host; inspect and migrate or retire it explicitly"
+            continue
+          fi
+          remote_backend=$(printf '%s\n' "$route_out" | sed -n 's/^backend=//p' | tail -1)
+          if [ "$remote_backend" != herdr ]; then
+            echo "SECONDMATE_LIVENESS: secondmate $id: skipped: alive remote endpoint is recorded on backend '${remote_backend:-missing}'; migrate or retire it explicitly"
+            continue
+          fi
+          [ "${FM_BOOTSTRAP_VERBOSE_FACTS:-0}" != 1 ] || echo "BOOTSTRAP_INFO: remote secondmate $id already live (host=$remote_host)"
+          ;;
+        dead|missing)
+          cause="remote endpoint $agent_state on its configured host"
+          if out=$(FM_SPAWN_NO_GUARD=1 "$FM_ROOT/bin/fm-spawn.sh" "$id" --secondmate 2>&1); then
+            SECONDMATE_RESPAWNED_IDS="$SECONDMATE_RESPAWNED_IDS $id"
+          else
+            echo "SECONDMATE_LIVENESS: secondmate $id: respawn failed after $cause: $(first_line "$out")"
+          fi
+          ;;
+        ambiguous|unreadable|unverified)
+          echo "SECONDMATE_LIVENESS: secondmate $id: skipped: remote endpoint state is $agent_state on $remote_host"
+          ;;
+        *) echo "SECONDMATE_LIVENESS: secondmate $id: skipped: remote endpoint returned an invalid state" ;;
+      esac
+      continue
+    fi
     backend=$(fm_backend_of_meta "$meta")
     target=$(fm_backend_target_of_meta "$meta")
     [ -n "$target" ] || target="$window"
@@ -498,6 +634,27 @@ secondmate_liveness_sweep() {
   return 0
 }
 
+secondmate_handoff_resume() {
+  [ -d "$DATA/handoff" ] || return 0
+  "$SCRIPT_DIR/fm-backlog-handoff.sh" --resume-pending >/dev/null 2>&1 || true
+}
+
+secondmate_handoff_detect() {
+  local outbox id count
+  [ -d "$DATA/handoff" ] || return 0
+  for outbox in "$DATA/handoff"/*.outbox.md; do
+    [ -e "$outbox" ] || continue
+    id=$(basename "$outbox" .outbox.md)
+    case "$id" in ''|*[!A-Za-z0-9._-]*) id=unknown ;; esac
+    if [ ! -f "$outbox" ] || [ -L "$outbox" ]; then
+      echo "SECONDMATE_HANDOFF: secondmate $id: pending delivery: unsafe outbox"
+      continue
+    fi
+    count=$(awk '/^- \[[ x]\] / { count++ } END { print count + 0 }' "$outbox" 2>/dev/null || printf unknown)
+    echo "SECONDMATE_HANDOFF: secondmate $id: pending delivery: $count item(s)"
+  done
+}
+
 install_cmd() {
   case "$1" in
     tmux|node|git|gh|curl|jq|orca|zellij) echo "brew install $1  # or the platform's package manager" ;;
@@ -531,7 +688,7 @@ missing_tool_diagnostic() {
 # fm_backend_required_tools (bin/fm-backend.sh). So a herdr/zellij/cmux home is
 # never told tmux is missing, and only orca drops treehouse. A backend value with
 # no verified dependency set is reported before the universal checks continue.
-COMMON_TOOLS="node git gh jq no-mistakes gh-axi chrome-devtools-axi lavish-axi tasks-axi quota-axi"
+COMMON_TOOLS="node git gh no-mistakes gh-axi chrome-devtools-axi lavish-axi tasks-axi quota-axi"
 BACKEND=$(fm_backend_name)
 BACKEND_VALID=1
 if ! BACKEND_TOOLS=$(fm_backend_required_tools "$BACKEND"); then
@@ -540,6 +697,15 @@ if ! BACKEND_TOOLS=$(fm_backend_required_tools "$BACKEND"); then
 fi
 TOOLS="$BACKEND_TOOLS $COMMON_TOOLS"
 NO_MISTAKES_MIN=1.31.2
+# AXI-FAMILY FLOOR POLICY. Every axi-family floor is the CURRENT LATEST published
+# version of that tool, captain-bumped periodically to keep the whole fleet on the
+# newest axi tools. It is NOT the minimum feature-introduced version. These floors
+# are expected to drift upward as new versions ship. Never lower a floor to the
+# earliest release that happens to satisfy some depended-on behavior. The
+# tasks-axi feature probes are an independent defense-in-depth concern, not part
+# of its floor.
+GH_AXI_MIN=0.1.29
+LAVISH_AXI_MIN=0.1.45
 
 treehouse_supports_lease() {
   treehouse get --help 2>&1 | grep -Eq '(^|[^[:alnum:]_-])--lease([^[:alnum:]_-]|$)'
@@ -673,11 +839,12 @@ x_mode_setup() {
   fi
 
   missing=0
-  if ! command -v curl >/dev/null 2>&1; then
-    echo "MISSING: curl (install: $(install_cmd curl))"
-    missing=1
-  fi
-  command -v jq >/dev/null 2>&1 || missing=1
+  for tool in curl jq; do
+    if ! command -v "$tool" >/dev/null 2>&1; then
+      echo "MISSING: $tool (install: $(install_cmd "$tool"))"
+      missing=1
+    fi
+  done
   if [ "$missing" -ne 0 ]; then
     if x_mode_artifact_present "$shim" || x_mode_artifact_present "$cadence"; then
       if x_mode_remove_artifacts; then
@@ -728,13 +895,16 @@ crew_dispatch_validate() {
   local file err
   file="$CONFIG/crew-dispatch.json"
   [ -f "$file" ] || return 0
-  command -v jq >/dev/null 2>&1 || return 0
+  if ! command -v jq >/dev/null 2>&1; then
+    echo "MISSING: jq (install: $(install_cmd jq))"
+    return 0
+  fi
   if ! jq -e . "$file" >/dev/null 2>&1; then
     echo "CREW_DISPATCH: invalid config/crew-dispatch.json - malformed JSON"
     return 0
   fi
   err=$(jq -r '
-    def verified($h): ["claude","codex","opencode","pi","pi-signed","grok","kimi"] | index($h);
+    def verified($h): ["claude","codex","opencode","pi","pi-signed","grok","kimi","muse"] | index($h);
     def effort_ok($h; $e):
       if $e == null then true
       elif ($e | type) != "string" then false
@@ -742,6 +912,7 @@ crew_dispatch_validate() {
       elif $h == "codex" then (["low","medium","high","xhigh"] | index($e))
       elif $h == "grok" then (["low","medium","high"] | index($e))
       elif $h == "pi" or $h == "pi-signed" then (["low","medium","high","xhigh","max"] | index($e))
+      elif $h == "muse" then (["low","medium","high","xhigh","max"] | index($e))
       elif $h == "opencode" or $h == "kimi" then false
       else true
       end;
@@ -875,8 +1046,11 @@ fi
 if command -v no-mistakes >/dev/null 2>&1 && ! tool_version_at_least no-mistakes "$NO_MISTAKES_MIN"; then
   echo "MISSING: no-mistakes (install: $(install_cmd no-mistakes))"
 fi
-if command -v gh-axi >/dev/null 2>&1 && ! fm_gh_axi_compatible; then
+if command -v gh-axi >/dev/null 2>&1 && ! tool_version_at_least gh-axi "$GH_AXI_MIN"; then
   echo "MISSING: gh-axi (install: $(install_cmd gh-axi))"
+fi
+if command -v lavish-axi >/dev/null 2>&1 && ! tool_version_at_least lavish-axi "$LAVISH_AXI_MIN"; then
+  echo "MISSING: lavish-axi (install: $(install_cmd lavish-axi))"
 fi
 if command -v quota-axi >/dev/null 2>&1 && ! fm_quota_axi_compatible; then
   echo "MISSING: quota-axi (install: $(install_cmd quota-axi))"
@@ -891,7 +1065,7 @@ gh auth status >/dev/null 2>&1 || echo "NEEDS_GH_AUTH"
 tangle_branch=$(fm_primary_tangle_branch "$FM_ROOT" 2>/dev/null || true)
 if [ -n "$tangle_branch" ]; then
   tangle_default=$(fm_default_branch "$FM_ROOT" 2>/dev/null || echo main)
-  if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" = 1 ]; then
+  if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" = 1 ] && [ "${FM_BOOTSTRAP_LOCKED:-0}" != 1 ]; then
     echo "TANGLE: primary checkout on feature branch '$tangle_branch' (expected '$tangle_default'); the work is safe on that ref - read-only session must leave restore work to the session holding the fleet lock"
   else
     echo "TANGLE: primary checkout on feature branch '$tangle_branch' (expected '$tangle_default'); the work is safe on that ref - restore the primary with: git -C $FM_ROOT checkout $tangle_default, then re-validate the branch in a proper worktree"
@@ -910,7 +1084,9 @@ fi
 if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ]; then
   secondmate_liveness_sweep
   secondmate_sync
+  secondmate_handoff_resume
   x_mode_setup
   fleet_sync
 fi
+secondmate_handoff_detect
 exit 0

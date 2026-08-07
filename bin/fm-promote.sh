@@ -4,20 +4,78 @@
 # instructions via fm-send.sh
 # (inventory scratch state, reset to a clean default-branch base, carry over only
 # intended fix changes on branch fm/<task-id>, implement, then report done
-# according to the project's delivery mode).
-# The recorded project and worktree paths are proven by resolving them, not by
-# requiring the stored strings to already be physical: a project clone is legitimately
-# registered through a symlink. Every Git operation then uses the resolved paths, and
-# the stored strings are preserved exactly as recorded.
-# Usage: fm-promote.sh <task-id>
+# according to this task's delivery mode).
+# A scout records no delivery posture, so promotion is where this task's delivery
+# contract is decided: --mode and --yolo are REQUIRED and written into the meta
+# alongside the kind= flip. Firstmate resolves both at promotion time, having just
+# read the scout's report (AGENTS.md section 7); data/projects.md holds the
+# captain's standing posture as context, and this script never looks it up.
+# no-mistakes-prod-only is a registry policy rather than a task mode and is refused.
+# Promotion also acquires the ship task's branch here rather than leaving it to the
+# worker, because teardown's acquisition provenance (acquisition_branch= in the meta)
+# is what lets a returned worktree prove which branch it owned. The recorded project
+# and worktree paths are proven by resolving them, not by requiring the stored strings
+# to already be physical: a project clone is legitimately registered through a
+# symlink. Every Git operation then uses the resolved paths, and the stored strings
+# are preserved exactly as recorded.
+# Usage: fm-promote.sh <task-id> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off>
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+
+MODE=
+YOLO=
+MODE_SET=0
+YOLO_SET=0
+POS=()
+want_value=
+for a in "$@"; do
+  if [ -n "$want_value" ]; then
+    case "$a" in
+      --*) echo "error: --$want_value requires a value" >&2; exit 1 ;;
+    esac
+    case "$want_value" in
+      mode) MODE=$a; MODE_SET=1 ;;
+      yolo) YOLO=$a; YOLO_SET=1 ;;
+    esac
+    want_value=
+    continue
+  fi
+  case "$a" in
+    --mode) want_value=mode ;;
+    --mode=*) MODE=${a#--mode=}; MODE_SET=1 ;;
+    --yolo) want_value=yolo ;;
+    --yolo=*) YOLO=${a#--yolo=}; YOLO_SET=1 ;;
+    *) POS+=("$a") ;;
+  esac
+done
+[ -z "$want_value" ] || { echo "error: --$want_value requires a value" >&2; exit 1; }
+[ "${#POS[@]}" -ge 1 ] || { echo "usage: fm-promote.sh <task-id> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off>" >&2; exit 1; }
+[ "$MODE_SET" -eq 1 ] || {
+  echo "error: promotion requires --mode <no-mistakes|direct-PR|local-only>; decide it now from the scout's findings and the project's registered posture in data/projects.md" >&2
+  exit 1
+}
+[ "$YOLO_SET" -eq 1 ] || {
+  echo "error: promotion requires --yolo <on|off>; it is this task's routine approval authority, not a project lookup" >&2
+  exit 1
+}
+case "$MODE" in
+  no-mistakes|direct-PR|local-only) ;;
+  no-mistakes-prod-only)
+    echo "error: no-mistakes-prod-only is a registry policy, not a task mode; classify this task's surface and resolve it to no-mistakes or direct-PR" >&2
+    exit 1 ;;
+  *) echo "error: --mode must be one of no-mistakes, direct-PR, local-only (got '$MODE')" >&2; exit 1 ;;
+esac
+case "$YOLO" in
+  on|off) ;;
+  *) echo "error: --yolo must be on or off (got '$YOLO')" >&2; exit 1 ;;
+esac
+
 "$FM_ROOT/bin/fm-guard.sh" || true
-ID=$1
+ID=${POS[0]}
 META="$STATE/$ID.meta"
 BRANCH="fm/$ID"
 BRANCH_REF="refs/heads/$BRANCH"
@@ -188,8 +246,8 @@ fi
   || { echo "error: cannot prove acquisition branch $BRANCH is absent" >&2; exit 1; }
 
 TMP=$(mktemp "$STATE/.fm-promote.XXXXXXXX")
-awk '!/^kind=/ && !/^acquisition_branch=/' "$ORIGINAL" > "$TMP"
-printf 'kind=ship\nacquisition_branch=%s\n' "$BRANCH" >> "$TMP"
+awk '!/^kind=/ && !/^acquisition_branch=/ && !/^mode=/ && !/^yolo=/' "$ORIGINAL" > "$TMP"
+printf 'kind=ship\nacquisition_branch=%s\nmode=%s\nyolo=%s\n' "$BRANCH" "$MODE" "$YOLO" >> "$TMP"
 
 if [ ! -f "$META" ] || [ -L "$META" ] || ! cmp -s "$ORIGINAL" "$META"; then
   echo "error: task $ID metadata changed during promotion" >&2
@@ -209,5 +267,5 @@ TMP=
 BRANCH_CREATED=0
 
 HOME_Q=$(printf '%q' "$FM_HOME")
-echo "promoted $ID to ship (teardown protection restored)"
-echo "next: FM_HOME=$HOME_Q bin/fm-send.sh fm-$ID '<ship instructions: review scratch state with git status and git log; reset the prepared fm/$ID branch to a clean default-branch base; carry over only intended fix changes; implement; report done>'"
+echo "promoted $ID to ship mode=$MODE yolo=$YOLO (teardown protection restored)"
+echo "next: FM_HOME=$HOME_Q bin/fm-send.sh fm-$ID '<ship instructions for mode=$MODE: review scratch state with git status and git log; reset the prepared fm/$ID branch to a clean default-branch base; carry over only intended fix changes; implement; report done>'"

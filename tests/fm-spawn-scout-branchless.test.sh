@@ -941,7 +941,9 @@ test_ship_acquisition_never_detaches_its_branch() {
   rec=$(make_scout_case ship-branch-intact "$id" managed)
   read_scout_record "$rec"
 
-  out=$(run_scout_spawn "$id")
+  # A ship carries an explicit delivery contract; this case is about branch
+  # acquisition, so it passes a fixed valid one.
+  out=$(run_scout_spawn "$id" --mode no-mistakes --yolo off)
   status=$?
   expect_code 0 "$status" "ship spawn should succeed"
   assert_contains "$out" "spawned $id" "spawn did not report success"

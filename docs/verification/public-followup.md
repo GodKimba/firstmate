@@ -9,7 +9,7 @@ This record supports four active guarantees for promised public replies made thr
 3. Multiple work relations retain independent registrations through terminal emission and legacy-link cleanup.
 4. An existing commitment remains locally visible and cleanup-guarded when relay authorization is unavailable.
 
-[`docs/configuration.md`](../configuration.md#promised-public-replies-statepublic-followup) owns the operator-facing contract, [`docs/architecture.md`](../architecture.md#optional-x-mode) owns the mechanism boundary, and `tasks-axi public-followup --help` owns the typed obligation schema.
+[`docs/configuration.md`](../configuration.md#promised-public-replies-statepublic-followup) owns the operator-facing contract, [`docs/architecture.md`](../architecture.md#optional-relay) owns the mechanism boundary, and `tasks-axi public-followup --help` owns the typed obligation schema.
 Task chronology and delivery evidence stay outside this record.
 
 ## Environment
@@ -48,7 +48,7 @@ ok - typed public-followup records carry only public-safe summaries and delivera
 The first case is the end-to-end proof.
 It reproduces the stranded state first (work bound, no reconciled terminal result, delivery refused with "still waiting on its bound work" and zero posts), then has a secondmate-shaped child report a typed `pr-merged` result, deletes the drained inbox payload, reconciles from disk, and asserts exactly one `connector/followup` call carrying the original `request_id`, a validated `posted` receipt, and a Done obligation.
 
-The existing X-mode suite is unchanged by this work:
+The existing Relay suite is unchanged by this work:
 
 ```sh
 bash tests/fm-x-mode.test.sh | grep -c '^ok -'

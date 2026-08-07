@@ -219,17 +219,35 @@ EOF
 }
 
 test_pi_retirement_uses_exit_before_inherited_stderr_close() {
-  local repo home plugin log stop descendant_done out status
+  local repo home plugin log stop descendant_started descendant_release descendant_done out status
   repo="$TMP_ROOT/pi-retire-open-stderr-root"
   home="$TMP_ROOT/pi-retire-open-stderr-home"
   log="$TMP_ROOT/pi-retire-open-stderr.log"
   stop="$TMP_ROOT/pi-retire-open-stderr.stop"
+  descendant_started="$TMP_ROOT/pi-retire-open-stderr-descendant.started"
+  descendant_release="$TMP_ROOT/pi-retire-open-stderr-descendant.release"
   descendant_done="$TMP_ROOT/pi-retire-open-stderr-descendant.done"
   mkdir -p "$repo/bin" "$home/state" "$home/config"
   install_pi_watch_extension_fixture "$repo"
   plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
 #!/usr/bin/env bash
+retire() {
+  FM_DESCENDANT_STARTED="$FM_DESCENDANT_STARTED" \
+    FM_DESCENDANT_RELEASE="$FM_DESCENDANT_RELEASE" \
+    FM_DESCENDANT_DONE="$FM_DESCENDANT_DONE" \
+    node -e '
+      const fs = require("node:fs");
+      fs.writeFileSync(process.env.FM_DESCENDANT_STARTED, "started\n");
+      const timer = setInterval(() => {
+        if (!fs.existsSync(process.env.FM_DESCENDANT_RELEASE)) return;
+        clearInterval(timer);
+        fs.writeFileSync(process.env.FM_DESCENDANT_DONE, "done\n");
+      }, 10);
+    ' >/dev/null &
+  exit 0
+}
+trap retire TERM INT
 printf 'arm=%s predecessor=%s\n' "$$" "${FM_WATCH_PREDECESSOR_ARM_PID:-none}" >> "${FM_ARM_LOG:?}"
 count=$(wc -l < "$FM_ARM_LOG" | tr -d '[:space:]')
 if [ "$count" -eq 1 ]; then
@@ -238,11 +256,6 @@ if [ "$count" -eq 1 ]; then
   exit 0
 fi
 if [ "$count" -eq 2 ]; then
-  retire() {
-    FM_DESCENDANT_DONE="$FM_DESCENDANT_DONE" node -e 'setTimeout(() => require("node:fs").writeFileSync(process.env.FM_DESCENDANT_DONE, "done\n"), 900)' >/dev/null &
-    exit 0
-  }
-  trap retire TERM INT
   while :; do sleep 0.02; done
 fi
 printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
@@ -250,7 +263,7 @@ trap 'exit 0' TERM INT
 while [ ! -e "$FM_STOP_FILE" ]; do sleep 0.02; done
 SH
   chmod +x "$repo/bin/fm-watch-arm.sh"
-  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_STOP_FILE="$stop" FM_DESCENDANT_DONE="$descendant_done" FM_PI_ARM_EXIT_DRAIN_MS=20 FM_PI_ARM_READY_TIMEOUT_MS=80 FM_WATCH_ARM_RETIRE_TIMEOUT_MS=500 FM_WATCH_REARM_RETRY_BASE_MS=5 FM_WATCH_REARM_RETRY_MAX_MS=10 FM_WATCH_REARM_RETRY_LIMIT=2 node --input-type=module 2>&1 <<'EOF'
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_STOP_FILE="$stop" FM_DESCENDANT_STARTED="$descendant_started" FM_DESCENDANT_RELEASE="$descendant_release" FM_DESCENDANT_DONE="$descendant_done" FM_PI_ARM_EXIT_DRAIN_MS=20 FM_PI_ARM_READY_TIMEOUT_MS=500 FM_WATCH_ARM_RETIRE_TIMEOUT_MS=1000 FM_WATCH_REARM_RETRY_BASE_MS=5 FM_WATCH_REARM_RETRY_MAX_MS=10 FM_WATCH_REARM_RETRY_LIMIT=2 node --input-type=module 2>&1 <<'EOF'
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
@@ -274,8 +287,11 @@ const mod = await import(pathToFileURL(process.env.PLUGIN).href);
 mod.default(pi);
 await tool.execute("tool-call-retire-open-stderr", {}, undefined, undefined, {});
 for (let i = 0; i < 250; i += 1) {
-  if (rows().length >= 3 && prompts.length >= 1) break;
+  if (rows().length >= 3 && prompts.length >= 1 && existsSync(process.env.FM_DESCENDANT_STARTED)) break;
   await new Promise((resolve) => setTimeout(resolve, 10));
+}
+if (!existsSync(process.env.FM_DESCENDANT_STARTED)) {
+  throw new Error("retirement descendant did not inherit stderr");
 }
 if (existsSync(process.env.FM_DESCENDANT_DONE)) {
   throw new Error("restoration waited for the retired arm descendant to close stderr");
@@ -287,6 +303,7 @@ if (prompts.length !== 1 || !prompts[0].includes("original retirement wake")) {
 if (prompts[0].includes("could not restore watcher continuity")) {
   throw new Error(`process exit was misclassified as failed retirement: ${prompts[0]}`);
 }
+writeFileSync(process.env.FM_DESCENDANT_RELEASE, "release\n");
 for (let i = 0; i < 250 && !existsSync(process.env.FM_DESCENDANT_DONE); i += 1) {
   await new Promise((resolve) => setTimeout(resolve, 10));
 }
