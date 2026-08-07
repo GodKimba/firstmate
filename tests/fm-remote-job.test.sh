@@ -44,6 +44,10 @@ cat > "$REMOTE_ROOT/bin/fm-delay-job.sh" <<'SH'
 sleep "$1"
 printf 'ran\n' > "$2"
 SH
+cat > "$REMOTE_ROOT/bin/fm-block-job.sh" <<'SH'
+#!/bin/bash
+while [ ! -e "$1" ]; do sleep 0.05; done
+SH
 cat > "$REMOTE_ROOT/bin/fm-touch-job.sh" <<'SH'
 #!/bin/bash
 printf 'ran\n' > "$1"
@@ -278,8 +282,11 @@ fm_remote_job_wait "$ACCOUNT_HOME" "$JOB_ID" || fail "$FM_REMOTE_JOB_ERROR"
 fm_remote_job_reap "$ACCOUNT_HOME" "$JOB_ID" || fail "the timed-out job could not be reaped"
 pass "the worker enforces the job timeout and publishes its result"
 
+QUEUED_RELEASE="$TMP_ROOT/queued-release"
 QUEUED_SIDE_EFFECT="$TMP_ROOT/queued-side-effect"
-fm_remote_job_stage "$ACCOUNT_HOME" "$REMOTE_ROOT" "$REMOTE_HOME" fm-timeout-job.sh < /dev/null > /dev/null
+FM_REMOTE_JOB_TIMEOUT=10
+fm_remote_job_stage "$ACCOUNT_HOME" "$REMOTE_ROOT" "$REMOTE_HOME" \
+  fm-block-job.sh "$QUEUED_RELEASE" < /dev/null > /dev/null
 FIRST_JOB_ID=$FM_REMOTE_JOB_ID
 FIRST_JOB_DIR="$STATE_ROOT/jobs/$FIRST_JOB_ID"
 for _ in $(seq 1 100); do
@@ -288,10 +295,14 @@ for _ in $(seq 1 100); do
 done
 [ "$(fm_remote_job_read_state "$FIRST_JOB_DIR" 2>/dev/null || true)" = running ] \
   || fail "the blocking job did not begin running"
+FM_REMOTE_JOB_QUEUE_TIMEOUT=1
 fm_remote_job_stage "$ACCOUNT_HOME" "$REMOTE_ROOT" "$REMOTE_HOME" fm-touch-job.sh "$QUEUED_SIDE_EFFECT" < /dev/null > /dev/null
 JOB_ID=$FM_REMOTE_JOB_ID
-printf '%s\n' "$(fm_remote_job_read_deadline "$FIRST_JOB_DIR")" > "$STATE_ROOT/jobs/$JOB_ID/queue_deadline"
+FM_REMOTE_JOB_QUEUE_TIMEOUT=5
+sleep 1
+: > "$QUEUED_RELEASE"
 fm_remote_job_wait "$ACCOUNT_HOME" "$FIRST_JOB_ID" || fail "$FM_REMOTE_JOB_ERROR"
+[ "$FM_REMOTE_JOB_EXIT" -eq 0 ] || fail "the blocking job did not release cleanly"
 fm_remote_job_wait "$ACCOUNT_HOME" "$JOB_ID" || fail "$FM_REMOTE_JOB_ERROR"
 [ "$FM_REMOTE_JOB_EXIT" -eq 124 ] || fail "an expired queued job did not publish a timeout result"
 assert_absent "$QUEUED_SIDE_EFFECT" "the worker executed a queued job after its durable deadline"
