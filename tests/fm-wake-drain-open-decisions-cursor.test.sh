@@ -275,7 +275,7 @@ SH
 
 test_append_after_size_snapshot_is_folded_once() {
   local dir state fakebin status out probe appended real_tail before_bytes probe_bytes
-  local key verb instance summary token
+  local key verb instance _summary token
   dir=$(make_case cursor-snapshot-bound)
   state="$dir/state"
   fakebin="$dir/fakebin"
@@ -310,7 +310,7 @@ SH
   grep -F 'task6' "$out" | grep -F '[key=snapshot]' >/dev/null \
     || fail "the post-snapshot decision did not surface on the next drain"
   instance=''
-  while IFS=$'\t' read -r key verb instance summary || [ -n "$key" ]; do
+  while IFS=$'\t' read -r key verb instance _summary || [ -n "$key" ]; do
     [ "$key" = snapshot ] && [ "$verb" = needs-decision ] && break
     instance=''
   done <<EOF
@@ -332,7 +332,7 @@ EOF
 }
 
 test_answer_revocation_invalidates_closed_cursor() {
-  local dir state status out key verb instance summary token
+  local dir state status out key verb instance _summary token
   dir=$(make_case cursor-answer-revocation)
   state="$dir/state"
   status="$state/task7.status"
@@ -344,7 +344,7 @@ test_answer_revocation_invalidates_closed_cursor() {
     || fail "initial answer-revocation drain failed"
 
   instance=''
-  while IFS=$'\t' read -r key verb instance summary || [ -n "$key" ]; do
+  while IFS=$'\t' read -r key verb instance _summary || [ -n "$key" ]; do
     [ "$key" = retry ] && [ "$verb" = needs-decision ] && break
     instance=''
   done <<EOF
