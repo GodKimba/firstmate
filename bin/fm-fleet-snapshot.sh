@@ -53,6 +53,19 @@
 #     unreadable, and retain independently trustworthy structured surfaces.
 #   secondmate_guidance: return-channel action note for renderers and bearings.
 #
+# Composition: inventory-scaled JSON (backlog, task inventory, secondmate
+# records, and the assembled snapshot) reaches jq on stdin through `jq -s`,
+# never as an `--argjson` value, because Linux caps one argv entry far below the
+# total argument budget, so a large but valid inventory otherwise aborts a
+# summary with "Argument list too long" and leaves Bearings unable to report the
+# live fleet.
+# Fixed-size scalars and per-record values still pass as arguments.
+# Each filter that slurps a fixed set of those payloads asserts its expected
+# input count, so a lost stdin input fails loudly instead of reading as absent
+# data.
+# `tests/fm-fleet-snapshot-view.test.sh` pins both the large-inventory and the
+# small-inventory paths.
+#
 # Compatibility: JSON is the primary machine-readable surface.
 # Human views must render this output instead of parsing state files again.
 set -u
