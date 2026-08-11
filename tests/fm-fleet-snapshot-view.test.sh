@@ -197,6 +197,29 @@ test_fixture_snapshot_json() {
   pass "fixture snapshot covers task rows, backlog rows, pointers, and stable ordering"
 }
 
+# Linux limits each argv entry well below the total command-line budget.
+# A large but valid inventory must still cross the snapshot's public interface.
+test_large_backlog_snapshot_avoids_argv_limits() {
+  local home out count i
+  home=$(make_home large-backlog)
+  {
+    printf '## In flight\n\n## Queued\n'
+    i=1
+    while [ "$i" -le 1800 ]; do
+      printf -- '- [ ] large-%04d - Large inventory portability row %04d with enough repeated title material to exceed a single Linux argv entry (repo: firstmate) (kind: ship)\n' "$i" "$i"
+      i=$((i + 1))
+    done
+    printf '\n## Done\n'
+  } > "$home/data/backlog.md"
+
+  out=$(FM_HOME="$home" "$SNAPSHOT" --json) \
+    || fail "snapshot rejected a large valid backlog"
+  count=$(printf '%s' "$out" | jq '.backlog.records | length')
+  [ "$count" -eq 1800 ] \
+    || fail "large backlog snapshot lost records: expected 1800, got $count"
+  pass "snapshot accepts a backlog larger than one Linux argv entry"
+}
+
 # R1 owner contract: main_inventory discloses orphan in-flight and unstructured
 # current rows without inventing task rows.
 test_main_inventory_orphan_and_unstructured_disclosure() {
@@ -781,6 +804,7 @@ test_parked_scout_decision_stays_pending() {
 
 test_empty_fleet_json
 test_fixture_snapshot_json
+test_large_backlog_snapshot_avoids_argv_limits
 test_main_inventory_orphan_and_unstructured_disclosure
 test_normalized_roles_and_plural_blocker_readiness
 test_event_hints_follow_reconciled_current_state
