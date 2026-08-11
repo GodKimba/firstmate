@@ -220,6 +220,48 @@ test_large_backlog_snapshot_avoids_argv_limits() {
   pass "snapshot accepts a backlog larger than one Linux argv entry"
 }
 
+# The live task inventory crosses the same argv boundary as the backlog, on a
+# different internal path (secondmate aggregation), so it needs its own proof.
+test_large_task_inventory_snapshot_avoids_argv_limits() {
+  local home fakebin out count orphans i id
+  home=$(make_home large-inventory)
+  fakebin=$(make_fakebin "$home")
+  {
+    printf '## In flight\n'
+    i=1
+    while [ "$i" -le 90 ]; do
+      printf -- '- [ ] inv-%03d - Large live inventory row %03d (repo: alpha) (kind: ship) (since 2026-07-07)\n' "$i" "$i"
+      i=$((i + 1))
+    done
+    printf '\n## Queued\n\n## Done\n'
+  } > "$home/data/backlog.md"
+  i=1
+  while [ "$i" -le 90 ]; do
+    id=$(printf 'inv-%03d' "$i")
+    fm_write_meta "$home/state/$id.meta" \
+      "window=firstmate:fm-$id" \
+      "worktree=$home/projects/$id-worktree" \
+      "project=alpha" \
+      "harness=claude" \
+      "kind=ship" \
+      "mode=ship" \
+      "yolo=off"
+    i=$((i + 1))
+  done
+
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --json) \
+    || fail "snapshot rejected a large valid task inventory"
+  count=$(printf '%s' "$out" | jq '.tasks | length')
+  [ "$count" -eq 90 ] \
+    || fail "large task inventory lost rows: expected 90, got $count"
+  orphans=$(printf '%s' "$out" | jq '.main_inventory.orphan_in_flight | length')
+  [ "$orphans" -eq 0 ] \
+    || fail "every in-flight row has metadata, so orphan disclosure should be empty, got $orphans"
+  printf '%s' "$out" | jq -e '.secondmate_current.total == 0 and .secondmate_landed.records == []' >/dev/null \
+    || fail "secondmate aggregation must still project an empty fleet from a large inventory"
+  pass "snapshot accepts a task inventory larger than one Linux argv entry"
+}
+
 # R1 owner contract: main_inventory discloses orphan in-flight and unstructured
 # current rows without inventing task rows.
 test_main_inventory_orphan_and_unstructured_disclosure() {
@@ -805,6 +847,7 @@ test_parked_scout_decision_stays_pending() {
 test_empty_fleet_json
 test_fixture_snapshot_json
 test_large_backlog_snapshot_avoids_argv_limits
+test_large_task_inventory_snapshot_avoids_argv_limits
 test_main_inventory_orphan_and_unstructured_disclosure
 test_normalized_roles_and_plural_blocker_readiness
 test_event_hints_follow_reconciled_current_state
