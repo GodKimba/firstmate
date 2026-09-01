@@ -18,9 +18,12 @@
 #        its row, and one past the PR bound is refused rather than truncated
 #        into a different real merge request and recorded as fact
 #   (d2) a status class captured before its log is retired is the class recorded
+#   (d3) a renamed status verb is recorded in this home's spelling, and a status
+#        log that is there but cannot be read is unknown rather than none
 #   (e) absent inputs record "" (not applicable) or "unknown" (unproven), never a guess
 #   (f) concurrent writers neither lose a record nor reuse a sequence number
-#   (g) symlinked, hardlinked, non-regular, and wrong-mode targets refuse unwritten
+#   (g) symlinked, hardlinked, non-regular, and wrong-mode targets refuse unwritten,
+#       and no verb ever recreates a home a retirement already removed
 #   (h) a malformed store refuses every verb and keeps its bytes, and an append
 #       reads only the records it needs, so `verify` is what finds the rest
 #   (i) a future schema version is preserved rather than declared malformed
@@ -253,6 +256,62 @@ test_a_class_captured_before_the_log_is_retired_is_recorded() {
   set -e
   expect_code 2 "$rc" "a class and a log together should be refused"
   pass "a status class captured before its log is retired is the class recorded"
+}
+
+test_a_renamed_status_verb_is_recorded_in_the_homes_spelling() {
+  local home rec class
+  home=$(make_home status-class-renamed)
+  write_task_meta "$home" alpha-x1
+  printf '%s\n' 'waiting: vendor reply' > "$home/state/alpha-x1.status"
+
+  # This home renames the pause verb, so "waiting" IS its recognised class.
+  FM_ROOT_OVERRIDE='' FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    FM_DATA_OVERRIDE="$home/data" FM_CLASSIFY_PAUSED_VERB=waiting \
+    "$LEDGER" record --event cleanup --task alpha-x1 \
+    --meta "$home/state/alpha-x1.meta" --outcome landed \
+    --status-file "$home/state/alpha-x1.status" >/dev/null \
+    || fail "a cleanup under a renamed pause verb failed"
+  rec=$(record_for "$home" "cleanup:alpha-x1:s1700.42.7")
+  [ "$(field "$rec" status_class)" = waiting ] \
+    || fail "a renamed pause verb should be recorded in this home's spelling: $rec"
+
+  # The two-step a teardown actually takes: capture the class, then hand it back.
+  home=$(make_home status-class-renamed-captured)
+  write_task_meta "$home" alpha-x1
+  printf '%s\n' 'waiting: vendor reply' > "$home/state/alpha-x1.status"
+  class=$(FM_ROOT_OVERRIDE='' FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    FM_DATA_OVERRIDE="$home/data" FM_CLASSIFY_PAUSED_VERB=waiting \
+    "$LEDGER" status-class --status-file "$home/state/alpha-x1.status")
+  [ "$class" = waiting ] || fail "status-class did not resolve the renamed verb: $class"
+  FM_ROOT_OVERRIDE='' FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    FM_DATA_OVERRIDE="$home/data" FM_CLASSIFY_PAUSED_VERB=waiting \
+    "$LEDGER" record --event cleanup --task alpha-x1 \
+    --meta "$home/state/alpha-x1.meta" --outcome landed \
+    --status-class "$class" >/dev/null \
+    || fail "a captured renamed class was refused by record"
+  rec=$(record_for "$home" "cleanup:alpha-x1:s1700.42.7")
+  [ "$(field "$rec" status_class)" = waiting ] \
+    || fail "a captured renamed class was not recorded: $rec"
+  pass "a home's renamed status verb is recorded in its own spelling"
+}
+
+test_an_unreadable_status_log_is_unknown_rather_than_none() {
+  local home rec
+  home=$(make_home status-class-unsafe)
+  write_task_meta "$home" alpha-x1
+  printf '%s\n' 'done: landed' > "$home/state/alpha-x1.status.real"
+  # The log is there, so its class is unproven rather than absent: recording
+  # "none" would claim the task logged nothing, which nothing established.
+  ln -s "$home/state/alpha-x1.status.real" "$home/state/alpha-x1.status"
+
+  ledger "$home" record --event cleanup --task alpha-x1 \
+    --meta "$home/state/alpha-x1.meta" --outcome landed \
+    --status-file "$home/state/alpha-x1.status" >/dev/null \
+    || fail "an unsafe status log should not fail the record"
+  rec=$(record_for "$home" "cleanup:alpha-x1:s1700.42.7")
+  [ "$(field "$rec" status_class)" = unknown ] \
+    || fail "a status log that could not be read should be unknown: $rec"
+  pass "a status log that is there but unreadable records unknown, not none"
 }
 
 # --- (c) and (d) idempotency and distinct events ----------------------------
@@ -565,6 +624,35 @@ test_a_created_store_is_private() {
   [ "$(stat -c %a "$(store "$home")" 2>/dev/null || stat -f %Lp "$(store "$home")")" = 600 ] \
     || fail "the ledger was created world-readable despite a permissive umask"
   pass "the ledger is created private regardless of the caller's umask"
+}
+
+test_no_verb_recreates_a_home_a_retirement_removed() {
+  local home retired out rec
+  home=$(make_home not-resurrected)
+  retired="$TMP_ROOT/not-resurrected-retired"
+  mkdir -p "$retired/state"
+  printf 'done: landed\n' > "$retired/state/beta-x1.status"
+  # A secondmate retirement removes the home carrying the overridden control
+  # state directory and still records its cleanup. Instrumentation must record
+  # honestly, never put the removed home back.
+  rm -rf "$retired"
+
+  out=$(FM_ROOT_OVERRIDE='' FM_HOME="$home" FM_STATE_OVERRIDE="$retired/state" \
+    FM_DATA_OVERRIDE="$home/data" \
+    "$LEDGER" status-class --status-file "$retired/state/beta-x1.status") \
+    || fail "status-class should not fail for a removed home"
+  [ "$out" = none ] || fail "a removed status log should read none: $out"
+  assert_absent "$retired" "the status-class verb recreated a removed home"
+
+  FM_ROOT_OVERRIDE='' FM_HOME="$home" FM_STATE_OVERRIDE="$retired/state" \
+    FM_DATA_OVERRIDE="$home/data" \
+    "$LEDGER" record --event cleanup --task beta-x1 --outcome retired \
+    --status-class none >/dev/null \
+    || fail "a cleanup for a removed home should still be recorded"
+  rec=$(record_for "$home" "cleanup:beta-x1:unknown")
+  [ -n "$rec" ] || fail "the retirement cleanup was not recorded"
+  assert_absent "$retired" "recording a cleanup recreated a removed home"
+  pass "no ledger verb recreates a home a retirement already removed"
 }
 
 # --- (h) and (i) malformed and future records -------------------------------
@@ -1041,6 +1129,8 @@ test_spawn_record_keeps_every_axis_and_no_private_value
 test_backend_defaults_to_the_documented_tmux_contract
 test_final_status_class_is_the_verb_only
 test_a_class_captured_before_the_log_is_retired_is_recorded
+test_a_renamed_status_verb_is_recorded_in_the_homes_spelling
+test_an_unreadable_status_log_is_unknown_rather_than_none
 test_repeated_lifecycle_calls_are_idempotent
 test_distinct_events_append_distinct_records
 test_a_long_pr_url_still_distinguishes_a_re_pushed_head
@@ -1050,6 +1140,7 @@ test_missing_inputs_are_stated_rather_than_guessed
 test_concurrent_writers_lose_no_record_and_reuse_no_sequence
 test_unsafe_targets_refuse_without_writing
 test_a_created_store_is_private
+test_no_verb_recreates_a_home_a_retirement_removed
 test_a_malformed_store_refuses_every_verb_and_keeps_its_bytes
 test_an_append_reads_only_the_records_it_needs
 test_a_future_schema_record_is_preserved_not_rejected

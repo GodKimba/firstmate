@@ -13,7 +13,12 @@ FM_LOCK_STALE_AFTER="${FM_LOCK_STALE_AFTER:-2}"
 # confirm and 0.5s attach polls, and forking uname per call is a measurable cost on
 # the platform (Git Bash/MSYS) that already pays the highest fork price.
 _FM_UNAME=$(uname 2>/dev/null || echo unknown)
-mkdir -p "$STATE"
+# A consumer that needs only the lock primitives sets FM_WAKE_LOCKS_ONLY=1, so
+# sourcing this library never creates a state directory it was merely pointed
+# at. bin/fm-usage-ledger.sh does: its instrumentation can name a home a
+# retirement has already removed, and putting that home back would undo a
+# removal the caller just proved.
+[ "${FM_WAKE_LOCKS_ONLY:-}" = 1 ] || mkdir -p "$STATE"
 
 # Most wake-library consumers need only queue and lock primitives, including
 # deliberately minimal recovery fixtures and remote installations.

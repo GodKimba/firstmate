@@ -62,13 +62,17 @@
 #   landing the landing commit for an approved local-only merge.
 #   outcome landed | discarded | reported | retired | merged.
 #   status_class the task's FINAL status verb, mapped to the closed vocabulary
-#          done | failed | blocked | needs-decision | paused | working |
-#          resolved | captain-held, or "none" when the task logged no status at
-#          all, or "unknown" when the last line carries no recognised verb. The
-#          status NOTE is never stored. A caller whose own sequence retires the
-#          status log before it can record passes the already-resolved class
-#          with --status-class instead of the file, so it stores the class the
-#          task actually ended on rather than the empty log it left behind.
+#          done | failed | blocked | needs-decision | working, plus the pause,
+#          resolution, and captain-held verbs in THIS home's configured
+#          spelling, read from bin/fm-classify-lib.sh - which owns that
+#          vocabulary - rather than restated here. "none" means the task logged
+#          no status at all, and "unknown" means the class could not be proven:
+#          the last line carries no recognised verb, or a log that is there
+#          could not be safely read. The status NOTE is never stored. A caller
+#          whose own sequence retires the status log before it can record passes
+#          the already-resolved class with --status-class instead of the file,
+#          so it stores the class the task actually ended on rather than the
+#          empty log it left behind.
 #   validator_harness / validator_model
 #          the no-mistakes VALIDATOR's identity, deliberately separate from the
 #          implementer's axes above. Firstmate cannot prove them today (the
@@ -201,6 +205,9 @@ esac
 . "$SCRIPT_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-classify-lib.sh
 . "$SCRIPT_DIR/fm-classify-lib.sh"
+# Only fm-wake-lib.sh's lock primitives are used here, never a state tree, so
+# it is told not to create the state directory it resolves at source time.
+FM_WAKE_LOCKS_ONLY=1
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 
@@ -457,19 +464,42 @@ ul_load_meta() {  # <meta-path>
   fi
 }
 
+# 0 when <class> is a verb this home's vocabulary recognises. bin/fm-classify-lib.sh
+# owns that vocabulary, so the three verbs a home may rename are resolved
+# through its overrides rather than spelled out again here. A configured verb
+# the ledger could not store unchanged is not one it can record.
+ul_status_class_known() {  # <class>
+  local class=$1
+  ul_identity_intact "$class" || return 1
+  case "$class" in
+    done|failed|blocked|needs-decision|working) return 0 ;;
+    "${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}") return 0 ;;
+    "${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}") return 0 ;;
+    "${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}") return 0 ;;
+  esac
+  return 1
+}
+
 # The final status VERB only, mapped to the closed vocabulary. The note is
-# never read into the ledger.
+# never read into the ledger. A log that is simply not there is an absence the
+# task proved ("none"); one that is there but cannot be read safely is a class
+# nothing proved ("unknown"), the same distinction ul_load_meta draws.
 ul_status_class() {  # <status-file>
   local file=$1 line verb
-  [ -f "$file" ] && [ ! -L "$file" ] || { printf 'none\n'; return 0; }
+  if [ ! -e "$file" ] && [ ! -L "$file" ]; then
+    printf 'none\n'
+    return 0
+  fi
+  [ -f "$file" ] && [ ! -L "$file" ] && [ -r "$file" ] \
+    || { printf 'unknown\n'; return 0; }
   line=$(last_status_line "$file")
   [ -n "$line" ] || { printf 'none\n'; return 0; }
   verb=$(status_line_verb "$line")
-  case "$verb" in
-    done|failed|blocked|needs-decision|paused|working|resolved|captain-held)
-      printf '%s\n' "$verb" ;;
-    *) printf 'unknown\n' ;;
-  esac
+  if ul_status_class_known "$verb"; then
+    printf '%s\n' "$verb"
+  else
+    printf 'unknown\n'
+  fi
 }
 
 CMD=${1:-}
@@ -639,8 +669,9 @@ if [ -n "$F_STATUS_CLASS" ]; then
   [ -z "$STATUS_FILE" ] \
     || usage_error "--status-class and --status-file are alternatives"
   case "$F_STATUS_CLASS" in
-    done|failed|blocked|needs-decision|paused|working|resolved|captain-held|none|unknown) ;;
-    *) usage_error "unknown --status-class '$F_STATUS_CLASS'" ;;
+    none|unknown) ;;
+    *) ul_status_class_known "$F_STATUS_CLASS" \
+         || usage_error "unknown --status-class '$F_STATUS_CLASS'" ;;
   esac
 fi
 # An explicitly empty validator axis is still unproven, never not-applicable.
