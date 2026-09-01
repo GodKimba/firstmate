@@ -288,7 +288,8 @@ family_for_basename() {
       printf '%s\n' backend-dispatch
       ;;
     fm-check-unregister.test.sh|fm-pr-check-security.test.sh|fm-pr-merge.test.sh|\
-    fm-review-diff.test.sh|fm-teardown.test.sh|fm-x-mode.test.sh)
+    fm-review-diff.test.sh|fm-teardown.test.sh|fm-usage-ledger.test.sh|\
+    fm-x-mode.test.sh)
       printf '%s\n' pr-forge
       ;;
     fm-afk-inject-e2e.test.sh|fm-afk-return.test.sh)
@@ -1237,6 +1238,16 @@ families_for_changed_path() {
     bin/fm-pr-*|bin/fm-merge-local.sh|bin/fm-teardown.sh|bin/fm-review-diff.sh|\
     bin/fm-x-*|bin/fm-check*)
       printf '%s\n' pr-forge
+      ;;
+    bin/fm-usage-ledger.sh|bin/fm-usage-ledger-lib.sh|bin/fm-merge-outcome-lib.sh)
+      # The durable task-usage ledger and its call policy are written from the
+      # spawn path, the teardown/PR/merge path, the watcher's merge poll, and the
+      # remote-secondmate launch and retirement paths, so a change to either
+      # re-selects every family that drives one of those call sites.
+      printf '%s\n' pr-forge
+      printf '%s\n' backend-dispatch
+      printf '%s\n' watcher-wake-lock
+      printf '%s\n' secondmate
       ;;
     bin/fm-nm-run-lib.sh)
       # Shared no-mistakes run-attribution primitives, sourced by both

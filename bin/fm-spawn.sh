@@ -205,6 +205,9 @@
 # success line and state/<id>.meta omit them.
 # Every fresh spawn or relaunch records a new spawn_gen= incarnation token so durable
 # consumers can distinguish a replacement worker that reuses the same task id.
+# A successful launch also appends this incarnation's durable usage record;
+# bin/fm-usage-ledger.sh owns that schema and bin/fm-usage-ledger-lib.sh owns the
+# rule that the record never gates a launch which already succeeded.
 # When the home session's frozen trace-context decision is enabled (see
 # docs/configuration.md and bin/fm-trace-context-lib.sh), the meta also records
 # one W3C traceparent= carrier, the same value injected into the pane as
@@ -303,6 +306,8 @@ fm_backlog_directory_present "$STATE" "state directory" || {
 . "$SCRIPT_DIR/fm-trace-context-lib.sh"
 # shellcheck source=bin/fm-remote-readiness-lib.sh
 . "$SCRIPT_DIR/fm-remote-readiness-lib.sh"
+# shellcheck source=bin/fm-usage-ledger-lib.sh
+. "$SCRIPT_DIR/fm-usage-ledger-lib.sh"
 # Fail closed before any fleet mutation: a no-mistakes gate agent must never spawn
 # a direct report (see bin/fm-gate-refuse-lib.sh).
 fm_refuse_if_gate_agent
@@ -694,6 +699,10 @@ spawn_remote_secondmate() {
     echo "error: remote secondmate $id launched, but its reply source could not be armed; endpoint metadata is preserved" >&2
     return 1
   fi
+  # A remote secondmate's task record is owned by this home, so its usage row
+  # belongs in this home's ledger too. That record carries no spawn_gen, so its
+  # incarnation reads as unknown (bin/fm-usage-ledger.sh's IDENTITY limitation).
+  fm_usage_ledger_record "$FM_HOME" "$STATE" "$DATA" spawn "$id" --meta "$meta"
   echo "spawned $id harness=$harness kind=secondmate mode=secondmate yolo=off window=remote:$id worktree=$home remote=$host backend=$remote_backend"
   return 0
 }
@@ -3147,6 +3156,14 @@ if [ -n "$SPAWN_DEFERRED_SIGNAL" ]; then
   echo "error: spawn of $ID was interrupted after launch delivery began; its paired task record and In-flight backlog state were preserved" >&2
   exit "$SPAWN_DEFERRED_SIGNAL_STATUS"
 fi
+
+# The durable usage record for this incarnation. It is written here, past the
+# commit point, so it describes a worker that actually launched, and it reaches
+# every harness and every spawn-capable backend because the single-task path
+# below is the one place all of them converge (a batch re-execs it per pair, and
+# a relaunch mints a new spawn_gen so its replacement worker is its own row).
+fm_usage_ledger_record "$FM_HOME" "$STATE" "$DATA" spawn "$ID" \
+  --meta "$STATE/$ID.meta"
 
 SPAWN_DELIVERY=
 [ -z "$MODE" ] || SPAWN_DELIVERY=" mode=$MODE yolo=$YOLO"

@@ -5,6 +5,9 @@
 # tasks before reporting success (a secondmate teardown closes none, since
 # secondmates are not backlog items), then refresh/prune the project's clone for
 # PR-based ship tasks.
+# Just before that record is removed, teardown appends the task's final durable
+# usage record so the implementation axes cleanup would otherwise erase survive;
+# bin/fm-usage-ledger.sh owns that schema. A REFUSED teardown records nothing.
 # Removing state/<id>.meta and closing the backlog item are one step, not two:
 # bin/fm-backlog-transition-lib.sh owns that invariant, and both halves run under
 # the task's own meta lock before this script reports success. Because the
@@ -189,6 +192,8 @@ SUB_HOME_PARENT_MARKER=".fm-secondmate-parent"
 . "$SCRIPT_DIR/fm-pending-reply-lib.sh"
 # shellcheck source=bin/fm-nm-run-lib.sh
 . "$SCRIPT_DIR/fm-nm-run-lib.sh"
+# shellcheck source=bin/fm-usage-ledger-lib.sh
+. "$SCRIPT_DIR/fm-usage-ledger-lib.sh"
 if [ "$#" -lt 1 ] || ! fm_task_id_path_safe "$1"; then
   echo "error: invalid teardown request" >&2
   exit 2
@@ -283,6 +288,29 @@ TEARDOWN_META_KIND=$(fm_meta_get "$META" kind)
 [ -n "$TEARDOWN_META_KIND" ] || TEARDOWN_META_KIND=ship
 TEARDOWN_CLEANUP_RECOVERY=$(fm_meta_get "$META" cleanup_recovery)
 TEARDOWN_META_SPAWN_GEN=
+
+# The task's last durable usage record, written while state/<id>.meta still
+# exists. Cleanup is where the implementation axes would otherwise be lost, so
+# this runs only on the paths that have already passed every landed-work,
+# report, and endpoint refusal above: a REFUSED teardown deliberately records
+# nothing, because its task is still live. bin/fm-usage-ledger.sh owns the
+# schema and bin/fm-usage-ledger-lib.sh owns the rule that this never turns a
+# completed cleanup into a failure.
+usage_ledger_record_cleanup() {
+  local outcome
+  if [ "$FORCE" = --force ]; then
+    outcome=discarded
+  else
+    case "$TEARDOWN_META_KIND" in
+      secondmate) outcome=retired ;;
+      scout) outcome=reported ;;
+      *) outcome=landed ;;
+    esac
+  fi
+  fm_usage_ledger_record "$FM_HOME" "$STATE" "$DATA" cleanup "$ID" \
+    --meta "$META" --outcome "$outcome" --status-file "$STATE/$ID.status"
+}
+
 TEARDOWN_BACKLOG_APPLIES=0
 TEARDOWN_BACKLOG_SKIP_REASON=
 if [ "$TEARDOWN_CLEANUP_RECOVERY" != orca ]; then
@@ -683,6 +711,8 @@ remote_secondmate_teardown() {
   grep -vE "^- $ID( |$)" "$SECONDMATE_REG" > "$tmp" || true
   mv -f -- "$tmp" "$SECONDMATE_REG"
   status_retire_presentation_task "$STATE" "$ID" || return 1
+  # Last read of the task record before it is removed.
+  usage_ledger_record_cleanup
   fm_backlog_atomic_transition remove "$STATE/$ID.meta" "task record" "$STATE" || return 1
   rm -f -- "$STATE/$ID.turn-ended"
   printf 'teardown %s complete (remote %s:%s)\n' "$ID" "$remote_host" "$remote_home"
@@ -2883,6 +2913,8 @@ rm -f "$STATE/$ID.turn-ended" \
 # retired endpoint; teardown only runs after landing is confirmed, so any
 # leftover unhandled steer here is moot rather than unlanded work.
 rm -rf "$STATE/$ID.inbox"
+# Last read of the task record before either branch below removes it.
+usage_ledger_record_cleanup
 # The record is gone, so the backlog must not still show this task in flight
 # when teardown reports success. Still under this task's meta lock, so a steer
 # racing the same id stays serialized exactly as it was before.

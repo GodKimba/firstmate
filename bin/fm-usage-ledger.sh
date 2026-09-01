@@ -1,0 +1,545 @@
+#!/usr/bin/env bash
+# fm-usage-ledger.sh - the single owner of Firstmate's durable, home-private
+# task-usage ledger: its schema, its safety rules, its event identity, and its
+# retention. Every other script calls this one instead of serializing a record
+# itself, so the format is stated here exactly once.
+#
+# WHY IT EXISTS. A task's implementation axes (harness, model, effort, kind,
+# project, delivery mode, autonomy posture, backend) live only in
+# state/<id>.meta, and bin/fm-teardown.sh removes that record as part of
+# ordinary successful cleanup. Nothing durable then remained to join a merged
+# PR back to the model that produced it. This ledger is that durable join: it
+# is written at the lifecycle points below, under $FM_HOME/data/, which
+# teardown never touches.
+#
+# STORE. $FM_HOME/data/task-usage.jsonl (FM_DATA_OVERRIDE wins), strictly
+# APPEND-ONLY outside the explicit `prune` verb, mode 0600, one JSON object per
+# line. Its sibling lock is data/.task-usage.jsonl.lock. Nothing else may write
+# it.
+#
+# RECORD. Every v1 record carries the SAME fixed key set in the SAME order, so
+# the file is parseable with awk/sed and needs no JSON processor (firstmate does
+# not require jq):
+#
+#   {"v":1,"seq":N,"at":EPOCH,"event":"E","id":"I","task":"T","gen":"G",
+#    "kind":"K","harness":"H","model":"M","effort":"F","project":"P",
+#    "mode":"D","yolo":"Y","backend":"B","pr":"U","pr_head":"S",
+#    "landing":"L","outcome":"O","status_class":"C",
+#    "validator_harness":"VH","validator_model":"VM"}
+#
+#   v      schema version, 1 today.
+#   seq    1-based position, assigned under the lock and strictly increasing.
+#          Appends never leave a gap; `prune` removes records, so gaps after a
+#          retention run are expected.
+#   at     epoch seconds when the record was appended, never a time inferred
+#          from somewhere else. Because each record is written at its own
+#          lifecycle point, a spawn record's `at` IS that incarnation's spawn
+#          time and a cleanup record's `at` IS its cleanup timestamp.
+#   event  ledger-open | spawn | pr | merge | cleanup.
+#   id     the stable event identity that makes a repeated call idempotent
+#          (see IDENTITY below).
+#   task   task id.
+#   gen    the task's spawn generation (incarnation token) from meta spawn_gen=,
+#          or "unknown" when that record carries none.
+#   kind   ship | scout | secondmate. Every record states what the task
+#          record said at that moment, so a scout promoted to a ship keeps
+#          kind=scout on its spawn row and carries kind=ship on its cleanup
+#          row rather than being rewritten.
+#   harness / model / effort
+#          the IMPLEMENTING worker's axes, exactly as spawn recorded them.
+#          "default" is fm-spawn's own recorded value for an unpinned axis, and
+#          "unknown" appears when the task record could not be read at all.
+#   project the project or home DIRECTORY NAME from meta project=, never its
+#          path. This is the name data/projects.md registers, so it is the
+#          joinable key.
+#   mode   no-mistakes | direct-PR | local-only | secondmate; "" for a scout,
+#          which records no delivery posture until promotion.
+#   yolo   on | off; "" where no delivery posture is recorded.
+#   backend the runtime session backend, resolved through fm-spawn's documented
+#          default that an absent backend= means tmux.
+#   pr     the full canonical PR or MR URL.
+#   pr_head the forge's exact head commit when it could be read.
+#   landing the landing commit for an approved local-only merge.
+#   outcome landed | discarded | reported | retired | merged.
+#   status_class the task's FINAL status verb, mapped to the closed vocabulary
+#          done | failed | blocked | needs-decision | paused | working |
+#          resolved | captain-held, or "none" when the task logged no status at
+#          all, or "unknown" when the last line carries no recognised verb. The
+#          status NOTE is never stored.
+#   validator_harness / validator_model
+#          the no-mistakes VALIDATOR's identity, deliberately separate from the
+#          implementer's axes above. Firstmate cannot prove them today (the
+#          pipeline does not expose the agent it ran), so they are recorded as
+#          the explicit literal "unknown" rather than inferred from the
+#          implementer. The flags exist so a caller that CAN prove them records
+#          them without a schema change.
+#
+# A field that does not apply to an event is the empty string; a field that
+# applies but could not be proven is the literal "unknown". The two are
+# deliberately different: "" means not-applicable, "unknown" means unproven.
+#
+# PRIVACY BOUNDARY. Only the allowlisted meta keys above are ever read, and
+# project is reduced to its directory name. Credentials, tokens, account or
+# host identity, prompt or response text, captain text, PHI, free-form status
+# notes, worktree/tasktmp/home paths, traceparent carriers, and relay request
+# payloads are never read and have no field to land in. Values are reduced to
+# printable ASCII with " and \ removed and truncated at 200 characters, so a
+# record is always well-formed JSON with no escaping, and nothing is inferred
+# from a name or from prose.
+#
+# IDENTITY (idempotency). A repeated call with the same identity is a no-op
+# that reports `duplicate` and exits 0; a genuinely distinct event appends a
+# new record.
+#   ledger-open  "ledger-open"
+#   spawn        spawn:<task>:<gen>
+#   pr           pr:<task>:<gen>:<pr>:<pr_head or ->
+#   merge        merge:<task>:<pr or ->:<landing or ->
+#   cleanup      cleanup:<task>:<gen>
+# Every fresh spawn and relaunch mints a new gen, so a replacement worker is a
+# distinct spawn row and its own cleanup row. LIMITATION: a task record with no
+# spawn_gen= - today only a remote secondmate launch - has gen "unknown", so
+# repeated launches of that one id collapse into a single spawn row rather than
+# being invented as separate incarnations.
+#
+# FIRST OBSERVED. The store's first record is `ledger-open`, whose `at` is the
+# instant this home started recording. NOTHING before it is backfilled, and no
+# verb here fabricates history: an analysis must treat that timestamp as the
+# start of coverage.
+#
+# SAFETY. Every mutation runs under the store's lock. The store and any temp
+# file must be a regular, single-linked, non-symlink file at mode 0600 on the
+# data directory's own device; anything else refuses without writing. A
+# malformed existing record stops the operation and leaves the file's bytes
+# untouched, so a damaged ledger is never silently rewritten or extended.
+# Forward compatibility: a record whose v is not 1 is accepted as opaque if it
+# still carries the common v/seq/at/event/id prefix, so a newer writer's rows
+# are preserved rather than declared malformed.
+#
+# RETENTION. History is bounded ONLY by the explicit `prune` verb. No lifecycle
+# call ever rewrites history, so an unrelated task mutation cannot lose a row.
+# `prune` keeps the ledger-open record plus every record within
+# FM_USAGE_LEDGER_RETENTION_DAYS (default 400) days, which preserves 30-day,
+# quarterly, and year-over-year comparisons. At a few hundred bytes per record
+# and a handful of records per task, a busy home costs single-digit megabytes a
+# year, so pruning is an operator decision rather than an automatic one.
+#
+# Usage:
+#   fm-usage-ledger.sh record --event <spawn|pr|merge|cleanup> --task <id>
+#       [--meta <path>] [--gen <token>] [--pr <url>] [--pr-head <sha>]
+#       [--landing <sha>] [--outcome <landed|discarded|reported|retired|merged>]
+#       [--status-file <path>] [--validator-harness <name>]
+#       [--validator-model <name>]
+#     Append one record, or report `duplicate` when its identity is already
+#     stored. --meta supplies the implementation axes; --status-file supplies
+#     the final status class.
+#   fm-usage-ledger.sh list [--recent <n>]
+#     Print the last n records (default 20) as raw JSONL.
+#   fm-usage-ledger.sh verify
+#     Validate every record and print `ok records=<n> first_observed=<epoch>`.
+#   fm-usage-ledger.sh prune [--days <n>]
+#     Apply retention atomically. Refuses a malformed store.
+#   fm-usage-ledger.sh path
+#     Print the store path.
+set -eu
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
+FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
+STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
+
+usage() {
+  # The whole leading comment block, ending at the first non-comment line.
+  sed -n '2,${/^#/!q;p;}' "$0" | sed 's/^# \{0,1\}//'
+}
+
+case "${1:-}" in
+  -h|--help) usage; exit 0 ;;
+esac
+
+# shellcheck source=bin/fm-pr-lib.sh
+. "$SCRIPT_DIR/fm-pr-lib.sh"
+# fm-backend.sh owns fm_meta_get and the "absent backend= means tmux"
+# compatibility contract; this script reads task records through it rather than
+# restating either.
+# shellcheck source=bin/fm-backend.sh
+. "$SCRIPT_DIR/fm-backend.sh"
+# shellcheck source=bin/fm-classify-lib.sh
+. "$SCRIPT_DIR/fm-classify-lib.sh"
+# shellcheck source=bin/fm-wake-lib.sh
+. "$SCRIPT_DIR/fm-wake-lib.sh"
+
+STORE_NAME='task-usage.jsonl'
+SCHEMA_VERSION=1
+RETENTION_DAYS=${FM_USAGE_LEDGER_RETENTION_DAYS:-400}
+
+# The common prefix every record of every schema version carries, plus the
+# closing brace. Captures: 1 v, 2 seq, 3 at, 4 event, 5 id.
+UL_PREFIX_RE='^[{]"v":([1-9][0-9]*),"seq":([1-9][0-9]*),"at":([0-9]+),"event":"([a-z-]+)","id":"([^"\]*)",.*[}]$'
+# The exact v1 shape: same key set, same order, every value a plain string.
+UL_V1_RE='^[{]"v":1,"seq":[1-9][0-9]*,"at":[0-9]+,"event":"[a-z-]+","id":"[^"\]*","task":"[^"\]*","gen":"[^"\]*","kind":"[^"\]*","harness":"[^"\]*","model":"[^"\]*","effort":"[^"\]*","project":"[^"\]*","mode":"[^"\]*","yolo":"[^"\]*","backend":"[^"\]*","pr":"[^"\]*","pr_head":"[^"\]*","landing":"[^"\]*","outcome":"[^"\]*","status_class":"[^"\]*","validator_harness":"[^"\]*","validator_model":"[^"\]*"[}]$'
+
+die() {
+  printf 'error: %s\n' "$*" >&2
+  exit 1
+}
+
+usage_error() {
+  printf 'error: %s\n' "$*" >&2
+  printf 'run fm-usage-ledger.sh --help for the contract\n' >&2
+  exit 2
+}
+
+# Reduce one caller value to a ledger-safe scalar: printable ASCII only, no
+# quote or backslash, bounded length. This is what makes every emitted line
+# well-formed JSON without escaping logic.
+ul_clean() {  # <value>
+  local v=${1-}
+  v=$(printf '%s' "$v" | LC_ALL=C tr -cd '\040-\176' | LC_ALL=C tr -d '\042\134')
+  printf '%s' "${v:0:200}"
+}
+
+ul_resolve_dir() {  # <label> <path>
+  local label=$1 path=$2 resolved
+  [ -n "$path" ] || die "$label directory is empty"
+  [ ! -L "$path" ] || die "$label directory is a symlink: $path"
+  resolved=$(CDPATH='' cd -- "$path" 2>/dev/null && pwd -P) || die "$label directory cannot be resolved: $path"
+  printf '%s\n' "$resolved"
+}
+
+# 0 when <line> is a record this version may keep. Sets UL_REC_V/SEQ/AT/EVENT/ID.
+ul_record_parse() {  # <line>
+  local line=$1
+  UL_REC_V=
+  UL_REC_SEQ=
+  UL_REC_AT=
+  UL_REC_EVENT=
+  UL_REC_ID=
+  [[ "$line" =~ $UL_PREFIX_RE ]] || return 1
+  UL_REC_V=${BASH_REMATCH[1]}
+  UL_REC_SEQ=${BASH_REMATCH[2]}
+  UL_REC_AT=${BASH_REMATCH[3]}
+  UL_REC_EVENT=${BASH_REMATCH[4]}
+  UL_REC_ID=${BASH_REMATCH[5]}
+  # A record claiming this version must match this version exactly. A newer
+  # version is opaque but preserved.
+  if [ "$UL_REC_V" = "$SCHEMA_VERSION" ]; then
+    [[ "$line" =~ $UL_V1_RE ]] || return 1
+  fi
+}
+
+# Validate the whole store, printing the first malformed line number on stderr.
+# Sets UL_COUNT, UL_LAST_SEQ, UL_FIRST_OBSERVED, and - when an identity is
+# given - UL_DUPLICATE, so the idempotency check compares whole parsed ids
+# rather than matching text anywhere in a line.
+ul_store_scan() {  # [<identity>]
+  local want=${1-} line n=0
+  UL_COUNT=0
+  UL_LAST_SEQ=0
+  UL_FIRST_OBSERVED=
+  UL_DUPLICATE=0
+  [ -s "$STORE" ] || return 0
+  while IFS= read -r line || [ -n "$line" ]; do
+    n=$((n + 1))
+    if ! ul_record_parse "$line"; then
+      printf 'error: task-usage ledger record %s is malformed; its bytes are left untouched at %s\n' "$n" "$STORE" >&2
+      return 1
+    fi
+    [ -n "$UL_FIRST_OBSERVED" ] || UL_FIRST_OBSERVED=$UL_REC_AT
+    [ -z "$want" ] || [ "$UL_REC_ID" != "$want" ] || UL_DUPLICATE=1
+    UL_LAST_SEQ=$UL_REC_SEQ
+    UL_COUNT=$n
+  done < "$STORE"
+}
+
+# The store must be a private, regular, single-linked file on the data device.
+ul_store_valid() {
+  fm_pr_private_file_valid "$STORE" 600 "$DATA_DEVICE"
+}
+
+ul_publish() {  # <tmp> <destination>
+  local tmp=$1 dest=$2
+  chmod 0600 "$tmp" || return 1
+  fm_pr_private_file_valid "$tmp" 600 "$DATA_DEVICE" || return 1
+  fm_pr_regular_destination_on_device_or_absent "$dest" "$DATA_DEVICE" || return 1
+  mv -f -- "$tmp" "$dest" || return 1
+  fm_pr_private_file_valid "$dest" 600 "$DATA_DEVICE"
+}
+
+ul_emit() {  # <seq> <at> <event> <id>
+  printf '{"v":%s,"seq":%s,"at":%s,"event":"%s","id":"%s","task":"%s","gen":"%s","kind":"%s","harness":"%s","model":"%s","effort":"%s","project":"%s","mode":"%s","yolo":"%s","backend":"%s","pr":"%s","pr_head":"%s","landing":"%s","outcome":"%s","status_class":"%s","validator_harness":"%s","validator_model":"%s"}\n' \
+    "$SCHEMA_VERSION" "$1" "$2" "$3" "$4" \
+    "$F_TASK" "$F_GEN" "$F_KIND" "$F_HARNESS" "$F_MODEL" "$F_EFFORT" \
+    "$F_PROJECT" "$F_MODE" "$F_YOLO" "$F_BACKEND" "$F_PR" "$F_PR_HEAD" \
+    "$F_LANDING" "$F_OUTCOME" "$F_STATUS_CLASS" \
+    "$F_VALIDATOR_HARNESS" "$F_VALIDATOR_MODEL"
+}
+
+PRUNE_TMP=
+prune_cleanup() {
+  [ -z "$PRUNE_TMP" ] || rm -f -- "$PRUNE_TMP"
+  fm_lock_release "$LOCK" || true
+}
+
+record_cleanup() {
+  fm_lock_release "$LOCK" || true
+}
+
+ul_fields_reset() {
+  F_TASK=
+  F_GEN=
+  F_KIND=
+  F_HARNESS=
+  F_MODEL=
+  F_EFFORT=
+  F_PROJECT=
+  F_MODE=
+  F_YOLO=
+  F_BACKEND=
+  F_PR=
+  F_PR_HEAD=
+  F_LANDING=
+  F_OUTCOME=
+  F_STATUS_CLASS=
+  F_VALIDATOR_HARNESS=
+  F_VALIDATOR_MODEL=
+}
+
+# Create the store with its first-observed record when it does not exist yet.
+# Runs under the lock.
+ul_store_open() {
+  local tmp
+  if [ -e "$STORE" ] || [ -L "$STORE" ]; then
+    ul_store_valid || die "task-usage ledger is not a private regular file on the data device: $STORE"
+    return 0
+  fi
+  tmp=$(mktemp "$DATA/.$STORE_NAME.XXXXXX") || die "task-usage ledger temp file could not be created in $DATA"
+  # The reset runs in a subshell so opening the store cannot clobber the fields
+  # the caller already resolved for the record it came here to append.
+  if ! ( ul_fields_reset; ul_emit 1 "$(date +%s)" ledger-open ledger-open ) > "$tmp"; then
+    rm -f -- "$tmp"
+    die "task-usage ledger could not be initialised at $STORE"
+  fi
+  if ! ul_publish "$tmp" "$STORE"; then
+    rm -f -- "$tmp"
+    die "task-usage ledger could not be published at $STORE"
+  fi
+}
+
+# Read the allowlisted implementation axes out of one task record. A record that
+# EXISTS but is not an ordinary private file is refused, because reading it
+# would be unsafe. A record that is simply gone leaves every axis it would have
+# supplied as the explicit literal "unknown": losing the row entirely would be
+# worse than recording honestly that these axes could not be read.
+ul_load_meta() {  # <meta-path>
+  local meta=$1 project
+  if [ ! -e "$meta" ] && [ ! -L "$meta" ]; then
+    F_KIND=unknown
+    F_HARNESS=unknown
+    F_MODEL=unknown
+    F_EFFORT=unknown
+    F_MODE=unknown
+    F_YOLO=unknown
+    F_BACKEND=unknown
+    F_PROJECT=unknown
+    [ -n "$F_GEN" ] || F_GEN=unknown
+    return 0
+  fi
+  [ -f "$meta" ] && [ ! -L "$meta" ] || die "task record is unavailable: $meta"
+  F_KIND=$(ul_clean "$(fm_meta_get "$meta" kind)")
+  F_HARNESS=$(ul_clean "$(fm_meta_get "$meta" harness)")
+  F_MODEL=$(ul_clean "$(fm_meta_get "$meta" model)")
+  F_EFFORT=$(ul_clean "$(fm_meta_get "$meta" effort)")
+  F_MODE=$(ul_clean "$(fm_meta_get "$meta" mode)")
+  F_YOLO=$(ul_clean "$(fm_meta_get "$meta" yolo)")
+  # fm-spawn.sh's compatibility contract: an absent backend= means tmux.
+  F_BACKEND=$(ul_clean "$(fm_backend_of_meta "$meta")")
+  # The directory NAME only. The recorded path itself never enters the ledger.
+  project=$(fm_meta_get "$meta" project)
+  F_PROJECT=$(ul_clean "${project##*/}")
+  [ -n "$F_GEN" ] || F_GEN=$(ul_clean "$(fm_meta_get "$meta" spawn_gen)")
+}
+
+# The final status VERB only, mapped to the closed vocabulary. The note is
+# never read into the ledger.
+ul_status_class() {  # <status-file>
+  local file=$1 line verb
+  [ -f "$file" ] && [ ! -L "$file" ] || { printf 'none\n'; return 0; }
+  line=$(last_status_line "$file")
+  [ -n "$line" ] || { printf 'none\n'; return 0; }
+  verb=$(status_line_verb "$line")
+  case "$verb" in
+    done|failed|blocked|needs-decision|paused|working|resolved|captain-held)
+      printf '%s\n' "$verb" ;;
+    *) printf 'unknown\n' ;;
+  esac
+}
+
+CMD=${1:-}
+shift 2>/dev/null || true
+case "$CMD" in
+  record|list|verify|prune|path) ;;
+  '') usage_error "no subcommand given" ;;
+  *) usage_error "unknown subcommand '$CMD'" ;;
+esac
+
+DATA=$(ul_resolve_dir data "$DATA")
+STORE="$DATA/$STORE_NAME"
+LOCK="$DATA/.$STORE_NAME.lock"
+DATA_DEVICE=$(fm_pr_file_device "$DATA") || die "data directory device is unreadable: $DATA"
+
+if [ "$CMD" = path ]; then
+  [ "$#" -eq 0 ] || usage_error "path takes no arguments"
+  printf '%s\n' "$STORE"
+  exit 0
+fi
+
+if [ "$CMD" = list ]; then
+  RECENT=20
+  if [ "${1:-}" = --recent ]; then
+    RECENT=${2:-}
+    case "$RECENT" in ''|*[!0-9]*|0) usage_error "--recent requires a positive integer" ;; esac
+    shift 2
+  fi
+  [ "$#" -eq 0 ] || usage_error "list takes only --recent <n>"
+  [ -s "$STORE" ] || exit 0
+  ul_store_valid || die "task-usage ledger is not a private regular file on the data device: $STORE"
+  tail -n "$RECENT" "$STORE"
+  exit 0
+fi
+
+if [ "$CMD" = verify ]; then
+  [ "$#" -eq 0 ] || usage_error "verify takes no arguments"
+  if [ ! -e "$STORE" ] && [ ! -L "$STORE" ]; then
+    printf 'ok records=0 first_observed=none\n'
+    exit 0
+  fi
+  ul_store_valid || die "task-usage ledger is not a private regular file on the data device: $STORE"
+  ul_store_scan || exit 1
+  printf 'ok records=%s first_observed=%s\n' "$UL_COUNT" "${UL_FIRST_OBSERVED:-none}"
+  exit 0
+fi
+
+if [ "$CMD" = prune ]; then
+  DAYS=$RETENTION_DAYS
+  if [ "${1:-}" = --days ]; then
+    DAYS=${2:-}
+    shift 2
+  fi
+  case "$DAYS" in ''|*[!0-9]*|0) usage_error "--days requires a positive integer" ;; esac
+  [ "$#" -eq 0 ] || usage_error "prune takes only --days <n>"
+  fm_lock_acquire_wait "$LOCK"
+  trap prune_cleanup EXIT
+  trap 'exit 1' HUP INT TERM
+  if [ ! -e "$STORE" ] && [ ! -L "$STORE" ]; then
+    printf 'pruned 0 kept 0\n'
+    exit 0
+  fi
+  ul_store_valid || die "task-usage ledger is not a private regular file on the data device: $STORE"
+  ul_store_scan || exit 1
+  CUTOFF=$(( $(date +%s) - DAYS * 86400 ))
+  PRUNE_TMP=$(mktemp "$DATA/.$STORE_NAME.XXXXXX") || die "task-usage ledger temp file could not be created in $DATA"
+  KEPT=0
+  DROPPED=0
+  while IFS= read -r line || [ -n "$line" ]; do
+    ul_record_parse "$line" || die "task-usage ledger became unreadable mid-prune; its bytes are left untouched at $STORE"
+    if [ "$UL_REC_EVENT" != ledger-open ] && [ "$UL_REC_AT" -lt "$CUTOFF" ]; then
+      DROPPED=$((DROPPED + 1))
+      continue
+    fi
+    printf '%s\n' "$line" >> "$PRUNE_TMP" || die "task-usage ledger retention could not be staged"
+    KEPT=$((KEPT + 1))
+  done < "$STORE"
+  if [ "$DROPPED" -eq 0 ]; then
+    rm -f -- "$PRUNE_TMP"
+    PRUNE_TMP=
+    printf 'pruned 0 kept %s\n' "$KEPT"
+    exit 0
+  fi
+  ul_publish "$PRUNE_TMP" "$STORE" || die "task-usage ledger retention could not be published at $STORE"
+  PRUNE_TMP=
+  printf 'pruned %s kept %s\n' "$DROPPED" "$KEPT"
+  exit 0
+fi
+
+# record
+EVENT=
+TASK=
+META=
+STATUS_FILE=
+ul_fields_reset
+F_VALIDATOR_HARNESS=unknown
+F_VALIDATOR_MODEL=unknown
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --event) EVENT=${2:-}; shift 2 || usage_error "--event requires a value" ;;
+    --task) TASK=${2:-}; shift 2 || usage_error "--task requires a value" ;;
+    --meta) META=${2:-}; shift 2 || usage_error "--meta requires a value" ;;
+    --gen) F_GEN=$(ul_clean "${2:-}"); shift 2 || usage_error "--gen requires a value" ;;
+    --pr) F_PR=$(ul_clean "${2:-}"); shift 2 || usage_error "--pr requires a value" ;;
+    --pr-head) F_PR_HEAD=$(ul_clean "${2:-}"); shift 2 || usage_error "--pr-head requires a value" ;;
+    --landing) F_LANDING=$(ul_clean "${2:-}"); shift 2 || usage_error "--landing requires a value" ;;
+    --outcome) F_OUTCOME=${2:-}; shift 2 || usage_error "--outcome requires a value" ;;
+    --status-file) STATUS_FILE=${2:-}; shift 2 || usage_error "--status-file requires a value" ;;
+    --validator-harness) F_VALIDATOR_HARNESS=$(ul_clean "${2:-}"); shift 2 || usage_error "--validator-harness requires a value" ;;
+    --validator-model) F_VALIDATOR_MODEL=$(ul_clean "${2:-}"); shift 2 || usage_error "--validator-model requires a value" ;;
+    *) usage_error "unknown record option '$1'" ;;
+  esac
+done
+
+case "$EVENT" in
+  spawn|pr|merge|cleanup) ;;
+  '') usage_error "record requires --event <spawn|pr|merge|cleanup>" ;;
+  *) usage_error "unknown --event '$EVENT'" ;;
+esac
+fm_pr_task_id_valid "$TASK" || usage_error "record requires a valid --task id"
+case "$F_OUTCOME" in
+  ''|landed|discarded|reported|retired|merged) ;;
+  *) usage_error "unknown --outcome '$F_OUTCOME'" ;;
+esac
+# A PR URL is only ever stored in its validated canonical form.
+if [ -n "$F_PR" ]; then
+  fm_pr_url_parse "$F_PR" || usage_error "--pr requires a canonical pull request or merge request URL"
+  F_PR=$FM_PR_URL
+fi
+if [ -n "$F_PR_HEAD" ]; then
+  fm_pr_head_valid "$F_PR_HEAD" || usage_error "--pr-head requires a full commit hash"
+fi
+if [ -n "$F_LANDING" ]; then
+  fm_pr_head_valid "$F_LANDING" || usage_error "--landing requires a full commit hash"
+fi
+# An explicitly empty validator axis is still unproven, never not-applicable.
+if [ -z "$F_VALIDATOR_HARNESS" ]; then F_VALIDATOR_HARNESS=unknown; fi
+if [ -z "$F_VALIDATOR_MODEL" ]; then F_VALIDATOR_MODEL=unknown; fi
+
+F_TASK=$(ul_clean "$TASK")
+[ -z "$META" ] || ul_load_meta "$META"
+[ -n "$F_GEN" ] || F_GEN=unknown
+if [ -n "$STATUS_FILE" ]; then
+  F_STATUS_CLASS=$(ul_status_class "$STATUS_FILE")
+fi
+
+case "$EVENT" in
+  spawn) IDENTITY="spawn:$F_TASK:$F_GEN" ;;
+  pr) IDENTITY="pr:$F_TASK:$F_GEN:$F_PR:${F_PR_HEAD:--}" ;;
+  merge) IDENTITY="merge:$F_TASK:${F_PR:--}:${F_LANDING:--}" ;;
+  cleanup) IDENTITY="cleanup:$F_TASK:$F_GEN" ;;
+esac
+IDENTITY=$(ul_clean "$IDENTITY")
+
+if [ ! -d "$DATA" ] || [ -L "$DATA" ]; then
+  die "data directory is unavailable: $DATA"
+fi
+fm_lock_acquire_wait "$LOCK"
+trap record_cleanup EXIT
+trap 'exit 1' HUP INT TERM
+ul_store_open
+ul_store_scan "$IDENTITY" || exit 1
+if [ "$UL_DUPLICATE" = 1 ]; then
+  printf 'duplicate\n'
+  exit 0
+fi
+SEQ=$(( UL_LAST_SEQ + 1 ))
+ul_emit "$SEQ" "$(date +%s)" "$EVENT" "$IDENTITY" >> "$STORE" \
+  || die "task-usage ledger record could not be appended at $STORE"
+printf 'recorded %s\n' "$SEQ"

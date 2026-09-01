@@ -10,7 +10,7 @@ The shared orchestrator behavior lives in [`AGENTS.md`](../AGENTS.md) - edit it 
 
 This section is the single owner of the top-level operational-home layout; producer script headers and their help own exact child-file fields and mutation contracts.
 The tracked code root contains the shared instruction, skill, documentation, workflow, and `bin/` surfaces, while each effective `FM_HOME` contains private operational directories.
-`data/` holds durable private fleet records such as the project and secondmate registries, captain preferences, optional shared captain preferences, learnings, backlog, briefs, scout reports, and explicitly installed content-addressed extension packages under `data/extensions/packages/`.
+`data/` holds durable private fleet records such as the project and secondmate registries, captain preferences, optional shared captain preferences, learnings, backlog, briefs, scout reports, the append-only task-usage ledger described below, and explicitly installed content-addressed extension packages under `data/extensions/packages/`.
 `state/` holds runtime records such as task metadata, append-only status events, endpoint signals, watcher and wake-queue coordination, inactive terminal-outcome receipts under `state/terminal-outcomes/`, enabled extension working namespaces under `state/extensions/`, away-mode state, generated Relay artifacts, parent-side remote ledger copies under `state/secondmate-summary-cache/`, one-shot Bearings reconcile requests under `state/reconcile-notify/`, private secondmate config-reread generations with their retry and quarantine state, per-task steering-inbox records under `state/<id>.inbox/` (`bin/fm-task-inbox-lib.sh`), and parent-owned secondmate pending-reply records under `state/pending-replies/` (`bin/fm-pending-reply-lib.sh`).
 `config/` holds local gitignored operating choices, including explicit extension bindings under `config/extensions.d/`, and `projects/` holds the local project clones that Firstmate reads but changes only through the narrow guarded and concrete captain-approved exceptions in `AGENTS.md`.
 Untracked files and directories whose names begin with `scratchpad` are also gitignored, so temporary scratch does not make porcelain-based secondmate sync guards treat a home as dirty.
@@ -219,6 +219,30 @@ Shared captain preferences that apply across secondmate domains live only in the
 Fleet-local operational facts and gotchas live locally in `data/learnings.md`; it is gitignored and printed after the captain-preference files in the session-start context digest.
 The file is created lazily on first learning and follows the internal [`stow` skill's](../.agents/skills/stow/SKILL.md) aging-tier and cold-archive contract: inspect the current file first and curate it instead of appending forever.
 There is no shared learnings file by captain decision.
+
+## Task usage ledger (data/task-usage.jsonl)
+
+`data/task-usage.jsonl` is a durable, home-private, append-only record of which harness, model, and workflow produced each task's outcome.
+It exists because a task's implementation axes live only in `state/<id>.meta`, which ordinary successful cleanup deletes, so a merged pull request could not afterwards be joined to the model that produced it.
+The ledger is gitignored like the rest of `data/`, is created at mode `0600`, and is never read by the orchestrator at session start; nothing in the fleet's behavior depends on it.
+[`bin/fm-usage-ledger.sh`](../bin/fm-usage-ledger.sh)'s header is the single owner of the record schema, the event-identity rules that make repeated calls idempotent, and the safety and retention mechanics; read it before parsing the file.
+
+Records are appended at four lifecycle points, each in the one place every supported harness and every spawn-capable runtime backend converges: a successful spawn or relaunch, a PR or merge request registration, a confirmed merge or approved local landing, and the moment before cleanup removes the task record.
+A refused cleanup writes nothing, because its task is still live.
+A record that cannot be written is reported as a loud warning and never turns a completed launch, merge, or cleanup into a failure, so instrumentation cannot block the fleet.
+
+The privacy boundary is a strict allowlist rather than a filter: only the task id and incarnation, harness, model, effort, kind, project or home directory name, delivery mode, autonomy posture, backend, PR URL and head, landing commit, terminal outcome, and final status verb are stored.
+Credentials, tokens, account or host identity, prompt and response text, captain text, worktree and temporary paths, trace carriers, relay payloads, and free-form status notes have no field to land in.
+Nothing is inferred: an axis that applies but could not be proven is stored as the literal `unknown`, and one that does not apply to that event is stored empty.
+
+Inspect the ledger with `bin/fm-usage-ledger.sh list` and check its integrity with `bin/fm-usage-ledger.sh verify`, which also prints the first-observed timestamp.
+History is bounded only by the explicit `bin/fm-usage-ledger.sh prune` command, which keeps the first-observed record plus everything within `FM_USAGE_LEDGER_RETENTION_DAYS` (default 400 days, so 30-day, quarterly, and year-over-year comparisons all still resolve).
+No lifecycle step ever prunes, so recording one task cannot rewrite another task's history; at a few hundred bytes per record a busy home costs single-digit megabytes a year, which is why retention is an operator decision.
+
+Three limitations bound what the file can answer.
+The ledger starts at its own `ledger-open` record and nothing earlier is reconstructed, so a home that ran before this instrumentation existed has no history for that period and none is invented.
+Firstmate cannot currently prove which agent the no-mistakes pipeline ran, so the separate `validator_harness` and `validator_model` fields stay `unknown` rather than being filled in from the implementing worker.
+A forced secondmate retirement deletes that home along with its own ledger, so the retired mate's child tasks remain visible only as the parent's single retirement record.
 
 ## Startup memory budget (config/startup-memory-budget)
 
