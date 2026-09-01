@@ -10,7 +10,8 @@
 #
 # Ledger interface:
 #   (a) an empty home opens with an explicit first-observed record, not a backfill
-#   (b) a spawn record carries every implementation axis and no private value
+#   (b) a spawn record carries every implementation axis and no private value,
+#       and each writer's own backend axis is read rather than defaulted
 #   (c) repeated spawn/pr/merge/cleanup calls are idempotent by event identity
 #   (d) a new incarnation, a new PR head, and a new PR are distinct records,
 #       and a long PR URL never truncates two of them into one false duplicate
@@ -176,6 +177,62 @@ test_backend_defaults_to_the_documented_tmux_contract() {
   [ "$(field "$rec" backend)" = tmux ] \
     || fail "an absent backend= should read as the default backend: $rec"
   pass "an absent backend field resolves through the documented tmux default"
+}
+
+test_a_remote_endpoints_backend_is_read_from_its_own_writer() {
+  local home meta rec
+  home=$(make_home backend-remote)
+  meta="$home/state/sm-x1.meta"
+  # A remote secondmate's record comes from a different writer: it never writes
+  # backend= and states the endpoint's own backend instead. Reading the local
+  # writer's absent-means-tmux default here would record a backend this fleet
+  # never ran.
+  fm_write_meta "$meta" \
+    "window=remote:sm-x1" \
+    "endpoint_task_id=sm-x1" \
+    "worktree=$home/remote-home" \
+    "project=$home/projects/nutricheck" \
+    "harness=claude" \
+    "kind=secondmate" \
+    "mode=secondmate" \
+    "yolo=off" \
+    "model=opus" \
+    "effort=high" \
+    "home=$home/remote-home" \
+    "remote_host=box.example.invalid" \
+    "remote_root=/srv/nutricheck" \
+    "remote_backend=herdr" \
+    "remote_target=firstmate:fm-sm-x1"
+  ledger "$home" record --event spawn --task sm-x1 --meta "$meta" >/dev/null \
+    || fail "a remote secondmate spawn record failed"
+  rec=$(record_for "$home" "spawn:sm-x1:unknown")
+  [ "$(field "$rec" backend)" = herdr ] \
+    || fail "the remote endpoint's own backend was not recorded: $rec"
+
+  # A remote record that proves no backend states so, rather than inheriting a
+  # default that belongs to the other writer.
+  home=$(make_home backend-remote-unproven)
+  meta="$home/state/sm-x2.meta"
+  fm_write_meta "$meta" \
+    "window=remote:sm-x2" \
+    "endpoint_task_id=sm-x2" \
+    "worktree=$home/remote-home" \
+    "project=$home/projects/nutricheck" \
+    "harness=claude" \
+    "kind=secondmate" \
+    "mode=secondmate" \
+    "yolo=off" \
+    "model=opus" \
+    "effort=high" \
+    "home=$home/remote-home" \
+    "remote_host=box.example.invalid" \
+    "remote_root=/srv/nutricheck"
+  ledger "$home" record --event spawn --task sm-x2 --meta "$meta" >/dev/null \
+    || fail "a remote secondmate spawn record with no endpoint backend failed"
+  rec=$(record_for "$home" "spawn:sm-x2:unknown")
+  [ "$(field "$rec" backend)" = unknown ] \
+    || fail "an unproven remote backend should read unknown: $rec"
+  pass "a remote endpoint's backend is read from its own writer, never defaulted"
 }
 
 test_final_status_class_is_the_verb_only() {
@@ -1192,6 +1249,7 @@ STUB
 test_ledger_opens_with_an_explicit_first_observed_record
 test_spawn_record_keeps_every_axis_and_no_private_value
 test_backend_defaults_to_the_documented_tmux_contract
+test_a_remote_endpoints_backend_is_read_from_its_own_writer
 test_final_status_class_is_the_verb_only
 test_a_class_captured_before_the_log_is_retired_is_recorded
 test_a_renamed_status_verb_is_recorded_in_the_homes_spelling

@@ -55,8 +55,13 @@
 #   mode   no-mistakes | direct-PR | local-only | secondmate; "" for a scout,
 #          which records no delivery posture until promotion.
 #   yolo   on | off; "" where no delivery posture is recorded.
-#   backend the runtime session backend, resolved through fm-spawn's documented
-#          default that an absent backend= means tmux.
+#   backend the runtime session backend, read from whichever writer owns the
+#          record: a LOCAL task record resolves through fm-spawn's documented
+#          default that an absent backend= means tmux, because that writer
+#          writes the key exactly when the backend is not tmux. A REMOTE
+#          secondmate record is written by a different writer that never writes
+#          backend= at all and states the endpoint's own backend instead, so it
+#          is read from there and reads "unknown" when that writer proved none.
 #   pr     the full canonical PR or MR URL.
 #   pr_head the forge's exact head commit when it could be read.
 #   landing the landing commit for an approved local-only merge.
@@ -433,7 +438,7 @@ ul_store_open() {
 # supplied as the explicit literal "unknown": losing the row entirely would be
 # worse than recording honestly that these axes could not be read.
 ul_load_meta() {  # <meta-path>
-  local meta=$1 project gen
+  local meta=$1 project gen remote_backend
   if [ ! -e "$meta" ] && [ ! -L "$meta" ]; then
     F_KIND=unknown
     F_HARNESS=unknown
@@ -453,8 +458,17 @@ ul_load_meta() {  # <meta-path>
   F_EFFORT=$(ul_clean "$(fm_meta_get "$meta" effort)")
   F_MODE=$(ul_clean "$(fm_meta_get "$meta" mode)")
   F_YOLO=$(ul_clean "$(fm_meta_get "$meta" yolo)")
-  # fm-spawn.sh's compatibility contract: an absent backend= means tmux.
-  F_BACKEND=$(ul_clean "$(fm_backend_of_meta "$meta")")
+  if [ -n "$(fm_meta_get "$meta" remote_host)" ]; then
+    remote_backend=$(fm_meta_get "$meta" remote_backend)
+    if [ -n "$remote_backend" ] && ul_identity_intact "$remote_backend"; then
+      F_BACKEND=$remote_backend
+    else
+      F_BACKEND=unknown
+    fi
+  else
+    # fm-spawn.sh's compatibility contract: an absent backend= means tmux.
+    F_BACKEND=$(ul_clean "$(fm_backend_of_meta "$meta")")
+  fi
   # The directory NAME only. The recorded path itself never enters the ledger.
   project=$(fm_meta_get "$meta" project)
   F_PROJECT=$(ul_clean "${project##*/}")
