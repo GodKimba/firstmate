@@ -18,6 +18,10 @@
 #   - The spawn record is the durable anchor. It is written first, so a task
 #     that is abandoned, preserved indefinitely, or whose later enrichment fails
 #     is still attributable to a harness and model.
+#   - A caller whose own sequence retires a task's status log before it reaches
+#     its record captures the final status class first, through the same owner,
+#     and passes the captured value; an unreadable class is "unknown" rather
+#     than a claim the task logged nothing.
 #
 # Sourced by bin/fm-spawn.sh, bin/fm-teardown.sh, bin/fm-pr-check.sh,
 # bin/fm-merge-local.sh, and bin/fm-merge-outcome-lib.sh. No side effects on
@@ -38,4 +42,16 @@ fm_usage_ledger_record() {
   printf 'warning: the task-usage ledger did not record the %s event for %s; model and workflow analysis will be missing it\n' \
     "$event" "$task" >&2
   return 0
+}
+
+# fm_usage_ledger_status_class <home> <state> <data> <status-file>
+# Print the status log's final class, for a caller that must read it before its
+# own cleanup retires the log. Never fails; see the call policy above.
+fm_usage_ledger_status_class() {
+  local home=$1 state=$2 data=$3 file=$4 class
+  class=$(FM_HOME="$home" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" \
+    "$_FM_USAGE_LEDGER_LIB_DIR/fm-usage-ledger.sh" status-class \
+    --status-file "$file" 2>/dev/null) || class=
+  [ -n "$class" ] || class=unknown
+  printf '%s\n' "$class"
 }

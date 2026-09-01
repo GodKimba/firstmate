@@ -12,7 +12,9 @@
 #   (a) an empty home opens with an explicit first-observed record, not a backfill
 #   (b) a spawn record carries every implementation axis and no private value
 #   (c) repeated spawn/pr/merge/cleanup calls are idempotent by event identity
-#   (d) a new incarnation, a new PR head, and a new PR are distinct records
+#   (d) a new incarnation, a new PR head, and a new PR are distinct records,
+#       and a long PR URL never truncates two of them into one false duplicate
+#   (d2) a status class captured before its log is retired is the class recorded
 #   (e) absent inputs record "" (not applicable) or "unknown" (unproven), never a guess
 #   (f) concurrent writers neither lose a record nor reuse a sequence number
 #   (g) symlinked, hardlinked, non-regular, and wrong-mode targets refuse unwritten
@@ -23,7 +25,8 @@
 #
 # Lifecycle instrumentation, driven through the real scripts:
 #   (l) a real spawn then a real teardown leave spawn and cleanup records behind,
-#       with the task's axes intact after state/<id>.meta is gone
+#       with the task's axes and its final status class intact after
+#       state/<id>.meta and state/<id>.status are gone
 #   (m) a REFUSED teardown records no cleanup, because its task is still live
 #   (n) fm-pr-check records the canonical PR and the forge's head when it has one
 #   (o) fm-merge-local records the landing commit for an approved local landing
@@ -205,6 +208,48 @@ test_final_status_class_is_the_verb_only() {
   pass "only the final status verb is stored, and its absence is stated honestly"
 }
 
+test_a_class_captured_before_the_log_is_retired_is_recorded() {
+  local home captured rec rc
+  home=$(make_home status-class-captured)
+  write_task_meta "$home" alpha-x1
+  printf '%s\n' \
+    'working: implementing' \
+    'done: PR https://github.com/o/r/pull/7 checks green, captain notes were sensitive' \
+    > "$home/state/alpha-x1.status"
+
+  captured=$(ledger "$home" status-class --status-file "$home/state/alpha-x1.status") \
+    || fail "reading the final status class failed"
+  [ "$captured" = "done" ] || fail "the captured class is not the final verb: $captured"
+  assert_absent "$(store "$home")" "reading a status class touched the ledger"
+
+  # A caller whose own cleanup retires the log before it records: the captured
+  # class is what must land, not the "none" the deleted log would now report.
+  rm -f "$home/state/alpha-x1.status"
+  ledger "$home" record --event cleanup --task alpha-x1 \
+    --meta "$home/state/alpha-x1.meta" --outcome landed \
+    --status-class "$captured" >/dev/null || fail "cleanup record failed"
+  rec=$(record_for "$home" "cleanup:alpha-x1:s1700.42.7")
+  [ "$(field "$rec" status_class)" = "done" ] \
+    || fail "the captured class was not the class recorded: $rec"
+  assert_no_grep "captain notes were sensitive" "$(store "$home")" \
+    "the free-form status note reached the ledger"
+
+  # Only the closed vocabulary, and never two sources of the same field.
+  set +e
+  ledger "$home" record --event cleanup --task beta-x1 --gen g1 \
+    --status-class shipped >/dev/null 2>&1
+  rc=$?
+  set -e
+  expect_code 2 "$rc" "an unknown status class should be refused"
+  set +e
+  ledger "$home" record --event cleanup --task beta-x1 --gen g1 \
+    --status-class "done" --status-file "$home/state/beta-x1.status" >/dev/null 2>&1
+  rc=$?
+  set -e
+  expect_code 2 "$rc" "a class and a log together should be refused"
+  pass "a status class captured before its log is retired is the class recorded"
+}
+
 # --- (c) and (d) idempotency and distinct events ----------------------------
 
 test_repeated_lifecycle_calls_are_idempotent() {
@@ -265,6 +310,38 @@ test_distinct_events_append_distinct_records() {
   [ "$(grep -cF '"event":"merge"' "$(store "$home")")" = 2 ] \
     || fail "a second PR for the same task did not append a distinct merge record"
   pass "a new incarnation, a new PR head, and a new PR each append their own record"
+}
+
+test_a_long_pr_url_still_distinguishes_a_re_pushed_head() {
+  local home meta url head other_head out
+  home=$(make_home long-identity)
+  write_task_meta "$home" alpha-x1
+  meta="$home/state/alpha-x1.meta"
+  # A self-hosted GitLab merge request under nested subgroups: long enough that
+  # a composed identity bounded like a single field would cut the head off and
+  # report the second push as a duplicate of the first.
+  url=https://gitlab.example.com/nutricheck-platform/clinical-services/nutrition-importer/staged-import-subgroup/backend-services/team-owned-repositories/importer-repository-name/-/merge_requests/7
+  head=1111111111111111111111111111111111111111
+  other_head=2222222222222222222222222222222222222222
+
+  ledger "$home" record --event pr --task alpha-x1 --meta "$meta" \
+    --pr "$url" --pr-head "$head" >/dev/null || fail "the first PR record failed"
+  out=$(ledger "$home" record --event pr --task alpha-x1 --meta "$meta" \
+    --pr "$url" --pr-head "$other_head") || fail "the re-pushed PR record failed"
+  [ "$out" != duplicate ] \
+    || fail "a re-pushed head under a long PR URL was reported as a duplicate"
+  [ "$(grep -cF '"event":"pr"' "$(store "$home")")" = 2 ] \
+    || fail "a re-pushed head under a long PR URL did not append a distinct record"
+  [ "$(grep -cF "\"pr_head\":\"$other_head\"" "$(store "$home")")" = 1 ] \
+    || fail "the re-pushed head itself was not stored"
+
+  # The same call really is still idempotent at that length.
+  out=$(ledger "$home" record --event pr --task alpha-x1 --meta "$meta" \
+    --pr "$url" --pr-head "$other_head")
+  [ "$out" = duplicate ] \
+    || fail "a repeated PR record under a long URL was not a duplicate: $out"
+  ledger "$home" verify >/dev/null || fail "a long identity left a malformed store"
+  pass "a long PR URL never truncates two distinct events into one false duplicate"
 }
 
 # --- (e) missing fields --------------------------------------------------
@@ -503,9 +580,11 @@ test_recording_never_rewrites_history() {
 
   FM_USAGE_LEDGER_RETENTION_DAYS=1 ledger "$home" record --event cleanup \
     --task new-x1 --gen g-new --outcome landed >/dev/null || fail "record failed"
-  printf '%s\n' "$before" | while IFS= read -r line; do
+  while IFS= read -r line; do
     grep -Fqx -- "$line" "$path" || fail "an unrelated task mutation rewrote history"
-  done
+  done <<EOF
+$before
+EOF
   pass "recording one task never applies retention to another task's history"
 }
 
@@ -634,9 +713,17 @@ test_a_real_spawn_and_teardown_leave_the_task_attributable() {
   [ "$(field "$spawn_rec" mode)" = no-mistakes ] || fail "spawn record lost the delivery mode: $spawn_rec"
   [ "$(field "$spawn_rec" yolo)" = off ] || fail "spawn record lost the autonomy posture: $spawn_rec"
 
+  # The task ends on a real status log. Teardown retires that log as part of
+  # cleanup, so its final class has to be captured before it is gone.
+  printf '%s\n' \
+    'working: implementing' \
+    'done: landed, captain notes were sensitive' \
+    > "$CASE_HOME/state/$id.status"
+
   # The spawn left the worktree at the remote default branch tip, so the task's
   # work is reachable and teardown may proceed.
   out=$(run_lifecycle_teardown "$id") || fail "teardown failed: $out"
+  assert_absent "$CASE_HOME/state/$id.status" "teardown left the status log behind"
   assert_absent "$CASE_HOME/state/$id.meta" "teardown left the volatile task record behind"
   cleanup_rec=$(record_for "$CASE_HOME" "cleanup:$id:$gen")
   [ -n "$cleanup_rec" ] || fail "teardown wrote no usage record"
@@ -646,6 +733,10 @@ test_a_real_spawn_and_teardown_leave_the_task_attributable() {
     || fail "the model cleanup deletes was not preserved: $cleanup_rec"
   [ "$(field "$cleanup_rec" outcome)" = landed ] \
     || fail "the terminal outcome was not recorded: $cleanup_rec"
+  [ "$(field "$cleanup_rec" status_class)" = "done" ] \
+    || fail "the final status class the task ended on was not recorded: $cleanup_rec"
+  assert_no_grep "captain notes were sensitive" "$(store "$CASE_HOME")" \
+    "the free-form status note reached the ledger"
   ledger "$CASE_HOME" verify >/dev/null || fail "the lifecycle left a malformed ledger"
   pass "a real spawn and teardown leave the task attributable after its record is gone"
 }
@@ -810,8 +901,10 @@ test_ledger_opens_with_an_explicit_first_observed_record
 test_spawn_record_keeps_every_axis_and_no_private_value
 test_backend_defaults_to_the_documented_tmux_contract
 test_final_status_class_is_the_verb_only
+test_a_class_captured_before_the_log_is_retired_is_recorded
 test_repeated_lifecycle_calls_are_idempotent
 test_distinct_events_append_distinct_records
+test_a_long_pr_url_still_distinguishes_a_re_pushed_head
 test_missing_inputs_are_stated_rather_than_guessed
 test_concurrent_writers_lose_no_record_and_reuse_no_sequence
 test_unsafe_targets_refuse_without_writing

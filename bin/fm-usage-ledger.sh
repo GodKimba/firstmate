@@ -65,7 +65,10 @@
 #          done | failed | blocked | needs-decision | paused | working |
 #          resolved | captain-held, or "none" when the task logged no status at
 #          all, or "unknown" when the last line carries no recognised verb. The
-#          status NOTE is never stored.
+#          status NOTE is never stored. A caller whose own sequence retires the
+#          status log before it can record passes the already-resolved class
+#          with --status-class instead of the file, so it stores the class the
+#          task actually ended on rather than the empty log it left behind.
 #   validator_harness / validator_model
 #          the no-mistakes VALIDATOR's identity, deliberately separate from the
 #          implementer's axes above. Firstmate cannot prove them today (the
@@ -83,9 +86,10 @@
 # host identity, prompt or response text, captain text, PHI, free-form status
 # notes, worktree/tasktmp/home paths, traceparent carriers, and relay request
 # payloads are never read and have no field to land in. Values are reduced to
-# printable ASCII with " and \ removed and truncated at 200 characters, so a
-# record is always well-formed JSON with no escaping, and nothing is inferred
-# from a name or from prose.
+# printable ASCII with " and \ removed and truncated at 200 characters - the
+# composed id carries its own larger bound over those already-reduced parts, see
+# IDENTITY - so a record is always well-formed JSON with no escaping, and
+# nothing is inferred from a name or from prose.
 #
 # IDENTITY (idempotency). A repeated call with the same identity is a no-op
 # that reports `duplicate` and exits 0; a genuinely distinct event appends a
@@ -96,7 +100,13 @@
 #   merge        merge:<task>:<pr or ->:<landing or ->
 #   cleanup      cleanup:<task>:<gen>
 # Every fresh spawn and relaunch mints a new gen, so a replacement worker is a
-# distinct spawn row and its own cleanup row. LIMITATION: a task record with no
+# distinct spawn row and its own cleanup row. An identity is composed from
+# fields that are each already bounded, and it carries its own larger bound, so
+# composing it can never truncate two distinct events - a long self-hosted MR
+# URL and its head, say - into one false duplicate. The probe compares whole
+# parsed ids across the WHOLE store, so a retried spawn, a re-armed PR poll, an
+# at-least-once merge notification, and a rerun teardown dedupe no matter how
+# much history sits between them. LIMITATION: a task record with no
 # spawn_gen= - today only a remote secondmate launch - has gen "unknown", so
 # repeated launches of that one id collapse into a single spawn row rather than
 # being invented as separate incarnations.
@@ -109,8 +119,17 @@
 # SAFETY. Every mutation runs under the store's lock. The store and any temp
 # file must be a regular, single-linked, non-symlink file at mode 0600 on the
 # data directory's own device; anything else refuses without writing. A
-# malformed existing record stops the operation and leaves the file's bytes
-# untouched, so a damaged ledger is never silently rewritten or extended.
+# malformed record stops the operation and leaves the file's bytes untouched,
+# so a damaged ledger is never silently rewritten or extended.
+# `verify` and `prune` read and validate EVERY record. `record` validates every
+# record it actually reads - the last one, which is where it continues the
+# sequence from, plus any record already carrying the identity it is deduping
+# against - and does not re-read the records in between, so appending stays
+# constant work as history grows instead of re-parsing the whole store on the
+# spawn, PR, merge, and cleanup paths while holding the lock. Because every
+# append validates the last record first and nothing but `prune` ever rewrites
+# the file, the ledger's own writes cannot introduce a break; `verify` is the
+# whole-store integrity check for damage from anything else.
 # Forward compatibility: a record whose v is not 1 is accepted as opaque if it
 # still carries the common v/seq/at/event/id prefix, so a newer writer's rows
 # are preserved rather than declared malformed.
@@ -127,11 +146,16 @@
 #   fm-usage-ledger.sh record --event <spawn|pr|merge|cleanup> --task <id>
 #       [--meta <path>] [--gen <token>] [--pr <url>] [--pr-head <sha>]
 #       [--landing <sha>] [--outcome <landed|discarded|reported|retired|merged>]
-#       [--status-file <path>] [--validator-harness <name>]
-#       [--validator-model <name>]
+#       [--status-file <path> | --status-class <class>]
+#       [--validator-harness <name>] [--validator-model <name>]
 #     Append one record, or report `duplicate` when its identity is already
 #     stored. --meta supplies the implementation axes; --status-file supplies
-#     the final status class.
+#     the final status class, and --status-class supplies an already-resolved
+#     one for a caller that had to read it earlier.
+#   fm-usage-ledger.sh status-class --status-file <path>
+#     Print that status log's final class, so a caller whose sequence retires
+#     the log before it records can capture the class first and pass it back
+#     through record --status-class. Touches no store.
 #   fm-usage-ledger.sh list [--recent <n>]
 #     Print the last n records (default 20) as raw JSONL.
 #   fm-usage-ledger.sh verify
@@ -172,6 +196,13 @@ esac
 STORE_NAME='task-usage.jsonl'
 SCHEMA_VERSION=1
 RETENTION_DAYS=${FM_USAGE_LEDGER_RETENTION_DAYS:-400}
+# One stored field's bound, and the separate, larger bound a composed event
+# identity carries. Every identity is built from at most five already-bounded
+# fields plus an event name and separators, so the second is wide enough that
+# composing an identity never truncates - two distinct events must never
+# collapse into the same id.
+UL_FIELD_MAX=200
+UL_IDENTITY_MAX=1024
 
 # The common prefix every record of every schema version carries, plus the
 # closing brace. Captures: 1 v, 2 seq, 3 at, 4 event, 5 id.
@@ -193,10 +224,10 @@ usage_error() {
 # Reduce one caller value to a ledger-safe scalar: printable ASCII only, no
 # quote or backslash, bounded length. This is what makes every emitted line
 # well-formed JSON without escaping logic.
-ul_clean() {  # <value>
-  local v=${1-}
+ul_clean() {  # <value> [<max-length>]
+  local v=${1-} max=${2:-$UL_FIELD_MAX}
   v=$(printf '%s' "$v" | LC_ALL=C tr -cd '\040-\176' | LC_ALL=C tr -d '\042\134')
-  printf '%s' "${v:0:200}"
+  printf '%s' "${v:0:max}"
 }
 
 ul_resolve_dir() {  # <label> <path>
@@ -229,15 +260,13 @@ ul_record_parse() {  # <line>
 }
 
 # Validate the whole store, printing the first malformed line number on stderr.
-# Sets UL_COUNT, UL_LAST_SEQ, UL_FIRST_OBSERVED, and - when an identity is
-# given - UL_DUPLICATE, so the idempotency check compares whole parsed ids
-# rather than matching text anywhere in a line.
-ul_store_scan() {  # [<identity>]
-  local want=${1-} line n=0
+# Sets UL_COUNT, UL_LAST_SEQ, and UL_FIRST_OBSERVED. This is the whole-store
+# read `verify` and `prune` owe their callers; an append uses ul_store_probe.
+ul_store_scan() {
+  local line n=0
   UL_COUNT=0
   UL_LAST_SEQ=0
   UL_FIRST_OBSERVED=
-  UL_DUPLICATE=0
   [ -s "$STORE" ] || return 0
   while IFS= read -r line || [ -n "$line" ]; do
     n=$((n + 1))
@@ -246,10 +275,44 @@ ul_store_scan() {  # [<identity>]
       return 1
     fi
     [ -n "$UL_FIRST_OBSERVED" ] || UL_FIRST_OBSERVED=$UL_REC_AT
-    [ -z "$want" ] || [ "$UL_REC_ID" != "$want" ] || UL_DUPLICATE=1
     UL_LAST_SEQ=$UL_REC_SEQ
     UL_COUNT=$n
   done < "$STORE"
+}
+
+# What ONE append needs, and nothing more: the sequence number to continue from,
+# and whether this identity is already stored. Sets UL_LAST_SEQ and
+# UL_DUPLICATE. Every record it reads is parsed and must be well formed, and a
+# candidate's identity is still compared as a whole parsed id rather than as
+# text matched anywhere in a line - the fixed-string search only narrows which
+# records are worth parsing, because a record always carries its identity as
+# exactly these bytes and no stored value may contain a quote.
+ul_store_probe() {  # <identity>
+  local want=$1 last hits line rc
+  UL_LAST_SEQ=0
+  UL_DUPLICATE=0
+  [ -s "$STORE" ] || return 0
+  last=$(tail -n 1 "$STORE") || die "task-usage ledger could not be read at $STORE"
+  if ! ul_record_parse "$last"; then
+    printf 'error: the last task-usage ledger record is malformed; its bytes are left untouched at %s - run fm-usage-ledger.sh verify\n' "$STORE" >&2
+    return 1
+  fi
+  UL_LAST_SEQ=$UL_REC_SEQ
+  hits=$(grep -F -- ",\"id\":\"$want\"," "$STORE") || {
+    rc=$?
+    [ "$rc" -eq 1 ] || die "task-usage ledger could not be read at $STORE"
+    hits=
+  }
+  [ -n "$hits" ] || return 0
+  while IFS= read -r line || [ -n "$line" ]; do
+    if ! ul_record_parse "$line"; then
+      printf 'error: a task-usage ledger record carrying this event identity is malformed; its bytes are left untouched at %s - run fm-usage-ledger.sh verify\n' "$STORE" >&2
+      return 1
+    fi
+    [ "$UL_REC_ID" != "$want" ] || UL_DUPLICATE=1
+  done <<EOF
+$hits
+EOF
 }
 
 # The store must be a private, regular, single-linked file on the data device.
@@ -378,10 +441,18 @@ ul_status_class() {  # <status-file>
 CMD=${1:-}
 shift 2>/dev/null || true
 case "$CMD" in
-  record|list|verify|prune|path) ;;
+  record|list|verify|prune|path|status-class) ;;
   '') usage_error "no subcommand given" ;;
   *) usage_error "unknown subcommand '$CMD'" ;;
 esac
+
+# Answered before the store is resolved, because it reads no store at all.
+if [ "$CMD" = status-class ]; then
+  [ "$#" -eq 2 ] && [ "$1" = --status-file ] \
+    || usage_error "status-class takes only --status-file <path>"
+  ul_status_class "$2"
+  exit 0
+fi
 
 DATA=$(ul_resolve_dir data "$DATA")
 STORE="$DATA/$STORE_NAME"
@@ -481,6 +552,7 @@ while [ "$#" -gt 0 ]; do
     --landing) F_LANDING=$(ul_clean "${2:-}"); shift 2 || usage_error "--landing requires a value" ;;
     --outcome) F_OUTCOME=${2:-}; shift 2 || usage_error "--outcome requires a value" ;;
     --status-file) STATUS_FILE=${2:-}; shift 2 || usage_error "--status-file requires a value" ;;
+    --status-class) F_STATUS_CLASS=${2:-}; shift 2 || usage_error "--status-class requires a value" ;;
     --validator-harness) F_VALIDATOR_HARNESS=$(ul_clean "${2:-}"); shift 2 || usage_error "--validator-harness requires a value" ;;
     --validator-model) F_VALIDATOR_MODEL=$(ul_clean "${2:-}"); shift 2 || usage_error "--validator-model requires a value" ;;
     *) usage_error "unknown record option '$1'" ;;
@@ -508,6 +580,16 @@ fi
 if [ -n "$F_LANDING" ]; then
   fm_pr_head_valid "$F_LANDING" || usage_error "--landing requires a full commit hash"
 fi
+# A caller supplies the final status class either as the log to read or as an
+# already-resolved class, never as both, and only from the closed vocabulary.
+if [ -n "$F_STATUS_CLASS" ]; then
+  [ -z "$STATUS_FILE" ] \
+    || usage_error "--status-class and --status-file are alternatives"
+  case "$F_STATUS_CLASS" in
+    done|failed|blocked|needs-decision|paused|working|resolved|captain-held|none|unknown) ;;
+    *) usage_error "unknown --status-class '$F_STATUS_CLASS'" ;;
+  esac
+fi
 # An explicitly empty validator axis is still unproven, never not-applicable.
 if [ -z "$F_VALIDATOR_HARNESS" ]; then F_VALIDATOR_HARNESS=unknown; fi
 if [ -z "$F_VALIDATOR_MODEL" ]; then F_VALIDATOR_MODEL=unknown; fi
@@ -525,7 +607,7 @@ case "$EVENT" in
   merge) IDENTITY="merge:$F_TASK:${F_PR:--}:${F_LANDING:--}" ;;
   cleanup) IDENTITY="cleanup:$F_TASK:$F_GEN" ;;
 esac
-IDENTITY=$(ul_clean "$IDENTITY")
+IDENTITY=$(ul_clean "$IDENTITY" "$UL_IDENTITY_MAX")
 
 if [ ! -d "$DATA" ] || [ -L "$DATA" ]; then
   die "data directory is unavailable: $DATA"
@@ -534,7 +616,7 @@ fm_lock_acquire_wait "$LOCK"
 trap record_cleanup EXIT
 trap 'exit 1' HUP INT TERM
 ul_store_open
-ul_store_scan "$IDENTITY" || exit 1
+ul_store_probe "$IDENTITY" || exit 1
 if [ "$UL_DUPLICATE" = 1 ]; then
   printf 'duplicate\n'
   exit 0

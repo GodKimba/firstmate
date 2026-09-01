@@ -291,6 +291,15 @@ TEARDOWN_META_SPAWN_GEN=
 # Call sites are placed after every landed-work, report, and endpoint refusal
 # and before the task record is removed, which is what makes a refused teardown
 # record nothing and a completed one record while the meta is still readable.
+# The status log does not survive that far: retiring the presentation entry
+# deletes it, so its final class is captured while it still exists and the
+# captured value is what the record carries.
+TEARDOWN_STATUS_CLASS=unknown
+usage_ledger_capture_status_class() {
+  TEARDOWN_STATUS_CLASS=$(fm_usage_ledger_status_class "$FM_HOME" "$STATE" "$DATA" \
+    "$STATE/$ID.status")
+}
+
 usage_ledger_record_cleanup() {
   local outcome
   if [ "$FORCE" = --force ]; then
@@ -303,7 +312,7 @@ usage_ledger_record_cleanup() {
     esac
   fi
   fm_usage_ledger_record "$FM_HOME" "$STATE" "$DATA" cleanup "$ID" \
-    --meta "$META" --outcome "$outcome" --status-file "$STATE/$ID.status"
+    --meta "$META" --outcome "$outcome" --status-class "$TEARDOWN_STATUS_CLASS"
 }
 
 TEARDOWN_BACKLOG_APPLIES=0
@@ -705,6 +714,7 @@ remote_secondmate_teardown() {
   tmp="$SECONDMATE_REG.tmp.$$"
   grep -vE "^- $ID( |$)" "$SECONDMATE_REG" > "$tmp" || true
   mv -f -- "$tmp" "$SECONDMATE_REG"
+  usage_ledger_capture_status_class
   status_retire_presentation_task "$STATE" "$ID" || return 1
   # Last read of the task record before it is removed.
   usage_ledger_record_cleanup
@@ -2896,6 +2906,7 @@ fm_backend_clear_transition "$BACKEND" "$STATE" "$T" || true
 [ -n "$TASK_TMP" ] && rm -rf "$TASK_TMP"
 remove_pr_poll_artifacts "$STATE" "$ID" || exit 1
 retire_busy_state "$STATE" "$ID" "$BUSY_GEN" || exit 1
+usage_ledger_capture_status_class
 status_retire_presentation_task "$STATE" "$ID" || exit 1
 rm -f "$STATE/$ID.turn-ended" \
   "$STATE/$ID.pi-ext.ts" "$STATE/$ID.grok-turnend-token" \
