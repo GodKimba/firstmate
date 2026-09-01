@@ -86,10 +86,14 @@
 # host identity, prompt or response text, captain text, PHI, free-form status
 # notes, worktree/tasktmp/home paths, traceparent carriers, and relay request
 # payloads are never read and have no field to land in. Values are reduced to
-# printable ASCII with " and \ removed and truncated at 200 characters - the
-# composed id carries its own larger bound over those already-reduced parts, see
-# IDENTITY - so a record is always well-formed JSON with no escaping, and
-# nothing is inferred from a name or from prose.
+# printable ASCII with " and \ removed and truncated at 200 characters, so a
+# record is always well-formed JSON with no escaping and nothing is inferred
+# from a name or from prose. That reduction is for free-form LABELS only: an
+# identity-bearing value - task, gen, PR URL, PR head, landing - is checked
+# against the same bound and REFUSED when it does not fit, never reduced,
+# because a bound that rewrote one real merge request into another valid one
+# would store a fabricated fact. The composed id carries its own larger bound
+# over those already-bounded parts, see IDENTITY.
 #
 # IDENTITY (idempotency). A repeated call with the same identity is a no-op
 # that reports `duplicate` and exits 0; a genuinely distinct event appends a
@@ -119,17 +123,20 @@
 # SAFETY. Every mutation runs under the store's lock. The store and any temp
 # file must be a regular, single-linked, non-symlink file at mode 0600 on the
 # data directory's own device; anything else refuses without writing. A
-# malformed record stops the operation and leaves the file's bytes untouched,
-# so a damaged ledger is never silently rewritten or extended.
-# `verify` and `prune` read and validate EVERY record. `record` validates every
-# record it actually reads - the last one, which is where it continues the
-# sequence from, plus any record already carrying the identity it is deduping
-# against - and does not re-read the records in between, so appending stays
-# constant work as history grows instead of re-parsing the whole store on the
-# spawn, PR, merge, and cleanup paths while holding the lock. Because every
-# append validates the last record first and nothing but `prune` ever rewrites
-# the file, the ledger's own writes cannot introduce a break; `verify` is the
-# whole-store integrity check for damage from anything else.
+# malformed record among the ones an operation actually READS stops that
+# operation and leaves the file's bytes untouched, so no verb here ever
+# rewrites a damaged ledger.
+# `verify` and `prune` are the verbs that read and validate EVERY record, so
+# they are what proves the whole store. `record` deliberately reads only what
+# one append needs - the last record, which is where it continues the sequence
+# from, plus any record already carrying the identity it is deduping against -
+# so a malformed record ELSEWHERE is never read, never detected, and the store
+# is still extended past it; `verify` is what finds that damage. In exchange an
+# append costs one fixed-string scan of the store rather than parsing every
+# record in bash while holding the lock on the spawn, PR, merge, and cleanup
+# paths. Because every append validates the last record first and nothing but
+# `prune` ever rewrites the file, the ledger's own writes cannot introduce a
+# break; damage can only come from something else.
 # Forward compatibility: a record whose v is not 1 is accepted as opaque if it
 # still carries the common v/seq/at/event/id prefix, so a newer writer's rows
 # are preserved rather than declared malformed.
@@ -228,6 +235,14 @@ ul_clean() {  # <value> [<max-length>]
   local v=${1-} max=${2:-$UL_FIELD_MAX}
   v=$(printf '%s' "$v" | LC_ALL=C tr -cd '\040-\176' | LC_ALL=C tr -d '\042\134')
   printf '%s' "${v:0:max}"
+}
+
+# 0 when <value> survives ul_clean unchanged. An identity-bearing value is
+# checked with this and REFUSED rather than reduced, because a reduction that
+# rewrote one real merge request, incarnation, or task into another valid one
+# would store a fabricated fact.
+ul_identity_intact() {  # <value>
+  [ "${1-}" = "$(ul_clean "${1-}")" ]
 }
 
 ul_resolve_dir() {  # <label> <path>
@@ -395,7 +410,7 @@ ul_store_open() {
 # supplied as the explicit literal "unknown": losing the row entirely would be
 # worse than recording honestly that these axes could not be read.
 ul_load_meta() {  # <meta-path>
-  local meta=$1 project
+  local meta=$1 project gen
   if [ ! -e "$meta" ] && [ ! -L "$meta" ]; then
     F_KIND=unknown
     F_HARNESS=unknown
@@ -420,7 +435,12 @@ ul_load_meta() {  # <meta-path>
   # The directory NAME only. The recorded path itself never enters the ledger.
   project=$(fm_meta_get "$meta" project)
   F_PROJECT=$(ul_clean "${project##*/}")
-  [ -n "$F_GEN" ] || F_GEN=$(ul_clean "$(fm_meta_get "$meta" spawn_gen)")
+  if [ -z "$F_GEN" ]; then
+    gen=$(fm_meta_get "$meta" spawn_gen)
+    [ -z "$gen" ] || ul_identity_intact "$gen" \
+      || die "task record carries an incarnation token the ledger cannot store unchanged: $meta"
+    F_GEN=$gen
+  fi
 }
 
 # The final status VERB only, mapped to the closed vocabulary. The note is
@@ -538,6 +558,10 @@ EVENT=
 TASK=
 META=
 STATUS_FILE=
+RAW_GEN=
+RAW_PR=
+RAW_PR_HEAD=
+RAW_LANDING=
 ul_fields_reset
 F_VALIDATOR_HARNESS=unknown
 F_VALIDATOR_MODEL=unknown
@@ -546,10 +570,10 @@ while [ "$#" -gt 0 ]; do
     --event) EVENT=${2:-}; shift 2 || usage_error "--event requires a value" ;;
     --task) TASK=${2:-}; shift 2 || usage_error "--task requires a value" ;;
     --meta) META=${2:-}; shift 2 || usage_error "--meta requires a value" ;;
-    --gen) F_GEN=$(ul_clean "${2:-}"); shift 2 || usage_error "--gen requires a value" ;;
-    --pr) F_PR=$(ul_clean "${2:-}"); shift 2 || usage_error "--pr requires a value" ;;
-    --pr-head) F_PR_HEAD=$(ul_clean "${2:-}"); shift 2 || usage_error "--pr-head requires a value" ;;
-    --landing) F_LANDING=$(ul_clean "${2:-}"); shift 2 || usage_error "--landing requires a value" ;;
+    --gen) RAW_GEN=${2:-}; shift 2 || usage_error "--gen requires a value" ;;
+    --pr) RAW_PR=${2:-}; shift 2 || usage_error "--pr requires a value" ;;
+    --pr-head) RAW_PR_HEAD=${2:-}; shift 2 || usage_error "--pr-head requires a value" ;;
+    --landing) RAW_LANDING=${2:-}; shift 2 || usage_error "--landing requires a value" ;;
     --outcome) F_OUTCOME=${2:-}; shift 2 || usage_error "--outcome requires a value" ;;
     --status-file) STATUS_FILE=${2:-}; shift 2 || usage_error "--status-file requires a value" ;;
     --status-class) F_STATUS_CLASS=${2:-}; shift 2 || usage_error "--status-class requires a value" ;;
@@ -564,21 +588,36 @@ case "$EVENT" in
   '') usage_error "record requires --event <spawn|pr|merge|cleanup>" ;;
   *) usage_error "unknown --event '$EVENT'" ;;
 esac
+# Every identity-bearing input is validated in the RAW form the caller supplied
+# and refused when the ledger cannot store it unchanged. Reducing one first
+# would let the field bound rewrite a real merge request, incarnation, or task
+# into a different real one and record that as fact.
+ul_identity_intact "$TASK" \
+  || usage_error "--task must be at most $UL_FIELD_MAX printable characters"
 fm_pr_task_id_valid "$TASK" || usage_error "record requires a valid --task id"
+ul_identity_intact "$RAW_GEN" \
+  || usage_error "--gen must be at most $UL_FIELD_MAX printable characters"
+F_GEN=$RAW_GEN
 case "$F_OUTCOME" in
   ''|landed|discarded|reported|retired|merged) ;;
   *) usage_error "unknown --outcome '$F_OUTCOME'" ;;
 esac
 # A PR URL is only ever stored in its validated canonical form.
-if [ -n "$F_PR" ]; then
-  fm_pr_url_parse "$F_PR" || usage_error "--pr requires a canonical pull request or merge request URL"
+if [ -n "$RAW_PR" ]; then
+  ul_identity_intact "$RAW_PR" \
+    || usage_error "--pr must be at most $UL_FIELD_MAX printable characters"
+  fm_pr_url_parse "$RAW_PR" || usage_error "--pr requires a canonical pull request or merge request URL"
   F_PR=$FM_PR_URL
 fi
-if [ -n "$F_PR_HEAD" ]; then
-  fm_pr_head_valid "$F_PR_HEAD" || usage_error "--pr-head requires a full commit hash"
+# A full hash is short and hexadecimal, so validating the raw value is itself
+# the proof that storing it needs no reduction.
+if [ -n "$RAW_PR_HEAD" ]; then
+  fm_pr_head_valid "$RAW_PR_HEAD" || usage_error "--pr-head requires a full commit hash"
+  F_PR_HEAD=$RAW_PR_HEAD
 fi
-if [ -n "$F_LANDING" ]; then
-  fm_pr_head_valid "$F_LANDING" || usage_error "--landing requires a full commit hash"
+if [ -n "$RAW_LANDING" ]; then
+  fm_pr_head_valid "$RAW_LANDING" || usage_error "--landing requires a full commit hash"
+  F_LANDING=$RAW_LANDING
 fi
 # A caller supplies the final status class either as the log to read or as an
 # already-resolved class, never as both, and only from the closed vocabulary.
@@ -594,7 +633,7 @@ fi
 if [ -z "$F_VALIDATOR_HARNESS" ]; then F_VALIDATOR_HARNESS=unknown; fi
 if [ -z "$F_VALIDATOR_MODEL" ]; then F_VALIDATOR_MODEL=unknown; fi
 
-F_TASK=$(ul_clean "$TASK")
+F_TASK=$TASK
 [ -z "$META" ] || ul_load_meta "$META"
 [ -n "$F_GEN" ] || F_GEN=unknown
 if [ -n "$STATUS_FILE" ]; then

@@ -1273,6 +1273,11 @@ families_for_changed_path() {
     bin/fm-peek.sh|bin/fm-composer*)
       printf '%s\n' backend-dispatch
       printf '%s\n' pure-contract-unit
+      # bin/fm-spawn.sh carries the ledger's two spawn call sites (the
+      # post-commit point and the remote-secondmate launch), whose only
+      # regression lives in the pr-forge family; select that one script rather
+      # than the whole family.
+      printf '%s\n' "__script__:fm-usage-ledger.test.sh"
       ;;
     bin/fm-task-inbox-lib.sh)
       # The steering-inbox record/doorbell/ladder owner: fm-send's data plane

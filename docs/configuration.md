@@ -232,7 +232,8 @@ Read it before parsing the file or reasoning about what the file may contain.
 In summary for an operator: the ledger stores implementation and outcome axes only, never credentials, account identity, prompt or response text, captain text, local paths, or free-form status prose, and it states an unproven value rather than inferring one.
 
 Inspect the ledger with `bin/fm-usage-ledger.sh list` and check its integrity with `bin/fm-usage-ledger.sh verify`, which also prints the first-observed timestamp.
-`verify` is the whole-file integrity check, because a lifecycle write validates only the records it has to read and so stays the same small cost however long the history grows; run it if you suspect the file was damaged by something other than Firstmate.
+`verify` is the whole-file integrity check, because a lifecycle write reads and validates only the records one append needs, the last one plus any already carrying the same event identity: that costs a single fixed-string scan instead of parsing the whole history, and damage anywhere else is neither detected nor repaired by the write.
+Run `verify` if you suspect the file was damaged by something other than Firstmate.
 History is bounded only by the explicit `bin/fm-usage-ledger.sh prune` command, whose horizon is `FM_USAGE_LEDGER_RETENTION_DAYS` (default 400 days, so 30-day, quarterly, and year-over-year comparisons all still resolve).
 No lifecycle step ever prunes, so recording one task cannot rewrite another task's history; at a few hundred bytes per record a busy home costs single-digit megabytes a year, which is why retention is an operator decision rather than an automatic one.
 

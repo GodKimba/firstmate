@@ -49,9 +49,14 @@ fm_usage_ledger_record() {
 # own cleanup retires the log. Never fails; see the call policy above.
 fm_usage_ledger_status_class() {
   local home=$1 state=$2 data=$3 file=$4 class
-  class=$(FM_HOME="$home" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" \
+  if class=$(FM_HOME="$home" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" \
     "$_FM_USAGE_LEDGER_LIB_DIR/fm-usage-ledger.sh" status-class \
-    --status-file "$file" 2>/dev/null) || class=
-  [ -n "$class" ] || class=unknown
-  printf '%s\n' "$class"
+    --status-file "$file"); then
+    [ -n "$class" ] || class=unknown
+    printf '%s\n' "$class"
+    return 0
+  fi
+  printf 'warning: the task-usage ledger could not read the final status class from %s; the record will carry "unknown" instead of the class the task actually ended on\n' \
+    "$file" >&2
+  printf 'unknown\n'
 }

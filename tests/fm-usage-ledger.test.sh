@@ -14,11 +14,14 @@
 #   (c) repeated spawn/pr/merge/cleanup calls are idempotent by event identity
 #   (d) a new incarnation, a new PR head, and a new PR are distinct records,
 #       and a long PR URL never truncates two of them into one false duplicate
+#   (d1) a PR URL too long to store is refused, never truncated into a
+#        different real merge request and recorded as fact
 #   (d2) a status class captured before its log is retired is the class recorded
 #   (e) absent inputs record "" (not applicable) or "unknown" (unproven), never a guess
 #   (f) concurrent writers neither lose a record nor reuse a sequence number
 #   (g) symlinked, hardlinked, non-regular, and wrong-mode targets refuse unwritten
-#   (h) a malformed store refuses every verb and keeps its bytes
+#   (h) a malformed store refuses every verb and keeps its bytes, and an append
+#       reads only the records it needs, so `verify` is what finds the rest
 #   (i) a future schema version is preserved rather than declared malformed
 #   (j) retention keeps first-observed plus the horizon, atomically and at 0600
 #   (k) invalid events, task ids, outcomes, URLs, and hashes refuse before writing
@@ -30,7 +33,8 @@
 #   (m) a REFUSED teardown records no cleanup, because its task is still live
 #   (n) fm-pr-check records the canonical PR and the forge's head when it has one
 #   (o) fm-merge-local records the landing commit for an approved local landing
-#   (p) a ledger write failure never turns a completed lifecycle step into one
+#   (p) a ledger write failure never turns a completed lifecycle step into one,
+#       and an unreadable status class is reported rather than silently guessed
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -344,6 +348,39 @@ test_a_long_pr_url_still_distinguishes_a_re_pushed_head() {
   pass "a long PR URL never truncates two distinct events into one false duplicate"
 }
 
+test_an_over_long_pr_url_is_refused_rather_than_truncated() {
+  local home meta url truncated rc
+  home=$(make_home over-long-identity)
+  write_task_meta "$home" alpha-x1
+  meta="$home/state/alpha-x1.meta"
+  # 204 characters: cutting this to the 200-character field bound lands inside
+  # the merge-request number, and what is left is itself a perfectly valid URL
+  # for a DIFFERENT merge request (!123 rather than !1234567). Storing that
+  # would record a fabricated fact in an append-only file.
+  url=https://gitlab.example.com/nutricheck-platform/clinical-services/nutrition-importer/staged-import-subgroup/backend-services/team-owned-repositories/importer-repository-name-longer/-/merge_requests/1234567
+  truncated=${url:0:200}
+  [ "$truncated" != "$url" ] || fail "the fixture URL no longer exceeds the field bound"
+  [ "${truncated##*/}" = 123 ] \
+    || fail "the fixture URL no longer truncates inside its merge request number"
+
+  set +e
+  ledger "$home" record --event pr --task alpha-x1 --meta "$meta" \
+    --pr "$url" --pr-head 1111111111111111111111111111111111111111 >/dev/null 2>&1
+  rc=$?
+  set -e
+  expect_code 2 "$rc" "an over-long PR URL should be refused as an invalid request"
+  assert_absent "$(store "$home")" "a refused PR URL still wrote a record"
+
+  set +e
+  ledger "$home" record --event merge --task alpha-x1 --meta "$meta" \
+    --pr "$url" --outcome merged >/dev/null 2>&1
+  rc=$?
+  set -e
+  expect_code 2 "$rc" "an over-long merge request URL should be refused as an invalid request"
+  assert_absent "$(store "$home")" "a refused merge request URL still wrote a record"
+  pass "a PR URL too long to store is refused, never truncated into a different one"
+}
+
 # --- (e) missing fields --------------------------------------------------
 
 test_missing_inputs_are_stated_rather_than_guessed() {
@@ -515,6 +552,36 @@ test_a_malformed_store_refuses_every_verb_and_keeps_its_bytes() {
   done
   [ "$(cat "$path")" = "$before" ] || fail "a malformed ledger lost or gained bytes"
   pass "a malformed ledger stops every verb safely and keeps its bytes"
+}
+
+test_an_append_reads_only_the_records_it_needs() {
+  local home path meta out rc
+  home=$(make_home probe-scope)
+  write_task_meta "$home" alpha-x1
+  meta="$home/state/alpha-x1.meta"
+  path=$(store "$home")
+  ledger "$home" record --event spawn --task alpha-x1 --meta "$meta" >/dev/null
+  ledger "$home" record --event pr --task alpha-x1 --meta "$meta" \
+    --pr https://github.com/example/repo/pull/7 >/dev/null
+
+  # Damage the spawn record in the MIDDLE of the store. An append reads the last
+  # record plus any carrying its own identity, so it never sees this one and
+  # extends the store past it; `verify` is the verb that finds it.
+  sed -i.bak '2s/.*/this line is not a ledger record/' "$path" && rm -f "$path.bak"
+  ledger "$home" record --event cleanup --task alpha-x1 --meta "$meta" --outcome landed >/dev/null \
+    || fail "an append should not read a malformed record it has no reason to read"
+  [ -n "$(record_for "$home" "cleanup:alpha-x1:s1700.42.7")" ] \
+    || fail "the cleanup record was not appended past the damaged record"
+  assert_grep 'this line is not a ledger record' "$path" \
+    "the append rewrote the damaged record instead of leaving its bytes alone"
+
+  set +e
+  out=$(ledger "$home" verify 2>&1)
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "verify should refuse a store damaged anywhere"
+  assert_contains "$out" "record 2 is malformed" "verify did not name the damaged record: $out"
+  pass "an append reads only the records it needs and verify is what proves the rest"
 }
 
 test_a_future_schema_record_is_preserved_not_rejected() {
@@ -897,6 +964,40 @@ test_a_failed_ledger_write_never_fails_the_lifecycle_step() {
   pass "a refused ledger write warns loudly and never fails the lifecycle step"
 }
 
+test_an_unreadable_status_class_is_reported_rather_than_substituted() {
+  local dir home rc
+  dir="$TMP_ROOT/status-class-policy"
+  mkdir -p "$dir"
+  cp "$ROOT/bin/fm-usage-ledger-lib.sh" "$dir/fm-usage-ledger-lib.sh"
+  # The schema owner the call policy shells out to cannot run. The class must
+  # still be "unknown" and must still not fail the caller, but the ledger's own
+  # diagnostic has to survive and the substitution has to be announced.
+  cat > "$dir/fm-usage-ledger.sh" <<'STUB'
+#!/usr/bin/env bash
+printf 'error: the task-usage ledger could not be started\n' >&2
+exit 1
+STUB
+  chmod 0755 "$dir/fm-usage-ledger.sh"
+  home=$(make_home status-class-policy)
+  printf 'done: finished\n' > "$home/state/alpha-x1.status"
+
+  set +e
+  # shellcheck source=bin/fm-usage-ledger-lib.sh
+  ( . "$dir/fm-usage-ledger-lib.sh"
+    fm_usage_ledger_status_class "$home" "$home/state" "$home/data" \
+      "$home/state/alpha-x1.status" ) > "$dir/out" 2> "$dir/err"
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "an unreadable status class must never fail its caller"
+  [ "$(cat "$dir/out")" = unknown ] \
+    || fail "an unreadable status class should yield unknown: $(cat "$dir/out")"
+  assert_contains "$(cat "$dir/err")" "could not read the final status class" \
+    "the substituted class was not announced: $(cat "$dir/err")"
+  assert_contains "$(cat "$dir/err")" "could not be started" \
+    "the ledger's own diagnostic was swallowed: $(cat "$dir/err")"
+  pass "an unreadable status class is reported loudly rather than silently substituted"
+}
+
 test_ledger_opens_with_an_explicit_first_observed_record
 test_spawn_record_keeps_every_axis_and_no_private_value
 test_backend_defaults_to_the_documented_tmux_contract
@@ -905,11 +1006,13 @@ test_a_class_captured_before_the_log_is_retired_is_recorded
 test_repeated_lifecycle_calls_are_idempotent
 test_distinct_events_append_distinct_records
 test_a_long_pr_url_still_distinguishes_a_re_pushed_head
+test_an_over_long_pr_url_is_refused_rather_than_truncated
 test_missing_inputs_are_stated_rather_than_guessed
 test_concurrent_writers_lose_no_record_and_reuse_no_sequence
 test_unsafe_targets_refuse_without_writing
 test_a_created_store_is_private
 test_a_malformed_store_refuses_every_verb_and_keeps_its_bytes
+test_an_append_reads_only_the_records_it_needs
 test_a_future_schema_record_is_preserved_not_rejected
 test_retention_keeps_first_observed_and_the_horizon
 test_recording_never_rewrites_history
@@ -919,3 +1022,4 @@ test_a_refused_teardown_records_no_cleanup
 test_pr_registration_records_the_canonical_pr_and_head
 test_an_approved_local_landing_records_its_commit
 test_a_failed_ledger_write_never_fails_the_lifecycle_step
+test_an_unreadable_status_class_is_reported_rather_than_substituted
