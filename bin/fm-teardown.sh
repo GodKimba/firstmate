@@ -6,8 +6,7 @@
 # secondmates are not backlog items), then refresh/prune the project's clone for
 # PR-based ship tasks.
 # Just before that record is removed, teardown appends the task's final durable
-# usage record so the implementation axes cleanup would otherwise erase survive;
-# bin/fm-usage-ledger.sh owns that schema. A REFUSED teardown records nothing.
+# usage record (bin/fm-usage-ledger.sh), so a refusal below records nothing.
 # Removing state/<id>.meta and closing the backlog item are one step, not two:
 # bin/fm-backlog-transition-lib.sh owns that invariant, and both halves run under
 # the task's own meta lock before this script reports success. Because the
@@ -289,13 +288,9 @@ TEARDOWN_META_KIND=$(fm_meta_get "$META" kind)
 TEARDOWN_CLEANUP_RECOVERY=$(fm_meta_get "$META" cleanup_recovery)
 TEARDOWN_META_SPAWN_GEN=
 
-# The task's last durable usage record, written while state/<id>.meta still
-# exists. Cleanup is where the implementation axes would otherwise be lost, so
-# this runs only on the paths that have already passed every landed-work,
-# report, and endpoint refusal above: a REFUSED teardown deliberately records
-# nothing, because its task is still live. bin/fm-usage-ledger.sh owns the
-# schema and bin/fm-usage-ledger-lib.sh owns the rule that this never turns a
-# completed cleanup into a failure.
+# Call sites are placed after every landed-work, report, and endpoint refusal
+# and before the task record is removed, which is what makes a refused teardown
+# record nothing and a completed one record while the meta is still readable.
 usage_ledger_record_cleanup() {
   local outcome
   if [ "$FORCE" = --force ]; then

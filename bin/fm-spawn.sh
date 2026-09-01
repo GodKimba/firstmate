@@ -205,9 +205,8 @@
 # success line and state/<id>.meta omit them.
 # Every fresh spawn or relaunch records a new spawn_gen= incarnation token so durable
 # consumers can distinguish a replacement worker that reuses the same task id.
-# A successful launch also appends this incarnation's durable usage record;
-# bin/fm-usage-ledger.sh owns that schema and bin/fm-usage-ledger-lib.sh owns the
-# rule that the record never gates a launch which already succeeded.
+# A successful launch also appends this incarnation's durable usage record
+# (bin/fm-usage-ledger.sh; call policy in bin/fm-usage-ledger-lib.sh).
 # When the home session's frozen trace-context decision is enabled (see
 # docs/configuration.md and bin/fm-trace-context-lib.sh), the meta also records
 # one W3C traceparent= carrier, the same value injected into the pane as

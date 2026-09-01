@@ -224,24 +224,19 @@ There is no shared learnings file by captain decision.
 
 `data/task-usage.jsonl` is a durable, home-private, append-only record of which harness, model, and workflow produced each task's outcome.
 It exists because a task's implementation axes live only in `state/<id>.meta`, which ordinary successful cleanup deletes, so a merged pull request could not afterwards be joined to the model that produced it.
-The ledger is gitignored like the rest of `data/`, is created at mode `0600`, and is never read by the orchestrator at session start; nothing in the fleet's behavior depends on it.
-[`bin/fm-usage-ledger.sh`](../bin/fm-usage-ledger.sh)'s header is the single owner of the record schema, the event-identity rules that make repeated calls idempotent, and the safety and retention mechanics; read it before parsing the file.
+The ledger is gitignored like the rest of `data/`, is created at mode `0600`, and is never read by the orchestrator; nothing in the fleet's behavior depends on it, and a record that cannot be written warns rather than failing the lifecycle step it describes.
+Records are written as a task is dispatched, registers a pull or merge request, lands, and is cleaned up; [architecture.md](architecture.md#task-attribution-outlives-cleanup) owns which script writes each one and why those points were chosen.
 
-Records are appended at four lifecycle points, each in the one place every supported harness and every spawn-capable runtime backend converges: a successful spawn or relaunch, a PR or merge request registration, a confirmed merge or approved local landing, and the moment before cleanup removes the task record.
-A refused cleanup writes nothing, because its task is still live.
-A record that cannot be written is reported as a loud warning and never turns a completed launch, merge, or cleanup into a failure, so instrumentation cannot block the fleet.
-
-The privacy boundary is a strict allowlist rather than a filter: only the task id and incarnation, harness, model, effort, kind, project or home directory name, delivery mode, autonomy posture, backend, PR URL and head, landing commit, terminal outcome, and final status verb are stored.
-Credentials, tokens, account or host identity, prompt and response text, captain text, worktree and temporary paths, trace carriers, relay payloads, and free-form status notes have no field to land in.
-Nothing is inferred: an axis that applies but could not be proven is stored as the literal `unknown`, and one that does not apply to that event is stored empty.
+[`bin/fm-usage-ledger.sh`](../bin/fm-usage-ledger.sh)'s header is the single owner of the record schema, the stored-field allowlist and its privacy boundary, the event-identity rules that make repeated calls idempotent, and the safety and retention mechanics.
+Read it before parsing the file or reasoning about what the file may contain.
+In summary for an operator: the ledger stores implementation and outcome axes only, never credentials, account identity, prompt or response text, captain text, local paths, or free-form status prose, and it states an unproven value rather than inferring one.
 
 Inspect the ledger with `bin/fm-usage-ledger.sh list` and check its integrity with `bin/fm-usage-ledger.sh verify`, which also prints the first-observed timestamp.
-History is bounded only by the explicit `bin/fm-usage-ledger.sh prune` command, which keeps the first-observed record plus everything within `FM_USAGE_LEDGER_RETENTION_DAYS` (default 400 days, so 30-day, quarterly, and year-over-year comparisons all still resolve).
-No lifecycle step ever prunes, so recording one task cannot rewrite another task's history; at a few hundred bytes per record a busy home costs single-digit megabytes a year, which is why retention is an operator decision.
+History is bounded only by the explicit `bin/fm-usage-ledger.sh prune` command, whose horizon is `FM_USAGE_LEDGER_RETENTION_DAYS` (default 400 days, so 30-day, quarterly, and year-over-year comparisons all still resolve).
+No lifecycle step ever prunes, so recording one task cannot rewrite another task's history; at a few hundred bytes per record a busy home costs single-digit megabytes a year, which is why retention is an operator decision rather than an automatic one.
 
-Three limitations bound what the file can answer.
-The ledger starts at its own `ledger-open` record and nothing earlier is reconstructed, so a home that ran before this instrumentation existed has no history for that period and none is invented.
-Firstmate cannot currently prove which agent the no-mistakes pipeline ran, so the separate `validator_harness` and `validator_model` fields stay `unknown` rather than being filled in from the implementing worker.
+Two limitations bound what the file can answer, beyond the coverage start and unproven-axis rules its owner documents.
+Firstmate cannot currently prove which agent the no-mistakes pipeline ran, so a task's validator identity is never filled in from the worker that implemented it.
 A forced secondmate retirement deletes that home along with its own ledger, so the retired mate's child tasks remain visible only as the parent's single retirement record.
 
 ## Startup memory budget (config/startup-memory-budget)
