@@ -90,10 +90,13 @@
 # record is always well-formed JSON with no escaping and nothing is inferred
 # from a name or from prose. That reduction is for free-form LABELS only: an
 # identity-bearing value - task, gen, PR URL, PR head, landing - is checked
-# against the same bound and REFUSED when it does not fit, never reduced,
-# because a bound that rewrote one real merge request into another valid one
-# would store a fabricated fact. The composed id carries its own larger bound
-# over those already-bounded parts, see IDENTITY.
+# against a bound and REFUSED when it does not fit, never reduced, because a
+# bound that rewrote one real merge request into another valid one would store
+# a fabricated fact. The PR URL carries its OWN bound rather than the label
+# bound, sized to every canonical URL fm_pr_url_parse accepts (a 253-character
+# host, a 1024-character project path, a 10-digit request number), so a nested
+# self-hosted merge request is recorded rather than dropped. The composed id
+# carries its own larger bound over those already-bounded parts, see IDENTITY.
 #
 # IDENTITY (idempotency). A repeated call with the same identity is a no-op
 # that reports `duplicate` and exits 0; a genuinely distinct event appends a
@@ -105,10 +108,11 @@
 #   cleanup      cleanup:<task>:<gen>
 # Every fresh spawn and relaunch mints a new gen, so a replacement worker is a
 # distinct spawn row and its own cleanup row. An identity is composed from
-# fields that are each already bounded, and it carries its own larger bound, so
-# composing it can never truncate two distinct events - a long self-hosted MR
-# URL and its head, say - into one false duplicate. The probe compares whole
-# parsed ids across the WHOLE store, so a retried spawn, a re-armed PR poll, an
+# fields that are each already bounded, and its own bound is the widest such
+# composition - the pr event's, carrying the full PR-URL bound - so composing
+# it can never truncate two distinct events, a long self-hosted MR URL and its
+# head say, into one false duplicate. The probe compares whole parsed ids
+# across the WHOLE store, so a retried spawn, a re-armed PR poll, an
 # at-least-once merge notification, and a rerun teardown dedupe no matter how
 # much history sits between them. LIMITATION: a task record with no
 # spawn_gen= - today only a remote secondmate launch - has gen "unknown", so
@@ -203,13 +207,23 @@ esac
 STORE_NAME='task-usage.jsonl'
 SCHEMA_VERSION=1
 RETENTION_DAYS=${FM_USAGE_LEDGER_RETENTION_DAYS:-400}
-# One stored field's bound, and the separate, larger bound a composed event
-# identity carries. Every identity is built from at most five already-bounded
-# fields plus an event name and separators, so the second is wide enough that
-# composing an identity never truncates - two distinct events must never
-# collapse into the same id.
+# One free-form field's bound.
 UL_FIELD_MAX=200
-UL_IDENTITY_MAX=1024
+# The PR/MR URL's own bound. It is identity-bearing rather than a label, so it
+# is sized to every canonical URL fm_pr_url_parse accepts rather than reusing
+# the label bound: "https://" (8) + a host of at most 253
+# (fm_pr_gitlab_host_valid) + "/" + a project path of at most 1024 across at
+# most 20 segments (fm_pr_gitlab_path_valid) + "/-/merge_requests/" (18) + a
+# request number of at most 10 digits, which is the widest a GitLab iid can be.
+# GitHub's shape is strictly shorter. Nothing inside those limits is ever
+# refused, so a nested self-hosted merge request keeps its ledger row.
+UL_PR_MAX=$((8 + 253 + 1 + 1024 + 18 + 10))
+# The bound a composed event identity carries. The widest identity is the pr
+# event's pr:<task>:<gen>:<pr>:<pr_head>, so this is that worst case exactly:
+# two field-bounded parts, one PR-bounded part, a 64-character head, and the
+# literal separators. Composing an identity therefore never truncates - two
+# distinct events must never collapse into the same id.
+UL_IDENTITY_MAX=$((3 + UL_FIELD_MAX + 1 + UL_FIELD_MAX + 1 + UL_PR_MAX + 1 + 64))
 
 # The common prefix every record of every schema version carries, plus the
 # closing brace. Captures: 1 v, 2 seq, 3 at, 4 event, 5 id.
@@ -237,12 +251,12 @@ ul_clean() {  # <value> [<max-length>]
   printf '%s' "${v:0:max}"
 }
 
-# 0 when <value> survives ul_clean unchanged. An identity-bearing value is
-# checked with this and REFUSED rather than reduced, because a reduction that
-# rewrote one real merge request, incarnation, or task into another valid one
-# would store a fabricated fact.
-ul_identity_intact() {  # <value>
-  [ "${1-}" = "$(ul_clean "${1-}")" ]
+# 0 when <value> survives ul_clean unchanged at that field's own bound. An
+# identity-bearing value is checked with this and REFUSED rather than reduced,
+# because a reduction that rewrote one real merge request, incarnation, or task
+# into another valid one would store a fabricated fact.
+ul_identity_intact() {  # <value> [<max-length>]
+  [ "${1-}" = "$(ul_clean "${1-}" "${2:-$UL_FIELD_MAX}")" ]
 }
 
 ul_resolve_dir() {  # <label> <path>
@@ -604,8 +618,8 @@ case "$F_OUTCOME" in
 esac
 # A PR URL is only ever stored in its validated canonical form.
 if [ -n "$RAW_PR" ]; then
-  ul_identity_intact "$RAW_PR" \
-    || usage_error "--pr must be at most $UL_FIELD_MAX printable characters"
+  ul_identity_intact "$RAW_PR" "$UL_PR_MAX" \
+    || usage_error "--pr must be at most $UL_PR_MAX printable characters"
   fm_pr_url_parse "$RAW_PR" || usage_error "--pr requires a canonical pull request or merge request URL"
   F_PR=$FM_PR_URL
 fi

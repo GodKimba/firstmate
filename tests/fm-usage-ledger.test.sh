@@ -14,8 +14,9 @@
 #   (c) repeated spawn/pr/merge/cleanup calls are idempotent by event identity
 #   (d) a new incarnation, a new PR head, and a new PR are distinct records,
 #       and a long PR URL never truncates two of them into one false duplicate
-#   (d1) a PR URL too long to store is refused, never truncated into a
-#        different real merge request and recorded as fact
+#   (d1) a nested self-hosted merge request URL past the label bound still gets
+#        its row, and one past the PR bound is refused rather than truncated
+#        into a different real merge request and recorded as fact
 #   (d2) a status class captured before its log is retired is the class recorded
 #   (e) absent inputs record "" (not applicable) or "unknown" (unproven), never a guess
 #   (f) concurrent writers neither lose a record nor reuse a sequence number
@@ -348,19 +349,56 @@ test_a_long_pr_url_still_distinguishes_a_re_pushed_head() {
   pass "a long PR URL never truncates two distinct events into one false duplicate"
 }
 
-test_an_over_long_pr_url_is_refused_rather_than_truncated() {
-  local home meta url truncated rc
+test_a_long_self_hosted_merge_request_keeps_its_ledger_row() {
+  local home meta url truncated rec
+  home=$(make_home long-self-hosted)
+  write_task_meta "$home" alpha-x1
+  meta="$home/state/alpha-x1.meta"
+  # 204 characters: a real nested-subgroup merge request on a self-hosted
+  # instance, longer than the free-form label bound but well inside what the
+  # forge validator accepts. Losing this row would leave exactly the
+  # merged-PR-to-model join this ledger exists to create missing.
+  url=https://gitlab.example.com/nutricheck-platform/clinical-services/nutrition-importer/staged-import-subgroup/backend-services/team-owned-repositories/importer-repository-name-longer/-/merge_requests/1234567
+  truncated=${url:0:200}
+  [ "$truncated" != "$url" ] || fail "the fixture URL no longer exceeds the label bound"
+
+  ledger "$home" record --event pr --task alpha-x1 --meta "$meta" \
+    --pr "$url" --pr-head 1111111111111111111111111111111111111111 >/dev/null \
+    || fail "a canonical self-hosted merge request URL should be recorded"
+  ledger "$home" record --event merge --task alpha-x1 --meta "$meta" \
+    --pr "$url" --outcome merged >/dev/null \
+    || fail "a canonical self-hosted merge request URL should be recorded on merge"
+
+  [ "$(grep -cF "\"pr\":\"$url\"" "$(store "$home")")" = 2 ] \
+    || fail "the merge request was not recorded under its exact URL"
+  [ "$(grep -cF "\"pr\":\"$truncated\"" "$(store "$home")")" = 0 ] \
+    || fail "a truncated merge request URL reached the store"
+  rec=$(record_for "$home" "merge:alpha-x1:$url:-")
+  [ -n "$rec" ] || fail "the merge event identity did not carry the whole URL"
+  ledger "$home" verify >/dev/null || fail "a long URL left a malformed store"
+  pass "a nested self-hosted merge request past the label bound keeps its ledger row"
+}
+
+test_a_pr_url_beyond_the_bound_is_refused_rather_than_truncated() {
+  local home meta host path url truncated rc a63 a61 seg
   home=$(make_home over-long-identity)
   write_task_meta "$home" alpha-x1
   meta="$home/state/alpha-x1.meta"
-  # 204 characters: cutting this to the 200-character field bound lands inside
-  # the merge-request number, and what is left is itself a perfectly valid URL
-  # for a DIFFERENT merge request (!123 rather than !1234567). Storing that
-  # would record a fabricated fact in an append-only file.
-  url=https://gitlab.example.com/nutricheck-platform/clinical-services/nutrition-importer/staged-import-subgroup/backend-services/team-owned-repositories/importer-repository-name-longer/-/merge_requests/1234567
-  truncated=${url:0:200}
-  [ "$truncated" != "$url" ] || fail "the fixture URL no longer exceeds the field bound"
-  [ "${truncated##*/}" = 123 ] \
+  # The widest URL the forge validator can accept is a 253-character host with
+  # a 1024-character project path; past that only a request number wider than
+  # any real GitLab iid can push a URL over the bound. Built here so the
+  # truncation lands inside that number and would otherwise parse as a
+  # DIFFERENT, real merge request.
+  a63=$(printf '%063d' 0 | tr 0 a)
+  a61=$(printf '%061d' 0 | tr 0 a)
+  host="$a63.$a63.$a63.$a61"
+  seg=$(printf '%0204d' 0 | tr 0 b)
+  path="$seg/$seg/$seg/$seg/$seg"
+  [ "${#host}" = 253 ] || fail "the fixture host is ${#host} characters, not 253"
+  [ "${#path}" = 1024 ] || fail "the fixture path is ${#path} characters, not 1024"
+  url="https://$host/$path/-/merge_requests/12345678901"
+  truncated=${url:0:1314}
+  [ "${truncated##*/}" = 1234567890 ] \
     || fail "the fixture URL no longer truncates inside its merge request number"
 
   set +e
@@ -368,7 +406,7 @@ test_an_over_long_pr_url_is_refused_rather_than_truncated() {
     --pr "$url" --pr-head 1111111111111111111111111111111111111111 >/dev/null 2>&1
   rc=$?
   set -e
-  expect_code 2 "$rc" "an over-long PR URL should be refused as an invalid request"
+  expect_code 2 "$rc" "a PR URL past the bound should be refused as an invalid request"
   assert_absent "$(store "$home")" "a refused PR URL still wrote a record"
 
   set +e
@@ -376,9 +414,9 @@ test_an_over_long_pr_url_is_refused_rather_than_truncated() {
     --pr "$url" --outcome merged >/dev/null 2>&1
   rc=$?
   set -e
-  expect_code 2 "$rc" "an over-long merge request URL should be refused as an invalid request"
+  expect_code 2 "$rc" "a merge request URL past the bound should be refused"
   assert_absent "$(store "$home")" "a refused merge request URL still wrote a record"
-  pass "a PR URL too long to store is refused, never truncated into a different one"
+  pass "a PR URL past the bound is refused, never truncated into a different one"
 }
 
 # --- (e) missing fields --------------------------------------------------
@@ -1006,7 +1044,8 @@ test_a_class_captured_before_the_log_is_retired_is_recorded
 test_repeated_lifecycle_calls_are_idempotent
 test_distinct_events_append_distinct_records
 test_a_long_pr_url_still_distinguishes_a_re_pushed_head
-test_an_over_long_pr_url_is_refused_rather_than_truncated
+test_a_long_self_hosted_merge_request_keeps_its_ledger_row
+test_a_pr_url_beyond_the_bound_is_refused_rather_than_truncated
 test_missing_inputs_are_stated_rather_than_guessed
 test_concurrent_writers_lose_no_record_and_reuse_no_sequence
 test_unsafe_targets_refuse_without_writing
