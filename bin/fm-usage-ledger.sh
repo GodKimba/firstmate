@@ -49,6 +49,11 @@
 #          the IMPLEMENTING worker's axes, exactly as spawn recorded them.
 #          "default" is fm-spawn's own recorded value for an unpinned axis, and
 #          "unknown" appears when the task record could not be read at all.
+#          These, kind, project, mode, yolo, backend, and gen are the axes the
+#          task record supplies. A caller whose OWN sequence deletes that
+#          record before it can append captures them first with the `axes`
+#          verb and hands them back with --axes, so "unknown" here means an
+#          axis nothing could prove rather than one merely read too late.
 #   project the project or home DIRECTORY NAME from meta project=, never its
 #          path. This is the name data/projects.md registers, so it is the
 #          joinable key.
@@ -166,18 +171,28 @@
 #
 # Usage:
 #   fm-usage-ledger.sh record --event <spawn|pr|merge|cleanup> --task <id>
-#       [--meta <path>] [--gen <token>] [--pr <url>] [--pr-head <sha>]
-#       [--landing <sha>] [--outcome <landed|discarded|reported|retired|merged>]
+#       [--meta <path> | --axes <line>] [--gen <token>] [--pr <url>]
+#       [--pr-head <sha>] [--landing <sha>]
+#       [--outcome <landed|discarded|reported|retired|merged>]
 #       [--status-file <path> | --status-class <class>]
 #       [--validator-harness <name>] [--validator-model <name>]
 #     Append one record, or report `duplicate` when its identity is already
-#     stored. --meta supplies the implementation axes; --status-file supplies
-#     the final status class, and --status-class supplies an already-resolved
-#     one for a caller that had to read it earlier.
+#     stored. --meta supplies the implementation axes and --axes supplies an
+#     already-captured set of them; --status-file supplies the final status
+#     class, and --status-class supplies an already-resolved one for a caller
+#     that had to read it earlier.
 #   fm-usage-ledger.sh status-class --status-file <path>
 #     Print that status log's final class, so a caller whose sequence retires
 #     the log before it records can capture the class first and pass it back
 #     through record --status-class. Touches no store.
+#   fm-usage-ledger.sh axes --meta <path>
+#     Print that task record's implementation axes as one opaque line, so a
+#     caller whose sequence DELETES the record before it records can capture
+#     them first and pass them back through record --axes. A secondmate
+#     retirement is that caller: it removes the home its own state directory
+#     sits in, and without the capture its cleanup row would carry unknown
+#     axes and an incarnation-less identity that collides with every other
+#     retirement of the same id. Touches no store.
 #   fm-usage-ledger.sh list [--recent <n>]
 #     Print the last n records (default 20) as raw JSONL.
 #   fm-usage-ledger.sh verify
@@ -238,6 +253,15 @@ UL_PR_MAX=$((8 + 253 + 1 + 1024 + 18 + 10))
 # literal separators. Composing an identity therefore never truncates - two
 # distinct events must never collapse into the same id.
 UL_IDENTITY_MAX=$((3 + UL_FIELD_MAX + 1 + UL_FIELD_MAX + 1 + UL_PR_MAX + 1 + 64))
+# The separator of a captured axes line: the same quote no stored value may
+# contain, because ul_clean removes it. That is what lets the line split
+# without any escaping, exactly as it lets a record be emitted without any. It
+# is deliberately not whitespace: bash collapses runs of IFS whitespace, which
+# would silently merge two adjacent EMPTY axes - a scout's mode and yolo, say -
+# and shift every axis after them onto the wrong field.
+UL_AXES_SEP='"'
+# How many fields that line carries; see ul_axes_emit for the order.
+UL_AXES_COUNT=9
 
 # The common prefix every record of every schema version carries, plus the
 # closing brace. Captures: 1 v, 2 seq, 3 at, 4 event, 5 id.
@@ -480,6 +504,46 @@ ul_load_meta() {  # <meta-path>
   fi
 }
 
+# The axes ul_load_meta resolved, as one line, in this fixed order. Only the
+# meta-backed fields appear: the outcome fields belong to the event being
+# recorded, not to the task record that is about to disappear.
+ul_axes_emit() {
+  printf '%s"%s"%s"%s"%s"%s"%s"%s"%s\n' \
+    "$F_KIND" "$F_HARNESS" "$F_MODEL" "$F_EFFORT" "$F_PROJECT" \
+    "$F_MODE" "$F_YOLO" "$F_BACKEND" "$F_GEN"
+}
+
+# Restore a previously captured axes line into the same fields ul_load_meta
+# sets. Every part was emitted through ul_clean, so a part that does not
+# survive it unchanged did not come from a capture and is refused rather than
+# reduced into a different, valid-looking task.
+ul_axes_load() {  # <line>
+  local line=$1 rest part fields=1 kind harness model effort project mode yolo backend gen
+  rest=$line
+  while [ "$rest" != "${rest#*"$UL_AXES_SEP"}" ]; do
+    rest=${rest#*"$UL_AXES_SEP"}
+    fields=$((fields + 1))
+  done
+  [ "$fields" -eq "$UL_AXES_COUNT" ] \
+    || die "captured axes do not carry the ledger's $UL_AXES_COUNT fields"
+  IFS="$UL_AXES_SEP" read -r kind harness model effort project mode yolo backend gen \
+    <<< "$line"
+  for part in "$kind" "$harness" "$model" "$effort" "$project" "$mode" "$yolo" \
+      "$backend" "$gen"; do
+    ul_identity_intact "$part" || die "captured axes carry a value the ledger cannot store unchanged"
+  done
+  F_KIND=$kind
+  F_HARNESS=$harness
+  F_MODEL=$model
+  F_EFFORT=$effort
+  F_PROJECT=$project
+  F_MODE=$mode
+  F_YOLO=$yolo
+  F_BACKEND=$backend
+  # An explicit --gen still wins, exactly as it does over a task record.
+  [ -n "$F_GEN" ] || F_GEN=$gen
+}
+
 # 0 when <class> is a verb this home's vocabulary recognises. bin/fm-classify-lib.sh
 # owns that vocabulary, so the three verbs a home may rename are resolved
 # through its overrides rather than spelled out again here. A configured verb
@@ -528,16 +592,26 @@ ul_status_class() {  # <status-file>
 CMD=${1:-}
 shift 2>/dev/null || true
 case "$CMD" in
-  record|list|verify|prune|path|status-class) ;;
+  record|list|verify|prune|path|status-class|axes) ;;
   '') usage_error "no subcommand given" ;;
   *) usage_error "unknown subcommand '$CMD'" ;;
 esac
 
-# Answered before the store is resolved, because it reads no store at all.
+# Answered before the store is resolved, because they read no store at all.
 if [ "$CMD" = status-class ]; then
   [ "$#" -eq 2 ] && [ "$1" = --status-file ] \
     || usage_error "status-class takes only --status-file <path>"
   ul_status_class "$2"
+  exit 0
+fi
+
+if [ "$CMD" = axes ]; then
+  [ "$#" -eq 2 ] && [ "$1" = --meta ] \
+    || usage_error "axes takes only --meta <path>"
+  ul_fields_reset
+  ul_load_meta "$2"
+  [ -n "$F_GEN" ] || F_GEN=unknown
+  ul_axes_emit
   exit 0
 fi
 
@@ -624,6 +698,7 @@ fi
 EVENT=
 TASK=
 META=
+RAW_AXES=
 STATUS_FILE=
 RAW_GEN=
 RAW_PR=
@@ -637,6 +712,7 @@ while [ "$#" -gt 0 ]; do
     --event) EVENT=${2:-}; shift 2 || usage_error "--event requires a value" ;;
     --task) TASK=${2:-}; shift 2 || usage_error "--task requires a value" ;;
     --meta) META=${2:-}; shift 2 || usage_error "--meta requires a value" ;;
+    --axes) RAW_AXES=${2:-}; shift 2 || usage_error "--axes requires a value" ;;
     --gen) RAW_GEN=${2:-}; shift 2 || usage_error "--gen requires a value" ;;
     --pr) RAW_PR=${2:-}; shift 2 || usage_error "--pr requires a value" ;;
     --pr-head) RAW_PR_HEAD=${2:-}; shift 2 || usage_error "--pr-head requires a value" ;;
@@ -702,7 +778,16 @@ if [ -z "$F_VALIDATOR_HARNESS" ]; then F_VALIDATOR_HARNESS=unknown; fi
 if [ -z "$F_VALIDATOR_MODEL" ]; then F_VALIDATOR_MODEL=unknown; fi
 
 F_TASK=$TASK
-[ -z "$META" ] || ul_load_meta "$META"
+# The axes come from the task record, or from a capture a caller took while
+# that record was still there. Never from both: they are the same axes read at
+# two different moments, and a caller that has the capture is exactly the
+# caller whose own sequence has since deleted the record.
+if [ -n "$RAW_AXES" ]; then
+  [ -z "$META" ] || usage_error "--axes and --meta are alternatives"
+  ul_axes_load "$RAW_AXES"
+elif [ -n "$META" ]; then
+  ul_load_meta "$META"
+fi
 [ -n "$F_GEN" ] || F_GEN=unknown
 if [ -n "$STATUS_FILE" ]; then
   F_STATUS_CLASS=$(ul_status_class "$STATUS_FILE")

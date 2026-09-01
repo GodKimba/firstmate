@@ -22,6 +22,8 @@
 #   (d3) a renamed status verb is recorded in this home's spelling, and a status
 #        log that cannot be read - unsafe, or in a directory that is gone -
 #        is unknown rather than none
+#   (d4) axes captured before the task record is deleted record exactly what it
+#        held, empty axes included, and a line that is not a capture is refused
 #   (e) absent inputs record "" (not applicable) or "unknown" (unproven), never a guess
 #   (f) concurrent writers neither lose a record nor reuse a sequence number
 #   (g) symlinked, hardlinked, non-regular, and wrong-mode targets refuse unwritten,
@@ -36,7 +38,7 @@
 #   (l) a real spawn then a real teardown leave spawn and cleanup records behind,
 #       with the task's axes and its final status class intact after
 #       state/<id>.meta and state/<id>.status are gone, including a secondmate
-#       retirement that removes the very home its status log lived in
+#       retirement that removes the very home both of those lived in
 #   (m) a REFUSED teardown records no cleanup, because its task is still live
 #   (n) fm-pr-check records the canonical PR and the forge's head when it has one
 #   (o) fm-merge-local records the landing commit for an approved local landing
@@ -352,6 +354,66 @@ test_a_renamed_status_verb_is_recorded_in_the_homes_spelling() {
   [ "$(field "$rec" status_class)" = waiting ] \
     || fail "a captured renamed class was not recorded: $rec"
   pass "a home's renamed status verb is recorded in its own spelling"
+}
+
+test_captured_axes_record_exactly_what_the_task_record_held() {
+  local home axes rec absent
+  home=$(make_home axes-capture)
+  # A scout: it records no delivery posture, so mode and yolo are EMPTY and sit
+  # between axes that are not. A capture that lost an empty field would shift
+  # every axis after it onto the wrong one and record a fabricated backend and
+  # incarnation as fact.
+  write_task_meta "$home" alpha-x1 "kind=scout" "mode=" "yolo=" "backend=zellij"
+
+  axes=$(ledger "$home" axes --meta "$home/state/alpha-x1.meta") \
+    || fail "capturing the axes of a readable task record failed"
+  # The captured line is handed back after the record it came from is gone,
+  # which is the whole point of capturing it.
+  rm -f "$home/state/alpha-x1.meta"
+  ledger "$home" record --event cleanup --task alpha-x1 --axes "$axes" \
+    --outcome reported --status-class unknown >/dev/null \
+    || fail "a captured set of axes was refused by record"
+
+  rec=$(record_for "$home" "cleanup:alpha-x1:s1700.42.7")
+  [ -n "$rec" ] || fail "captured axes did not carry the task's own incarnation"
+  [ "$(field "$rec" kind)" = scout ] || fail "captured kind was lost: $rec"
+  [ "$(field "$rec" harness)" = claude ] || fail "captured harness was lost: $rec"
+  [ "$(field "$rec" model)" = opus ] || fail "captured model was lost: $rec"
+  [ "$(field "$rec" effort)" = high ] || fail "captured effort was lost: $rec"
+  [ "$(field "$rec" project)" = nutricheck ] || fail "captured project was lost: $rec"
+  [ "$(field "$rec" mode)" = "" ] || fail "an empty delivery mode was not preserved: $rec"
+  [ "$(field "$rec" yolo)" = "" ] || fail "an empty autonomy posture was not preserved: $rec"
+  [ "$(field "$rec" backend)" = zellij ] \
+    || fail "an axis after the empty ones shifted onto the wrong field: $rec"
+  assert_no_grep "secret-worktree-path" "$(store "$home")" \
+    "a captured axes line carried a private path into the ledger"
+
+  # An ABSENT record still captures: every axis it would have supplied reads
+  # unknown, and that is what gets recorded rather than the row being dropped.
+  absent=$(ledger "$home" axes --meta "$home/state/gone-x1.meta") \
+    || fail "capturing the axes of an absent task record failed"
+  ledger "$home" record --event cleanup --task gone-x1 --axes "$absent" \
+    --outcome discarded >/dev/null || fail "captured unknown axes were refused"
+  rec=$(record_for "$home" "cleanup:gone-x1:unknown")
+  [ "$(field "$rec" model)" = unknown ] \
+    || fail "an absent record's axes should read unknown: $rec"
+
+  # --axes and --meta are the same axes read at two different moments, so a
+  # caller that supplies both has not decided which moment it trusts.
+  set +e
+  ledger "$home" record --event cleanup --task beta-x1 --axes "$axes" \
+    --meta "$home/state/alpha-x1.meta" >/dev/null 2>&1
+  expect_code 2 "$?" "--axes and --meta together should be refused"
+  # A hand-built line is not a capture: it is refused rather than reduced into
+  # a different, valid-looking task.
+  ledger "$home" record --event cleanup --task beta-x1 --axes "ship:claude" \
+    >/dev/null 2>&1
+  expect_code 1 "$?" "a line that is not a capture should be refused"
+  set -e
+  [ -z "$(record_for "$home" "cleanup:beta-x1:unknown")" ] \
+    || fail "a refused axes request still wrote a record"
+  ledger "$home" verify >/dev/null || fail "captured axes left a malformed ledger"
+  pass "captured axes record exactly what the task record held, empty fields included"
 }
 
 test_an_unreadable_status_log_is_unknown_rather_than_none() {
@@ -1007,13 +1069,16 @@ test_a_real_spawn_and_teardown_leave_the_task_attributable() {
   pass "a real spawn and teardown leave the task attributable after its record is gone"
 }
 
-test_a_retirement_records_the_class_the_retired_mate_ended_on() {
+test_a_retirement_records_the_axes_and_class_of_the_retired_mate() {
   local id home_path ctl out rec
   make_lifecycle_case nested-sm
   id=nested-sm-x1
   # The retired mate's own home carries the overridden control state directory,
-  # so removing that home takes its status log with it. The class the mate
-  # actually ended on has to be read before that happens.
+  # so removing that home takes BOTH its status log and its task record with
+  # it. The class the mate ended on and the axes it ran on both have to be read
+  # before that happens, or the one row proving a retirement ever ran carries
+  # nothing but "unknown" - and an incarnation-less identity that every later
+  # retirement of the same id would collide with.
   home_path="$TMP_ROOT/nested-sm/secondmate-home"
   ctl="$home_path/control-state"
   mkdir -p "$home_path/state" "$home_path/data" "$home_path/config" \
@@ -1041,19 +1106,36 @@ test_a_retirement_records_the_class_the_retired_mate_ended_on() {
     FM_TEARDOWN_GUARD_DONE=1 PATH="$CASE_FAKEBIN:$PATH" \
     "$TEARDOWN" "$id" --force 2>&1) || fail "the retirement teardown failed: $out"
   assert_absent "$home_path" "the retirement left the retired home behind"
-  rec=$(record_for "$CASE_HOME" "cleanup:$id:unknown")
+  # The incarnation is what keeps two retirements of the same id apart, so the
+  # record has to be found under the mate's own gen and not under "unknown".
+  [ -z "$(record_for "$CASE_HOME" "cleanup:$id:unknown")" ] \
+    || fail "the retirement collapsed onto an incarnation-less identity"
+  rec=$(record_for "$CASE_HOME" "cleanup:$id:g-nested")
   [ -n "$rec" ] || fail "the retirement wrote no usage record"
   [ "$(field "$rec" status_class)" = "done" ] \
     || fail "the class the retired mate ended on was not recorded: $rec"
   [ "$(field "$rec" outcome)" = discarded ] \
     || fail "the terminal outcome was not recorded: $rec"
-  # The task record went with the home, so its axes are honestly unproven. The
-  # class is the one axis the capture rescues, and it must not read as an
-  # absence nothing established.
-  [ "$(field "$rec" model)" = unknown ] \
-    || fail "an unreadable task record should leave its axes unknown: $rec"
+  # The task record went with the home, so the axes it held were captured
+  # before the removal rather than read from a record that is already gone.
+  [ "$(field "$rec" harness)" = claude ] \
+    || fail "the harness the retired mate ran on was not recorded: $rec"
+  [ "$(field "$rec" model)" = opus ] \
+    || fail "the model the retired mate ran on was not recorded: $rec"
+  [ "$(field "$rec" effort)" = high ] \
+    || fail "the effort the retired mate ran on was not recorded: $rec"
+  [ "$(field "$rec" kind)" = secondmate ] \
+    || fail "the retired mate's kind was not recorded: $rec"
+  [ "$(field "$rec" mode)" = secondmate ] \
+    || fail "the retired mate's delivery mode was not recorded: $rec"
+  [ "$(field "$rec" gen)" = g-nested ] \
+    || fail "the retired mate's incarnation was not recorded: $rec"
+  [ "$(field "$rec" project)" = "${CASE_PROJ##*/}" ] \
+    || fail "the retired mate's project was not recorded: $rec"
+  assert_no_grep "$home_path" "$(store "$CASE_HOME")" \
+    "the retired home's path reached the ledger"
   ledger "$CASE_HOME" verify >/dev/null || fail "the retirement left a malformed ledger"
-  pass "a retirement that removes its own home records the class it ended on"
+  pass "a retirement that removes its own home records the axes and class it ran on"
 }
 
 # --- (m) refused cleanup ----------------------------------------------------
@@ -1253,6 +1335,7 @@ test_a_remote_endpoints_backend_is_read_from_its_own_writer
 test_final_status_class_is_the_verb_only
 test_a_class_captured_before_the_log_is_retired_is_recorded
 test_a_renamed_status_verb_is_recorded_in_the_homes_spelling
+test_captured_axes_record_exactly_what_the_task_record_held
 test_an_unreadable_status_log_is_unknown_rather_than_none
 test_repeated_lifecycle_calls_are_idempotent
 test_distinct_events_append_distinct_records
@@ -1271,7 +1354,7 @@ test_retention_keeps_first_observed_and_the_horizon
 test_recording_never_rewrites_history
 test_invalid_requests_refuse_before_writing
 test_a_real_spawn_and_teardown_leave_the_task_attributable
-test_a_retirement_records_the_class_the_retired_mate_ended_on
+test_a_retirement_records_the_axes_and_class_of_the_retired_mate
 test_a_refused_teardown_records_no_cleanup
 test_pr_registration_records_the_canonical_pr_and_head
 test_an_approved_local_landing_records_its_commit

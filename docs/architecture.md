@@ -319,6 +319,7 @@ Its remote-secondmate launch returns earlier and carries its own record at that 
 `bin/fm-pr-check.sh` records after the poll is published, for GitHub and GitLab alike.
 `bin/fm-merge-outcome-lib.sh` records inside the one emitter both a self-performed merge and a poll-detected merge already share, and `bin/fm-merge-local.sh` records an approved local-only landing's commit.
 `bin/fm-teardown.sh` records immediately before the task record is removed, on the ordinary and remote-secondmate paths, so a refused teardown deliberately leaves no cleanup record for a task that is still live.
+Its own sequence destroys two of the things that record describes - retiring the presentation entry deletes the status log, and a secondmate retirement removes the home the task record itself sits in - so both are captured through the ledger's own reader past every refusal and before either is gone, while the append stays where the refusals still govern it.
 Nothing the ledger stores is read from a vendor's process name, rendered output, or banner - every axis comes from the task record fm-spawn already wrote and from the forge identity fm-pr-lib already validated - so the feature has no harness-dependent verdict needing per-adapter evidence in [verification/runtime-backends.md](verification/runtime-backends.md).
 
 Because the spawn record is written first and independently, abandoned or indefinitely preserved work stays attributable even when no later record is ever written.

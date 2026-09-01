@@ -288,17 +288,21 @@ TEARDOWN_META_KIND=$(fm_meta_get "$META" kind)
 TEARDOWN_CLEANUP_RECOVERY=$(fm_meta_get "$META" cleanup_recovery)
 TEARDOWN_META_SPAWN_GEN=
 
-# Call sites are placed after every landed-work, report, and endpoint refusal
+# The append is placed after every landed-work, report, and endpoint refusal
 # and before the task record is removed, which is what makes a refused teardown
-# record nothing and a completed one record while the meta is still readable.
-# The status log does not survive that far: retiring the presentation entry
-# deletes it, and a secondmate retirement can remove the very home its state
-# directory sits in, so its final class is captured while it still exists and
-# the captured value is what the record carries.
+# record nothing and a completed one record a task that really did finish.
+# Two of the things it records do not survive that far. Retiring the
+# presentation entry deletes the status log, and a secondmate retirement
+# removes the very home its state directory - and therefore the task record
+# itself - sits in. Both are captured here, past every refusal above and before
+# either is destroyed, and the captured values are what the record carries; the
+# append still happens later, so a refusal below still records nothing.
 TEARDOWN_STATUS_CLASS=unknown
-usage_ledger_capture_status_class() {
+TEARDOWN_LEDGER_AXES=
+usage_ledger_capture_task_record() {
   TEARDOWN_STATUS_CLASS=$(fm_usage_ledger_status_class "$FM_HOME" "$STATE" "$DATA" \
     "$STATE/$ID.status")
+  TEARDOWN_LEDGER_AXES=$(fm_usage_ledger_axes "$FM_HOME" "$STATE" "$DATA" "$META")
 }
 
 usage_ledger_record_cleanup() {
@@ -312,8 +316,17 @@ usage_ledger_record_cleanup() {
       *) outcome=landed ;;
     esac
   fi
-  fm_usage_ledger_record "$FM_HOME" "$STATE" "$DATA" cleanup "$ID" \
-    --meta "$META" --outcome "$outcome" --status-class "$TEARDOWN_STATUS_CLASS"
+  # An uncapturable set of axes falls back to naming the record itself, which
+  # is still readable everywhere except the retirement path this capture exists
+  # for.
+  if [ -n "$TEARDOWN_LEDGER_AXES" ]; then
+    fm_usage_ledger_record "$FM_HOME" "$STATE" "$DATA" cleanup "$ID" \
+      --axes "$TEARDOWN_LEDGER_AXES" --outcome "$outcome" \
+      --status-class "$TEARDOWN_STATUS_CLASS"
+  else
+    fm_usage_ledger_record "$FM_HOME" "$STATE" "$DATA" cleanup "$ID" \
+      --meta "$META" --outcome "$outcome" --status-class "$TEARDOWN_STATUS_CLASS"
+  fi
 }
 
 TEARDOWN_BACKLOG_APPLIES=0
@@ -715,7 +728,7 @@ remote_secondmate_teardown() {
   tmp="$SECONDMATE_REG.tmp.$$"
   grep -vE "^- $ID( |$)" "$SECONDMATE_REG" > "$tmp" || true
   mv -f -- "$tmp" "$SECONDMATE_REG"
-  usage_ledger_capture_status_class
+  usage_ledger_capture_task_record
   status_retire_presentation_task "$STATE" "$ID" || return 1
   # Last read of the task record before it is removed.
   usage_ledger_record_cleanup
@@ -2883,7 +2896,7 @@ if [ "$BACKEND" = herdr ]; then
     exit 1
   fi
 fi
-usage_ledger_capture_status_class
+usage_ledger_capture_task_record
 if [ "$KIND" = secondmate ]; then
   [ -n "$HOME_PATH" ] || HOME_PATH=$WT
   handoff_wake_retire_stage \
