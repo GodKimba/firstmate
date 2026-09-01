@@ -55,8 +55,10 @@
 #          verb and hands them back with --axes, so "unknown" here means an
 #          axis nothing could prove rather than one merely read too late.
 #   project the project or home DIRECTORY NAME from meta project=, never its
-#          path. This is the name data/projects.md registers, so it is the
-#          joinable key.
+#          path, with any trailing separator removed first. This is the name
+#          data/projects.md registers, so it is the joinable key: a record that
+#          carries a project reads "unknown" when its name cannot be taken,
+#          never "" - that would claim the task had no project at all.
 #   mode   no-mistakes | direct-PR | local-only | secondmate; "" for a scout,
 #          which records no delivery posture until promotion.
 #   yolo   on | off; "" where no delivery posture is recorded.
@@ -495,7 +497,22 @@ ul_load_meta() {  # <meta-path>
   fi
   # The directory NAME only. The recorded path itself never enters the ledger.
   project=$(fm_meta_get "$meta" project)
-  F_PROJECT=$(ul_clean "${project##*/}")
+  if [ -z "$project" ]; then
+    F_PROJECT=
+  else
+    # Trailing separators come off before the name is taken. A remote route is
+    # registered in data/secondmates.md exactly as it was written, so a root
+    # written "/srv/mate/" reaches the task record with its separator still on
+    # and would otherwise reduce to the empty string this schema reads as
+    # not-applicable.
+    while [ "$project" != "${project%/}" ] && [ -n "${project%/}" ]; do
+      project=${project%/}
+    done
+    F_PROJECT=$(ul_clean "${project##*/}")
+    # A project the record DOES carry is unproven rather than absent when its
+    # name cannot be read, the same distinction every other axis draws.
+    [ -n "$F_PROJECT" ] || F_PROJECT=unknown
+  fi
   if [ -z "$F_GEN" ]; then
     gen=$(fm_meta_get "$meta" spawn_gen)
     [ -z "$gen" ] || ul_identity_intact "$gen" \

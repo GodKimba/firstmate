@@ -652,6 +652,30 @@ test_missing_inputs_are_stated_rather_than_guessed() {
   [ "$(field "$rec" model)" = opus ] \
     || fail "a proven validator identity overwrote the implementer's model: $rec"
 
+  # A recorded project is named, never reported absent. data/secondmates.md
+  # stores a remote root exactly as it was written, so a route registered
+  # "root: /srv/mate/" reaches the task record with its separator still on.
+  home=$(make_home project-name)
+  fm_write_meta "$home/state/mate-x1.meta" \
+    "project=$home/mates/atlantic/" "harness=claude" "kind=secondmate" \
+    "mode=secondmate" "yolo=off" "model=opus" "effort=high" "spawn_gen=g1"
+  ledger "$home" record --event spawn --task mate-x1 \
+    --meta "$home/state/mate-x1.meta" >/dev/null
+  rec=$(record_for "$home" "spawn:mate-x1:g1")
+  [ "$(field "$rec" project)" = atlantic ] \
+    || fail "a trailing separator lost the joinable project name: $rec"
+
+  # And one whose name cannot be read at all is unproven rather than absent:
+  # the empty string would claim this task had no project.
+  fm_write_meta "$home/state/rootless-x1.meta" \
+    "project=/" "harness=claude" "kind=ship" "mode=no-mistakes" "yolo=off" \
+    "model=opus" "effort=high" "spawn_gen=g2"
+  ledger "$home" record --event spawn --task rootless-x1 \
+    --meta "$home/state/rootless-x1.meta" >/dev/null
+  rec=$(record_for "$home" "spawn:rootless-x1:g2")
+  [ "$(field "$rec" project)" = unknown ] \
+    || fail "a project that could not be named was recorded as absent: $rec"
+
   # A scout carries no delivery posture; that is not-applicable, not unproven.
   home=$(make_home scout-fields)
   fm_write_meta "$home/state/scout-x1.meta" \
