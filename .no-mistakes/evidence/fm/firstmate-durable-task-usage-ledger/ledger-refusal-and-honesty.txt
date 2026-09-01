@@ -1,0 +1,72 @@
+Firstmate task-usage ledger - refusal and honesty boundaries
+Real bin/fm-usage-ledger.sh runs against throwaway sandbox homes.
+
+=== 1. An over-long merge-request URL is refused, not truncated into another one ===
+
+  a self-hosted GitLab merge request, 1315 characters long
+  it ends at merge request  ...b/-/merge_requests/12345678901
+  cut to the field bound it would end at ...bb/-/merge_requests/1234567890
+# That shorter number is a DIFFERENT merge request that also parses.
+
+$ fm-usage-ledger.sh record --event pr --task alpha-x1 --pr <that URL> ...
+error: --pr must be at most 1314 printable characters
+run fm-usage-ledger.sh --help for the contract
+  exit=2
+
+$ ls $DEMO/over-long/data
+# Nothing was written: an invalid request is refused before any append.
+
+# A merge request that DOES fit is recorded in full:
+$ fm-usage-ledger.sh record --event merge --task alpha-x1 --pr https://gitlab.example.invalid/group/sub/project/-/merge_requests/4212 --outcome merged
+  recorded 2
+  "event":"merge","id":"merge:alpha-x1:https://gitlab.example.invalid/group/sub/project/-/merge_requests/4212:-","task":"alpha-x1","gen":"g1","kind":"ship","harness":"claude","model":"opus","effort":"high","project":"acme-api","mode":"no-mistakes","yolo":"off","backend":"tmux","pr":"https://gitlab.example.invalid/group/sub/project/-/merge_requests/4212"
+
+
+=== 2. A remote secondmate records the endpoint's backend, never the local default ===
+
+# The remote writer records the endpoint's backend under remote_backend=,
+# and never writes backend= at all:
+  kind=secondmate
+  mode=secondmate
+  remote_backend=herdr
+
+$ fm-usage-ledger.sh record --event spawn --task sm-x1 --meta <that record>
+  recorded 2
+  recorded "backend":"herdr"  (the endpoint runs herdr, not this fleet's tmux)
+
+# And when the remote writer proved no backend at all:
+  recorded "backend":"unknown"  (unproven is stated, not guessed)
+
+
+=== 3. A status class that cannot be read is announced, never silently substituted ===
+
+# The schema owner is broken, so teardown's class lookup cannot run.
+$ fm_usage_ledger_status_class <home> <state> <data> <status log>
+  exit=0
+  stdout: unknown
+  stderr:
+    error: the task-usage ledger could not be started
+    warning: the task-usage ledger could not read the final status class from $DEMO/status-class/state/alpha-x1.status; the record will carry "unknown" instead of the class the task actually ended on
+# The caller is never failed, the class reads unknown rather than a guess,
+# the consequence is named, and the ledger's own diagnostic survives.
+
+
+=== 4. The SAFETY contract: record reads what one append needs, verify proves the rest ===
+
+# Something outside the ledger damages a record in the MIDDLE of the store:
+  line 2 is now: {"v":1,"seq":2,"event":"spawn" TRUNCATED BY SOMETHING ELSE
+
+$ fm-usage-ledger.sh record --event cleanup --task beta-x1 ...
+  recorded 4
+  exit=0
+
+$ fm-usage-ledger.sh verify
+  error: task-usage ledger record 2 is malformed; its bytes are left untouched at $DEMO/malformed-middle/data/task-usage.jsonl
+  exit=1
+# record never reads that record, so the append still lands; verify is the
+# verb that reads every record and finds the damage - exactly what the
+# schema owner's SAFETY block now states.
+
+$ tail -c 400 of the store, showing the damaged line kept byte-for-byte
+  {"v":1,"seq":2,"event":"spawn" TRUNCATED BY SOMETHING ELSE
+  {"v":1,"seq":4,"at":1788293591,"event":"cleanup","id":"cleanup:beta-x1:g9","task":"beta-x1","gen":"g9","kind":"ship","harness":"codex","mode

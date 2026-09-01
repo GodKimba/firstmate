@@ -1,0 +1,146 @@
+Changed-path test selection: a change to a ledger call site must re-select
+the only regression that covers it. Each block below edits one file in the
+working tree, asks the runner what it would select, then reverts the edit.
+
+=== edited bin/fm-spawn.sh ===
+$ bin/fm-test-run.sh --list --changed --base HEAD
+  tests/fm-backend-herdr.test.sh
+  tests/fm-backend-tmux-smoke.test.sh
+  tests/fm-backend.test.sh
+  tests/fm-control-relaunch.test.sh
+  tests/fm-control.test.sh
+  tests/fm-herdr-session-cleanup.test.sh
+  tests/fm-send-inbox.test.sh
+  tests/fm-send-resolve-key.test.sh
+  tests/fm-send-strict.test.sh
+  tests/fm-spawn-batch.test.sh
+  tests/fm-spawn-dispatch-profile.test.sh
+  tests/fm-spawn-worktree-settle.test.sh
+  tests/fm-teardown-endpoint-safety.test.sh
+  tests/fm-tmux-agent-liveness.test.sh
+  tests/fm-trace-context-spawn.test.sh
+  tests/fm-arm-pretool-check.test.sh
+  tests/fm-ask-user-authority.test.sh
+  tests/fm-bearings-board.test.sh
+  tests/fm-brief.test.sh
+  tests/fm-calm-pi-extension.test.sh
+  tests/fm-captain-hold-lifecycle.test.sh
+  tests/fm-cd-pretool-check.test.sh
+  tests/fm-classify-decision-key.test.sh
+  tests/fm-composer-ghost.test.sh
+  tests/fm-composer-lib.test.sh
+  tests/fm-crew-state.test.sh
+  tests/fm-documentation-audiences.test.sh
+  tests/fm-ensure-agents-md.test.sh
+  tests/fm-grok-harness.test.sh
+  tests/fm-harness-adapter-references.test.sh
+  tests/fm-herdr-lab.test.sh
+  tests/fm-kimi-harness.test.sh
+  tests/fm-lint-workflows.test.sh
+  tests/fm-lint.test.sh
+  tests/fm-muse-harness.test.sh
+  tests/fm-operational-input.test.sh
+  tests/fm-pi-primary-types.test.sh
+  tests/fm-send-popup-settle.test.sh
+  tests/fm-send-settle.test.sh
+  tests/fm-subagent-pretool-check.test.sh
+  tests/fm-supervision-instructions.test.sh
+  tests/fm-task-delivery.test.sh
+  tests/fm-test-isolation-proof.test.sh
+  tests/fm-test-run.test.sh
+  tests/fm-tmux-submit-busy.test.sh
+  tests/fm-trace-context-lib.test.sh
+  tests/fm-transition-lib.test.sh
+  tests/fm-vendor-auth-probe.test.sh
+  tests/fm-usage-ledger.test.sh
+
+=== edited bin/fm-wake-lib.sh ===
+$ bin/fm-test-run.sh --list --changed --base HEAD
+  tests/fm-cursor-primary.test.sh
+  tests/fm-daemon.test.sh
+  tests/fm-guard-stale-banner.test.sh
+  tests/fm-inactive-reconcile.test.sh
+  tests/fm-pi-watch-extension.test.sh
+  tests/fm-session-lock-ancestry.test.sh
+  tests/fm-supervision-events.test.sh
+  tests/fm-task-inbox.test.sh
+  tests/fm-tool-update-check.test.sh
+  tests/fm-turnend-guard.test.sh
+  tests/fm-wake-daemon-lifecycle-e2e.test.sh
+  tests/fm-wake-drain-unread-status.test.sh
+  tests/fm-wake-queue.test.sh
+  tests/fm-watch-arm.test.sh
+  tests/fm-watch-checkpoint.test.sh
+  tests/fm-watch-recovery-loop.test.sh
+  tests/fm-watch-triage.test.sh
+  tests/fm-watcher-lock.test.sh
+  tests/fm-usage-ledger.test.sh
+
+=== edited bin/fm-usage-ledger.sh ===
+$ bin/fm-test-run.sh --list --changed --base HEAD
+  tests/fm-check-unregister.test.sh
+  tests/fm-pr-check-security.test.sh
+  tests/fm-pr-merge.test.sh
+  tests/fm-review-diff.test.sh
+  tests/fm-teardown.test.sh
+  tests/fm-usage-ledger.test.sh
+  tests/fm-x-mode.test.sh
+  tests/fm-backend-herdr.test.sh
+  tests/fm-backend-tmux-smoke.test.sh
+  tests/fm-backend.test.sh
+  tests/fm-control-relaunch.test.sh
+  tests/fm-control.test.sh
+  tests/fm-herdr-session-cleanup.test.sh
+  tests/fm-send-inbox.test.sh
+  tests/fm-send-resolve-key.test.sh
+  tests/fm-send-strict.test.sh
+  tests/fm-spawn-batch.test.sh
+  tests/fm-spawn-dispatch-profile.test.sh
+  tests/fm-spawn-worktree-settle.test.sh
+  tests/fm-teardown-endpoint-safety.test.sh
+  tests/fm-tmux-agent-liveness.test.sh
+  tests/fm-trace-context-spawn.test.sh
+  tests/fm-cursor-primary.test.sh
+  tests/fm-daemon.test.sh
+  tests/fm-guard-stale-banner.test.sh
+  tests/fm-inactive-reconcile.test.sh
+  tests/fm-pi-watch-extension.test.sh
+  tests/fm-session-lock-ancestry.test.sh
+  tests/fm-supervision-events.test.sh
+  tests/fm-task-inbox.test.sh
+  tests/fm-tool-update-check.test.sh
+  tests/fm-turnend-guard.test.sh
+  tests/fm-wake-daemon-lifecycle-e2e.test.sh
+  tests/fm-wake-drain-unread-status.test.sh
+  tests/fm-wake-queue.test.sh
+  tests/fm-watch-arm.test.sh
+  tests/fm-watch-checkpoint.test.sh
+  tests/fm-watch-recovery-loop.test.sh
+  tests/fm-watch-triage.test.sh
+  tests/fm-watcher-lock.test.sh
+  tests/fm-backlog-handoff.test.sh
+  tests/fm-on.test.sh
+  tests/fm-remote-backlog-handoff.test.sh
+  tests/fm-remote-doctor.test.sh
+  tests/fm-remote-job-orphan-reap.test.sh
+  tests/fm-remote-job.test.sh
+  tests/fm-remote-reply.test.sh
+  tests/fm-remote-secondmate-lifecycle-e2e.test.sh
+  tests/fm-remote-secondmate-trace-context.test.sh
+  tests/fm-remote-transport-lanes.test.sh
+  tests/fm-secondmate-harness.test.sh
+  tests/fm-secondmate-lifecycle-e2e.test.sh
+  tests/fm-secondmate-liveness.test.sh
+  tests/fm-secondmate-reconcile.test.sh
+  tests/fm-secondmate-safety.test.sh
+  tests/fm-secondmate-sync.test.sh
+  tests/fm-send-secondmate-marker.test.sh
+  tests/fm-shared-captain-inheritance.test.sh
+  tests/fm-startup-memory-budget.test.sh
+  tests/fm-stow-cascade.test.sh
+
+$ bin/fm-test-run.sh --check-coverage
+  FM_TEST_COVERAGE ok total=176 parallel=24 serial=140 serial_shards=4 herdr=12
+
+$ git status --porcelain   (working tree restored)
+  (empty = clean)
