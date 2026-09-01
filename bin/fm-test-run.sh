@@ -1168,8 +1168,16 @@ families_for_changed_path() {
       printf '%s\n' backend-dispatch
       printf '%s\n' real-herdr-gated
       ;;
+    bin/fm-wake-lib.sh|bin/fm-classify-lib.sh)
+      # The same family as the watcher arm below, plus the ledger: these two are
+      # the shared libraries bin/fm-usage-ledger.sh sources whose contracts it
+      # alone regresses - the locks-only state guard, and the status vocabulary
+      # a home may rename. Select that one script rather than the whole family.
+      printf '%s\n' watcher-wake-lock
+      printf '%s\n' "__script__:fm-usage-ledger.test.sh"
+      ;;
     bin/fm-watch*|bin/fm-wake*|bin/fm-inactive-reconcile.sh|\
-    bin/fm-classify-lib.sh|bin/fm-daemon*|bin/fm-turnend-guard*|bin/fm-guard.sh)
+    bin/fm-daemon*|bin/fm-turnend-guard*|bin/fm-guard.sh)
       printf '%s\n' watcher-wake-lock
       ;;
     bin/fm-afk*)

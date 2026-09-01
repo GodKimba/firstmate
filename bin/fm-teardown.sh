@@ -292,8 +292,9 @@ TEARDOWN_META_SPAWN_GEN=
 # and before the task record is removed, which is what makes a refused teardown
 # record nothing and a completed one record while the meta is still readable.
 # The status log does not survive that far: retiring the presentation entry
-# deletes it, so its final class is captured while it still exists and the
-# captured value is what the record carries.
+# deletes it, and a secondmate retirement can remove the very home its state
+# directory sits in, so its final class is captured while it still exists and
+# the captured value is what the record carries.
 TEARDOWN_STATUS_CLASS=unknown
 usage_ledger_capture_status_class() {
   TEARDOWN_STATUS_CLASS=$(fm_usage_ledger_status_class "$FM_HOME" "$STATE" "$DATA" \
@@ -2882,6 +2883,7 @@ if [ "$BACKEND" = herdr ]; then
     exit 1
   fi
 fi
+usage_ledger_capture_status_class
 if [ "$KIND" = secondmate ]; then
   [ -n "$HOME_PATH" ] || HOME_PATH=$WT
   handoff_wake_retire_stage \
@@ -2906,7 +2908,6 @@ fm_backend_clear_transition "$BACKEND" "$STATE" "$T" || true
 [ -n "$TASK_TMP" ] && rm -rf "$TASK_TMP"
 remove_pr_poll_artifacts "$STATE" "$ID" || exit 1
 retire_busy_state "$STATE" "$ID" "$BUSY_GEN" || exit 1
-usage_ledger_capture_status_class
 status_retire_presentation_task "$STATE" "$ID" || exit 1
 rm -f "$STATE/$ID.turn-ended" \
   "$STATE/$ID.pi-ext.ts" "$STATE/$ID.grok-turnend-token" \

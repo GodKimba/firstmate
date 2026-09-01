@@ -66,13 +66,15 @@
 #          resolution, and captain-held verbs in THIS home's configured
 #          spelling, read from bin/fm-classify-lib.sh - which owns that
 #          vocabulary - rather than restated here. "none" means the task logged
-#          no status at all, and "unknown" means the class could not be proven:
-#          the last line carries no recognised verb, or a log that is there
-#          could not be safely read. The status NOTE is never stored. A caller
-#          whose own sequence retires the status log before it can record passes
-#          the already-resolved class with --status-class instead of the file,
-#          so it stores the class the task actually ended on rather than the
-#          empty log it left behind.
+#          no status at all, which only a status directory that is still there
+#          can establish, and "unknown" means the class could not be proven:
+#          the last line carries no recognised verb, a log that is there could
+#          not be safely read, or the directory that would hold it is itself
+#          gone. The status NOTE is never stored. A caller whose own sequence
+#          retires the status log before it can record passes the
+#          already-resolved class with --status-class instead of the file, so it
+#          stores the class the task actually ended on rather than the empty log
+#          it left behind.
 #   validator_harness / validator_model
 #          the no-mistakes VALIDATOR's identity, deliberately separate from the
 #          implementer's axes above. Firstmate cannot prove them today (the
@@ -481,13 +483,20 @@ ul_status_class_known() {  # <class>
 }
 
 # The final status VERB only, mapped to the closed vocabulary. The note is
-# never read into the ledger. A log that is simply not there is an absence the
-# task proved ("none"); one that is there but cannot be read safely is a class
-# nothing proved ("unknown"), the same distinction ul_load_meta draws.
+# never read into the ledger. A log missing from a directory that is still
+# there is an absence the task proved ("none"); one that cannot be read safely,
+# or whose directory is gone too, is a class nothing proved ("unknown"), the
+# same distinction ul_load_meta draws.
 ul_status_class() {  # <status-file>
-  local file=$1 line verb
+  local file=$1 line verb dir
   if [ ! -e "$file" ] && [ ! -L "$file" ]; then
-    printf 'none\n'
+    dir=${file%/*}
+    [ "$dir" != "$file" ] || dir=.
+    if [ -d "$dir" ]; then
+      printf 'none\n'
+    else
+      printf 'unknown\n'
+    fi
     return 0
   fi
   [ -f "$file" ] && [ ! -L "$file" ] && [ -r "$file" ] \

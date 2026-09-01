@@ -19,7 +19,8 @@
 #        into a different real merge request and recorded as fact
 #   (d2) a status class captured before its log is retired is the class recorded
 #   (d3) a renamed status verb is recorded in this home's spelling, and a status
-#        log that is there but cannot be read is unknown rather than none
+#        log that cannot be read - unsafe, or in a directory that is gone -
+#        is unknown rather than none
 #   (e) absent inputs record "" (not applicable) or "unknown" (unproven), never a guess
 #   (f) concurrent writers neither lose a record nor reuse a sequence number
 #   (g) symlinked, hardlinked, non-regular, and wrong-mode targets refuse unwritten,
@@ -33,7 +34,8 @@
 # Lifecycle instrumentation, driven through the real scripts:
 #   (l) a real spawn then a real teardown leave spawn and cleanup records behind,
 #       with the task's axes and its final status class intact after
-#       state/<id>.meta and state/<id>.status are gone
+#       state/<id>.meta and state/<id>.status are gone, including a secondmate
+#       retirement that removes the very home its status log lived in
 #   (m) a REFUSED teardown records no cleanup, because its task is still live
 #   (n) fm-pr-check records the canonical PR and the forge's head when it has one
 #   (o) fm-merge-local records the landing commit for an approved local landing
@@ -311,7 +313,20 @@ test_an_unreadable_status_log_is_unknown_rather_than_none() {
   rec=$(record_for "$home" "cleanup:alpha-x1:s1700.42.7")
   [ "$(field "$rec" status_class)" = unknown ] \
     || fail "a status log that could not be read should be unknown: $rec"
-  pass "a status log that is there but unreadable records unknown, not none"
+
+  # Only a status directory that is still there can establish that the task
+  # logged nothing. A retirement that removed the directory proved no such
+  # thing, so its class is unproven rather than an absence.
+  home=$(make_home status-class-dir-gone)
+  write_task_meta "$home" alpha-x1
+  ledger "$home" record --event cleanup --task alpha-x1 \
+    --meta "$home/state/alpha-x1.meta" --outcome retired \
+    --status-file "$TMP_ROOT/status-class-dir-gone-removed/alpha-x1.status" >/dev/null \
+    || fail "a status log whose directory is gone should not fail the record"
+  rec=$(record_for "$home" "cleanup:alpha-x1:s1700.42.7")
+  [ "$(field "$rec" status_class)" = unknown ] \
+    || fail "a status log whose directory is gone should be unknown: $rec"
+  pass "a status log that cannot be read records unknown, not none"
 }
 
 # --- (c) and (d) idempotency and distinct events ----------------------------
@@ -641,13 +656,14 @@ test_no_verb_recreates_a_home_a_retirement_removed() {
     FM_DATA_OVERRIDE="$home/data" \
     "$LEDGER" status-class --status-file "$retired/state/beta-x1.status") \
     || fail "status-class should not fail for a removed home"
-  [ "$out" = none ] || fail "a removed status log should read none: $out"
+  [ "$out" = unknown ] \
+    || fail "a status log in a removed home should read unknown: $out"
   assert_absent "$retired" "the status-class verb recreated a removed home"
 
   FM_ROOT_OVERRIDE='' FM_HOME="$home" FM_STATE_OVERRIDE="$retired/state" \
     FM_DATA_OVERRIDE="$home/data" \
     "$LEDGER" record --event cleanup --task beta-x1 --outcome retired \
-    --status-class none >/dev/null \
+    --status-class unknown >/dev/null \
     || fail "a cleanup for a removed home should still be recorded"
   rec=$(record_for "$home" "cleanup:beta-x1:unknown")
   [ -n "$rec" ] || fail "the retirement cleanup was not recorded"
@@ -934,6 +950,55 @@ test_a_real_spawn_and_teardown_leave_the_task_attributable() {
   pass "a real spawn and teardown leave the task attributable after its record is gone"
 }
 
+test_a_retirement_records_the_class_the_retired_mate_ended_on() {
+  local id home_path ctl out rec
+  make_lifecycle_case nested-sm
+  id=nested-sm-x1
+  # The retired mate's own home carries the overridden control state directory,
+  # so removing that home takes its status log with it. The class the mate
+  # actually ended on has to be read before that happens.
+  home_path="$TMP_ROOT/nested-sm/secondmate-home"
+  ctl="$home_path/control-state"
+  mkdir -p "$home_path/state" "$home_path/data" "$home_path/config" \
+    "$home_path/projects" "$ctl"
+  printf '%s\n' "$id" > "$home_path/.fm-secondmate-home"
+  touch "$ctl/.last-watcher-beat"
+  fm_write_meta "$ctl/$id.meta" \
+    "window=firstmate:fm-$id" \
+    "endpoint_task_id=$id" \
+    "worktree=$CASE_WT" \
+    "project=$CASE_PROJ" \
+    "harness=claude" \
+    "kind=secondmate" \
+    "mode=secondmate" \
+    "yolo=off" \
+    "model=opus" \
+    "effort=high" \
+    "home=$home_path" \
+    "spawn_gen=g-nested"
+  printf '%s\n' 'working: retiring' 'done: handed back' > "$ctl/$id.status"
+
+  out=$(FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$CASE_HOME" \
+    FM_STATE_OVERRIDE="$ctl" FM_DATA_OVERRIDE="$CASE_HOME/data" \
+    FM_PROJECTS_OVERRIDE="$CASE_HOME/projects" FM_CONFIG_OVERRIDE="$CASE_HOME/config" \
+    FM_TEARDOWN_GUARD_DONE=1 PATH="$CASE_FAKEBIN:$PATH" \
+    "$TEARDOWN" "$id" --force 2>&1) || fail "the retirement teardown failed: $out"
+  assert_absent "$home_path" "the retirement left the retired home behind"
+  rec=$(record_for "$CASE_HOME" "cleanup:$id:unknown")
+  [ -n "$rec" ] || fail "the retirement wrote no usage record"
+  [ "$(field "$rec" status_class)" = "done" ] \
+    || fail "the class the retired mate ended on was not recorded: $rec"
+  [ "$(field "$rec" outcome)" = discarded ] \
+    || fail "the terminal outcome was not recorded: $rec"
+  # The task record went with the home, so its axes are honestly unproven. The
+  # class is the one axis the capture rescues, and it must not read as an
+  # absence nothing established.
+  [ "$(field "$rec" model)" = unknown ] \
+    || fail "an unreadable task record should leave its axes unknown: $rec"
+  ledger "$CASE_HOME" verify >/dev/null || fail "the retirement left a malformed ledger"
+  pass "a retirement that removes its own home records the class it ended on"
+}
+
 # --- (m) refused cleanup ----------------------------------------------------
 
 test_a_refused_teardown_records_no_cleanup() {
@@ -1148,6 +1213,7 @@ test_retention_keeps_first_observed_and_the_horizon
 test_recording_never_rewrites_history
 test_invalid_requests_refuse_before_writing
 test_a_real_spawn_and_teardown_leave_the_task_attributable
+test_a_retirement_records_the_class_the_retired_mate_ended_on
 test_a_refused_teardown_records_no_cleanup
 test_pr_registration_records_the_canonical_pr_and_head
 test_an_approved_local_landing_records_its_commit
