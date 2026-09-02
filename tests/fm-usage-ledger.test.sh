@@ -45,6 +45,9 @@
 #   (l2) a spawn interrupted after launch delivery began, which preserves both a
 #        live worker and its task record, records that incarnation exactly as an
 #        uninterrupted spawn does
+#   (l3) a remote secondmate whose launch is preserved after its record is
+#        published records that incarnation once, whether or not the steps after
+#        the publication succeed
 #   (m) a REFUSED teardown records no cleanup, because its task is still live
 #   (n) fm-pr-check records the canonical PR and the forge's head when it has one
 #   (o) fm-merge-local records the landing commit for an approved local landing
@@ -1159,20 +1162,45 @@ test_an_unpinned_spawn_records_the_default_axis_not_a_blank_one() {
   pass "an unpinned spawn records the default axis rather than a not-applicable blank"
 }
 
+# Run the spawn as a background job so the fixture knows its pid exactly, rather
+# than deriving it from the interrupt wrapper's process ancestry: the fused
+# transition runs tasks-axi inside a command substitution, and whether bash
+# forks a subshell there or runs the command in place changes which ancestor is
+# the spawn. Output goes to a file because the job cannot be captured inline.
+run_lifecycle_spawn_recording_pid() {  # <pid-file> <out-file> <spawn args...>
+  local pidfile=$1 outfile=$2 pid rc=0
+  shift 2
+  FM_ROOT_OVERRIDE='' FM_HOME="$CASE_HOME" \
+    FM_STATE_OVERRIDE="$CASE_HOME/state" FM_DATA_OVERRIDE="$CASE_HOME/data" \
+    FM_PROJECTS_OVERRIDE="$CASE_HOME/projects" FM_CONFIG_OVERRIDE="$CASE_HOME/config" \
+    FM_BACKEND=tmux FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$CASE_WT" TMUX="fake,1,0" \
+    PATH="$CASE_FAKEBIN:$PATH" \
+    "$SPAWN" "$@" > "$outfile" 2>&1 < /dev/null &
+  pid=$!
+  printf '%s\n' "$pid" > "$pidfile"
+  wait "$pid" || rc=$?
+  return "$rc"
+}
+
 # Shadow tasks-axi with a wrapper that delegates every verb to the real binary
 # and, the first time the fused In-flight transition runs, terminates the spawn
 # once that transition has committed. That is the one window where a spawn
 # returns non-zero having preserved a live worker and its published record.
-interrupt_lifecycle_spawn_after_backlog_commit() {  # <marker>
-  local marker=$1 real
+interrupt_lifecycle_spawn_after_backlog_commit() {  # <marker> <pid-file>
+  local marker=$1 pidfile=$2 real
   real=$(command -v tasks-axi)
   cat > "$CASE_FAKEBIN/tasks-axi" <<SH
 #!/usr/bin/env bash
 if [ "\${1:-}" = start ] && [ ! -f "$marker" ]; then
   : > "$marker"
   "$real" "\$@" || exit \$?
-  spawn_pid=\$(ps -o ppid= -p "\$PPID" | tr -d ' ')
-  case "\$spawn_pid" in ''|*[!0-9]*) exit 1 ;; esac
+  spawn_pid=\$(cat "$pidfile" 2>/dev/null)
+  case "\$spawn_pid" in
+    ''|*[!0-9]*)
+      echo "interrupt fixture: no recorded spawn pid to signal" >&2
+      exit 1
+      ;;
+  esac
   kill -TERM "\$spawn_pid"
   exit 0
 fi
@@ -1196,10 +1224,13 @@ test_an_interrupted_but_preserved_spawn_is_still_recorded() {
   tasks-axi add "$id" "item for $id" --kind ship \
     --file "$CASE_HOME/data/backlog.md" >/dev/null \
     || fail "the backlog row this spawn transitions could not be seeded"
-  interrupt_lifecycle_spawn_after_backlog_commit "$TMP_ROOT/interrupted.start"
+  interrupt_lifecycle_spawn_after_backlog_commit "$TMP_ROOT/interrupted.start" \
+    "$TMP_ROOT/interrupted.pid"
 
-  out=$(run_lifecycle_spawn "$id" "$CASE_PROJ" --mode no-mistakes --yolo off \
-    --model opus --effort high) || rc=$?
+  run_lifecycle_spawn_recording_pid "$TMP_ROOT/interrupted.pid" \
+    "$TMP_ROOT/interrupted.out" "$id" "$CASE_PROJ" --mode no-mistakes --yolo off \
+    --model opus --effort high || rc=$?
+  out=$(cat "$TMP_ROOT/interrupted.out")
   [ "$rc" -eq 143 ] \
     || fail "an interrupted spawn did not exit on its deferred signal (rc=$rc): $out"
   assert_contains "$out" "interrupted after launch delivery began" \
@@ -1226,6 +1257,129 @@ test_an_interrupted_but_preserved_spawn_is_still_recorded() {
   ledger "$CASE_HOME" verify >/dev/null \
     || fail "the interrupted spawn left a malformed ledger"
   pass "a spawn interrupted after launch delivery still records its incarnation"
+}
+
+# --- (l3) a remote secondmate whose launch is preserved ---------------------
+#
+# The remote route never reaches the single-task path above: bin/fm-spawn.sh
+# hands the launch to the remote host and returns from spawn_remote_secondmate.
+# Its collaborators are stubbed here through a fake FM_ROOT of symlinks, so the
+# real script's own remote branch runs while the host boundary, the inheritance
+# push, the summary refresh, and the reply-source arming are deterministic. The
+# full route over the real SSH boundary is covered by
+# tests/fm-remote-secondmate-lifecycle-e2e.test.sh.
+
+# make_remote_secondmate_case <name> <id>: a parent home holding a remote route
+# for <id>, plus a fake FM_ROOT whose bin shadows only the four collaborators
+# this path shells out to. Sets RCASE_HOME, RCASE_ROOT.
+make_remote_secondmate_case() {
+  local name=$1 id=$2 base entry
+  base="$TMP_ROOT/$name"
+  RCASE_HOME="$base/home"
+  RCASE_ROOT="$base/root"
+  mkdir -p "$RCASE_HOME/data" "$RCASE_HOME/state" "$RCASE_HOME/config" \
+    "$RCASE_HOME/projects" "$RCASE_ROOT/bin"
+  touch "$RCASE_HOME/state/.last-watcher-beat"
+  for entry in "$ROOT"/bin/*; do
+    ln -s "$entry" "$RCASE_ROOT/bin/$(basename "$entry")"
+  done
+  printf '%s\n' \
+    '# Secondmates' \
+    '' \
+    "- $id - Remote build mate. (host: build-box; root: /srv/firstmate; home: /srv/fm-$id; scope: iOS delivery; projects: alpha; added 2026-01-01)" \
+    > "$RCASE_HOME/data/secondmates.md"
+  rm -f "$RCASE_ROOT/bin/fm-on.sh" "$RCASE_ROOT/bin/fm-remote-inherit-push.sh" \
+    "$RCASE_ROOT/bin/fm-home-summary-refresh.sh" \
+    "$RCASE_ROOT/bin/fm-procevent-remote-reply.sh"
+  cat > "$RCASE_ROOT/bin/fm-on.sh" <<'SH'
+#!/usr/bin/env bash
+# The remote host boundary: the readiness doctor passes, and the launch reports
+# the endpoint the real route reports.
+case "${2:-}" in
+  fm-remote-doctor.sh) exit 0 ;;
+  fm-remote-secondmate-control.sh)
+    printf 'backend=%s\n' herdr
+    printf 'target=%s\n' 'fm-remote:%1'
+    printf 'harness=%s\n' "${5:-}"
+    printf 'herdr_session=%s\n' fm-remote
+    exit 0
+    ;;
+esac
+exit 1
+SH
+  cat > "$RCASE_ROOT/bin/fm-remote-inherit-push.sh" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  cat > "$RCASE_ROOT/bin/fm-home-summary-refresh.sh" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  cat > "$RCASE_ROOT/bin/fm-procevent-remote-reply.sh" <<'SH'
+#!/usr/bin/env bash
+[ "${1:-}" != arm ] || [ -z "${FM_TEST_ARM_FAILS:-}" ] || exit 1
+exit 0
+SH
+  chmod +x "$RCASE_ROOT/bin/fm-on.sh" "$RCASE_ROOT/bin/fm-remote-inherit-push.sh" \
+    "$RCASE_ROOT/bin/fm-home-summary-refresh.sh" \
+    "$RCASE_ROOT/bin/fm-procevent-remote-reply.sh"
+}
+
+run_remote_secondmate_spawn() {
+  FM_ROOT_OVERRIDE="$RCASE_ROOT" FM_HOME="$RCASE_HOME" \
+    FM_STATE_OVERRIDE="$RCASE_HOME/state" FM_DATA_OVERRIDE="$RCASE_HOME/data" \
+    FM_PROJECTS_OVERRIDE="$RCASE_HOME/projects" FM_CONFIG_OVERRIDE="$RCASE_HOME/config" \
+    FM_SPAWN_NO_GUARD=1 \
+    "$RCASE_ROOT/bin/fm-spawn.sh" "$@" 2>&1
+}
+
+remote_spawn_row_count() {  # <home> <event-id>
+  local rows
+  rows=$(grep -c -F "\"id\":\"$2\"" "$(store "$1")" 2>/dev/null) || rows=0
+  printf '%s\n' "$rows"
+}
+
+test_a_remote_secondmate_that_cannot_arm_its_reply_source_is_still_recorded() {
+  local id out rc=0 gen rec
+  id=remote-arm-x1
+  make_remote_secondmate_case remote-arm "$id"
+
+  out=$(FM_TEST_ARM_FAILS=1 run_remote_secondmate_spawn "$id" --secondmate \
+    --harness claude --model opus --effort high) || rc=$?
+  [ "$rc" -eq 1 ] \
+    || fail "a remote secondmate whose reply source failed to arm did not fail (rc=$rc): $out"
+  assert_contains "$out" "reply source could not be armed; endpoint metadata is preserved" \
+    "the arm failure stopped reporting that it preserved the launched agent"
+  assert_present "$RCASE_HOME/state/$id.meta" \
+    "the arm failure removed the record its live remote agent is paired with"
+  gen=$(sed -n 's/^spawn_gen=//p' "$RCASE_HOME/state/$id.meta")
+  [ -n "$gen" ] || fail "the remote launch recorded no incarnation token"
+
+  # The remote agent is live and this home preserves its record, so this row is
+  # the only thing that can ever attribute it to a model.
+  [ "$(remote_spawn_row_count "$RCASE_HOME" "spawn:$id:$gen")" -eq 1 ] \
+    || fail "a preserved remote launch left no single usage row for its incarnation"
+  rec=$(record_for "$RCASE_HOME" "spawn:$id:$gen")
+  [ "$(field "$rec" harness)" = claude ] || fail "the preserved remote row lost the harness: $rec"
+  [ "$(field "$rec" model)" = opus ] || fail "the preserved remote row lost the model: $rec"
+  [ "$(field "$rec" effort)" = high ] || fail "the preserved remote row lost the effort: $rec"
+  [ "$(field "$rec" kind)" = secondmate ] || fail "the preserved remote row lost the kind: $rec"
+  [ "$(field "$rec" backend)" = herdr ] || fail "the preserved remote row lost the endpoint backend: $rec"
+
+  # A launch whose reply source does arm still records exactly one row, so the
+  # relocated append did not start double-recording the ordinary path.
+  id=remote-armed-x1
+  make_remote_secondmate_case remote-armed "$id"
+  rc=0
+  out=$(run_remote_secondmate_spawn "$id" --secondmate \
+    --harness claude --model opus --effort high) || rc=$?
+  [ "$rc" -eq 0 ] || fail "an armed remote secondmate spawn failed (rc=$rc): $out"
+  gen=$(sed -n 's/^spawn_gen=//p' "$RCASE_HOME/state/$id.meta")
+  [ "$(remote_spawn_row_count "$RCASE_HOME" "spawn:$id:$gen")" -eq 1 ] \
+    || fail "an armed remote launch did not record exactly one usage row"
+  ledger "$RCASE_HOME" verify >/dev/null \
+    || fail "the remote launch left a malformed ledger"
+  pass "a remote secondmate this home preserves records its incarnation either way"
 }
 
 test_a_retirement_records_the_axes_and_class_of_the_retired_mate() {
@@ -1562,6 +1716,7 @@ test_invalid_requests_refuse_before_writing
 test_a_real_spawn_and_teardown_leave_the_task_attributable
 test_an_unpinned_spawn_records_the_default_axis_not_a_blank_one
 test_an_interrupted_but_preserved_spawn_is_still_recorded
+test_a_remote_secondmate_that_cannot_arm_its_reply_source_is_still_recorded
 test_a_retirement_records_the_axes_and_class_of_the_retired_mate
 test_a_refused_teardown_records_no_cleanup
 test_pr_registration_records_the_canonical_pr_and_head

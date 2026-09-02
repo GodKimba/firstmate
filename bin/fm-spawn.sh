@@ -699,15 +699,18 @@ spawn_remote_secondmate() {
   fm_lock_release "$remote_lock" || true
   fm_lock_release "$registry_lock" || true
   fm_lock_release "$SPAWN_TASK_LOCK" || true
+  # A remote secondmate's task record is owned by this home, so its usage row
+  # belongs in this home's ledger too. It is written here, past the publication
+  # that committed that record and before every step below that can still fail
+  # while leaving the launched agent and its record in place, so an agent this
+  # home preserves is never invisible. Its incarnation is the inheritance
+  # generation this launch minted, so relaunching the same id is its own row.
+  fm_usage_ledger_record "$FM_HOME" "$STATE" "$DATA" spawn "$id" --meta "$meta"
   "$SCRIPT_DIR/fm-home-summary-refresh.sh" --best-effort || true
   if ! "$SCRIPT_DIR/fm-procevent-remote-reply.sh" arm "$id" >/dev/null; then
     echo "error: remote secondmate $id launched, but its reply source could not be armed; endpoint metadata is preserved" >&2
     return 1
   fi
-  # A remote secondmate's task record is owned by this home, so its usage row
-  # belongs in this home's ledger too. Its incarnation is the inheritance
-  # generation this launch minted, so relaunching the same id is its own row.
-  fm_usage_ledger_record "$FM_HOME" "$STATE" "$DATA" spawn "$id" --meta "$meta"
   echo "spawned $id harness=$harness kind=secondmate mode=secondmate yolo=off window=remote:$id worktree=$home remote=$host backend=$remote_backend"
   return 0
 }
@@ -832,6 +835,10 @@ spawn_abort_cleanup() {
         fi
         mkdir -p "$STATE" 2>/dev/null || true
         if [ -d "$STATE" ]; then
+          # This record exists BECAUSE the launch was abandoned and its Orca
+          # worktree survived, so it deliberately gets no spawn usage row: a row
+          # here would assert a worker that never ran. The ledger's spawn rows
+          # are written only past a commit point that a real launch reached.
           SPAWN_META_TMP="$STATE/.$ID.meta.orca-recovery.${BASHPID:-$$}"
           {
             echo "window=$W"
