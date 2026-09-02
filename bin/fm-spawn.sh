@@ -739,6 +739,7 @@ SPAWN_META_LOCK=
 SPAWN_META_LOCK_HELD=0
 SPAWN_META_PUBLISH_STARTED=0
 SPAWN_FRESH_COMMIT_PENDING=0
+SPAWN_USAGE_ROW_RECORDED=0
 SPAWN_TASK_SET_LOCK=
 SPAWN_TASK_SET_LOCK_HELD=0
 RELAUNCH_REPLACEMENT_PENDING=0
@@ -2947,6 +2948,24 @@ spawn_commit_backlog_transition() {
   fm_backlog_atomic_transition dispatch "$STATE/$ID.meta" "$DATA" "$ID" "$STATE"
 }
 
+# The single owner of this incarnation's durable usage row, called as the
+# statement immediately after each point that leaves a launch's task record
+# committed beyond rollback, so no code can sit between a commit and its row for
+# a later early return, signal exit, or error path to slip into. Recording twice
+# is a no-op, so the two local commit points - a relaunch's replacement
+# publication and a fresh spawn's fused In-flight transition - yield exactly one
+# row per incarnation, and a relaunch mints a new spawn_gen so its replacement
+# worker is its own row. It reaches every harness and every spawn-capable
+# backend because the single-task path is the one place all of them converge,
+# and a batch re-execs that path once per pair. Never gates the lifecycle: the
+# call policy in bin/fm-usage-ledger-lib.sh warns and returns 0.
+spawn_record_usage_row() {
+  [ "$SPAWN_USAGE_ROW_RECORDED" = 0 ] || return 0
+  SPAWN_USAGE_ROW_RECORDED=1
+  fm_usage_ledger_record "$FM_HOME" "$STATE" "$DATA" spawn "$ID" \
+    --meta "$STATE/$ID.meta"
+}
+
 if [ "$RELAUNCH" -eq 1 ]; then
   SPAWN_META_PUBLISH_STARTED=1
   if ! fm_backlog_atomic_transition publish "$SPAWN_META_TMP" "$STATE/$ID.meta" "task record" "$STATE"; then
@@ -2956,6 +2975,10 @@ if [ "$RELAUNCH" -eq 1 ]; then
   RELAUNCH_REPLACEMENT_PENDING=0
   SPAWN_META_PUBLISH_STARTED=0
   SPAWN_META_TMP=
+  # Nothing rolls a replacement record or its busy generation back from here, so
+  # this is where the relaunch's record becomes permanent and every later exit
+  # leaves a live replacement worker behind.
+  spawn_record_usage_row
 fi
 # A dispatch or relaunch keeps the per-task meta lock through launch delivery.
 # The backlog mutation is deliberately the final fallible commit below, so
@@ -3043,6 +3066,10 @@ spawn_record_traceparent() {
     SPAWN_META_LOCK_HELD=1
     acquired=1
   fi
+  # This publication updates a record that already exists rather than creating
+  # an incarnation, so it deliberately gets no usage row of its own: the launch
+  # it belongs to records once at its own commit point, and a second row here
+  # would double-count one incarnation.
   SPAWN_META_TMP="$STATE/.$ID.meta.trace.${BASHPID:-$$}"
   if [ ! -f "$meta" ] || [ ! -w "$meta" ] \
      || ! awk -F= '$1 != "traceparent"' "$meta" > "$SPAWN_META_TMP" \
@@ -3161,19 +3188,15 @@ trap - HUP INT TERM
 if [ "$SPAWN_BACKLOG_COMMIT_STATUS" -ne 0 ]; then
   exit "$SPAWN_BACKLOG_COMMIT_STATUS"
 fi
-fm_lock_release "$SPAWN_META_LOCK"
+fm_lock_release "$SPAWN_META_LOCK" || true
 SPAWN_META_LOCK_HELD=0
-
-# The durable usage record for this incarnation. It is written here, past the
-# commit point and before the deferred-signal return below, so it describes a
-# worker that actually launched and an interruption that preserved a live worker
-# is recorded exactly like an uninterrupted spawn - a rolled-back or failed
-# dispatch has already exited above and still records nothing. It reaches every
-# harness and every spawn-capable backend because the single-task path below is
-# the one place all of them converge (a batch re-execs it per pair, and a
-# relaunch mints a new spawn_gen so its replacement worker is its own row).
-fm_usage_ledger_record "$FM_HOME" "$STATE" "$DATA" spawn "$ID" \
-  --meta "$STATE/$ID.meta"
+# A fresh spawn's record becomes permanent here and not at its publication: a
+# failed or rolled-back dispatch has already exited above, and every earlier
+# launch-delivery failure unwound the provisional record, so this is the first
+# point at which a fresh launch is committed. The release above is deliberately
+# non-fatal so nothing can exit between that commit and the row, and the row
+# stays outside the meta lock so a slow ledger cannot hold a lifecycle lock.
+spawn_record_usage_row
 
 if [ -n "$SPAWN_DEFERRED_SIGNAL" ]; then
   case "$SPAWN_DEFERRED_SIGNAL" in
