@@ -39,11 +39,15 @@
 #       with the task's axes and its final status class intact after
 #       state/<id>.meta and state/<id>.status are gone, including a secondmate
 #       retirement that removes the very home both of those lived in
+#   (l1) a spawn with no model or effort pinned records the writer's own
+#        "default" for both, never the blank that would claim no such axis
 #   (m) a REFUSED teardown records no cleanup, because its task is still live
 #   (n) fm-pr-check records the canonical PR and the forge's head when it has one
 #   (o) fm-merge-local records the landing commit for an approved local landing
 #   (p) a ledger write failure never turns a completed lifecycle step into one,
-#       and an unreadable status class is reported rather than silently guessed
+#       a store lock that can never be taken refuses at its bound rather than
+#       blocking the step it instruments, and an unreadable status class is
+#       reported rather than silently guessed
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -1093,6 +1097,29 @@ test_a_real_spawn_and_teardown_leave_the_task_attributable() {
   pass "a real spawn and teardown leave the task attributable after its record is gone"
 }
 
+test_an_unpinned_spawn_records_the_default_axis_not_a_blank_one() {
+  local id out gen rec
+  make_lifecycle_case unpinned
+  id=unpinned-x1
+  mkdir -p "$CASE_HOME/data/$id"
+  printf 'Delivery contract: mode=no-mistakes\nbrief\n' > "$CASE_HOME/data/$id/brief.md"
+
+  # No --model and no --effort. Both axes still APPLY to this task, so the
+  # record has to name what the launch actually pinned - nothing - rather than
+  # the empty string this schema reads as "the axis does not apply".
+  out=$(run_lifecycle_spawn "$id" "$CASE_PROJ" --mode no-mistakes --yolo off) \
+    || fail "an unpinned spawn failed: $out"
+  gen=$(sed -n 's/^spawn_gen=//p' "$CASE_HOME/state/$id.meta")
+  [ -n "$gen" ] || fail "spawn recorded no incarnation token"
+  rec=$(record_for "$CASE_HOME" "spawn:$id:$gen")
+  [ -n "$rec" ] || fail "an unpinned spawn wrote no usage record"
+  [ "$(field "$rec" model)" = default ] \
+    || fail "an unpinned model should record fm-spawn's own default value: $rec"
+  [ "$(field "$rec" effort)" = default ] \
+    || fail "an unpinned effort should record fm-spawn's own default value: $rec"
+  pass "an unpinned spawn records the default axis rather than a not-applicable blank"
+}
+
 test_a_retirement_records_the_axes_and_class_of_the_retired_mate() {
   local id home_path ctl out rec
   make_lifecycle_case nested-sm
@@ -1318,6 +1345,52 @@ test_a_failed_ledger_write_never_fails_the_lifecycle_step() {
   pass "a refused ledger write warns loudly and never fails the lifecycle step"
 }
 
+test_a_lock_that_can_never_be_taken_refuses_within_its_bound() {
+  local home started elapsed rc out err
+  home=$(make_home lock-unacquirable)
+  write_task_meta "$home" alpha-x1
+  # A regular file where the store's lock directory must go can never be
+  # acquired, the same permanent refusal a read-only or full data device gives.
+  # An unbounded wait would spin here forever, inside a lifecycle step the
+  # ledger is only observing.
+  : > "$home/data/.task-usage.jsonl.lock"
+
+  started=$(date +%s)
+  set +e
+  err=$(FM_ROOT_OVERRIDE='' FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_USAGE_LEDGER_LOCK_TIMEOUT=2 \
+    "$LEDGER" record --event spawn --task alpha-x1 \
+    --meta "$home/state/alpha-x1.meta" 2>&1 >/dev/null)
+  rc=$?
+  set -e
+  elapsed=$(( $(date +%s) - started ))
+  expect_code 1 "$rc" "a lock that can never be taken should refuse"
+  [ "$elapsed" -lt 60 ] \
+    || fail "the record waited ${elapsed}s instead of refusing at its bound"
+  assert_contains "$err" "lock could not be taken" \
+    "the refusal did not name the lock it could not take: $err"
+  assert_absent "$(store "$home")" "a refused acquisition still created the store"
+
+  # And the call policy turns that refusal into a warning, never a failure of
+  # the step it instruments.
+  started=$(date +%s)
+  set +e
+  out=$( . "$ROOT/bin/fm-usage-ledger-lib.sh"
+    FM_USAGE_LEDGER_LOCK_TIMEOUT=2 \
+      fm_usage_ledger_record "$home" "$home/state" "$home/data" \
+      spawn alpha-x1 --meta "$home/state/alpha-x1.meta" 2>&1 )
+  rc=$?
+  set -e
+  elapsed=$(( $(date +%s) - started ))
+  expect_code 0 "$rc" "an unacquirable lock must never fail the lifecycle step"
+  [ "$elapsed" -lt 60 ] \
+    || fail "the call policy waited ${elapsed}s instead of warning at its bound"
+  assert_contains "$out" "task-usage ledger did not record" \
+    "the bounded refusal was not reported loudly: $out"
+  pass "a lock that can never be taken refuses at its bound instead of blocking"
+}
+
 test_an_unreadable_status_class_is_reported_rather_than_substituted() {
   local dir home rc
   dir="$TMP_ROOT/status-class-policy"
@@ -1378,9 +1451,11 @@ test_retention_keeps_first_observed_and_the_horizon
 test_recording_never_rewrites_history
 test_invalid_requests_refuse_before_writing
 test_a_real_spawn_and_teardown_leave_the_task_attributable
+test_an_unpinned_spawn_records_the_default_axis_not_a_blank_one
 test_a_retirement_records_the_axes_and_class_of_the_retired_mate
 test_a_refused_teardown_records_no_cleanup
 test_pr_registration_records_the_canonical_pr_and_head
 test_an_approved_local_landing_records_its_commit
 test_a_failed_ledger_write_never_fails_the_lifecycle_step
+test_a_lock_that_can_never_be_taken_refuses_within_its_bound
 test_an_unreadable_status_class_is_reported_rather_than_substituted

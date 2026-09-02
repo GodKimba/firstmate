@@ -724,6 +724,20 @@ assert_grep '--session fm-remote' "$HERDR_LOG" "remote launch did not target the
 assert_no_grep '--session default' "$HERDR_LOG" "remote launch targeted the interactive default session"
 assert_grep 'window=remote:ios' "$PARENT/state/ios.meta" "parent metadata pretended the endpoint was local"
 assert_present "$PARENT/state/procevent/remote-reply-ios.source" "remote spawn did not arm its reply source"
+# No --model and no --effort were passed and none is configured, so both axes
+# are unpinned. The remote writer records that the same way the local one does,
+# and the durable usage row reads it back as an unpinned axis rather than as a
+# task that had no model axis at all.
+assert_grep 'model=default' "$PARENT/state/ios.meta" \
+  "an unpinned remote model was not recorded as the writer's own default"
+assert_grep 'effort=default' "$PARENT/state/ios.meta" \
+  "an unpinned remote effort was not recorded as the writer's own default"
+remote_usage_row=$(grep -F '"id":"spawn:ios:unknown"' "$PARENT/data/task-usage.jsonl") \
+  || fail "the remote secondmate spawn wrote no task-usage record"
+assert_contains "$remote_usage_row" '"model":"default"' \
+  "the remote spawn's usage record claims the task had no model axis"
+assert_contains "$remote_usage_row" '"effort":"default"' \
+  "the remote spawn's usage record claims the task had no effort axis"
 publish_healthy_watcher_identity "$PARENT/state" "$PARENT" "$ROOT/bin/fm-watch.sh"
 [ "$(remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh state ios)" = alive ] \
   || fail "remote endpoint was not projected alive from its own host"

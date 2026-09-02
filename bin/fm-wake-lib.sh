@@ -17,7 +17,9 @@ _FM_UNAME=$(uname 2>/dev/null || echo unknown)
 # sourcing this library never creates a state directory it was merely pointed
 # at. bin/fm-usage-ledger.sh does: its instrumentation can name a home a
 # retirement has already removed, and putting that home back would undo a
-# removal the caller just proved.
+# removal the caller just proved. fm_lock_acquire_wait_bounded re-sources this
+# library in its timed helper, so it forwards the setting rather than letting a
+# contended acquire recreate what the ordinary path was told not to.
 [ "${FM_WAKE_LOCKS_ONLY:-}" = 1 ] || mkdir -p "$STATE"
 
 # Most wake-library consumers need only queue and lock primitives, including
@@ -964,6 +966,7 @@ fm_lock_acquire_wait_bounded() {
     "FM_STATE_OVERRIDE=$STATE" \
     "FM_ROOT_OVERRIDE=$FM_ROOT" \
     "FM_LOCK_STALE_AFTER=$FM_LOCK_STALE_AFTER" \
+    "FM_WAKE_LOCKS_ONLY=${FM_WAKE_LOCKS_ONLY:-}" \
     bash -c '. "$1"; _fm_lock_acquire_wait_handoff "$2" "$3"' \
       _ "$FM_WAKE_LIB_DIR/fm-wake-lib.sh" "$lockdir" "$caller_pid" \
       </dev/null >/dev/null 2>&1; then

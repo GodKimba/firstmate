@@ -162,6 +162,13 @@
 # Forward compatibility: a record whose v is not 1 is accepted as opaque if it
 # still carries the common v/seq/at/event/id prefix, so a newer writer's rows
 # are preserved rather than declared malformed.
+# `record` takes the lock with a BOUND, FM_USAGE_LEDGER_LOCK_TIMEOUT seconds
+# (default 60, generous enough that ordinary contention still wins it), and
+# refuses when that expires. A data directory the lock can never be created in -
+# read-only, full, or another user's - would otherwise leave the caller waiting
+# forever inside the lifecycle step it is only instrumenting; refusing hands the
+# failure to the warning path bin/fm-usage-ledger-lib.sh owns. `prune` is an
+# explicit operator command and waits.
 #
 # RETENTION. History is bounded ONLY by the explicit `prune` verb. No lifecycle
 # call ever rewrites history, so an unrelated task mutation cannot lose a row.
@@ -238,6 +245,9 @@ FM_WAKE_LOCKS_ONLY=1
 STORE_NAME='task-usage.jsonl'
 SCHEMA_VERSION=1
 RETENTION_DAYS=${FM_USAGE_LEDGER_RETENTION_DAYS:-400}
+# The bound `record` puts on taking the store lock, see SAFETY.
+RECORD_LOCK_TIMEOUT=${FM_USAGE_LEDGER_LOCK_TIMEOUT:-60}
+case "$RECORD_LOCK_TIMEOUT" in ''|*[!0-9]*|0) RECORD_LOCK_TIMEOUT=60 ;; esac
 # One free-form field's bound.
 UL_FIELD_MAX=200
 # The PR/MR URL's own bound. It is identity-bearing rather than a label, so it
@@ -696,9 +706,9 @@ if [ "$CMD" = prune ]; then
       DROPPED=$((DROPPED + 1))
       continue
     fi
-    printf '%s\n' "$line" >> "$PRUNE_TMP" || die "task-usage ledger retention could not be staged"
+    printf '%s\n' "$line" || die "task-usage ledger retention could not be staged"
     KEPT=$((KEPT + 1))
-  done < "$STORE"
+  done < "$STORE" >> "$PRUNE_TMP"
   if [ "$DROPPED" -eq 0 ]; then
     rm -f -- "$PRUNE_TMP"
     PRUNE_TMP=
@@ -821,7 +831,8 @@ IDENTITY=$(ul_clean "$IDENTITY" "$UL_IDENTITY_MAX")
 if [ ! -d "$DATA" ] || [ -L "$DATA" ]; then
   die "data directory is unavailable: $DATA"
 fi
-fm_lock_acquire_wait "$LOCK"
+fm_lock_acquire_wait_bounded "$LOCK" "$RECORD_LOCK_TIMEOUT" \
+  || die "task-usage ledger lock could not be taken within ${RECORD_LOCK_TIMEOUT}s at $LOCK"
 trap record_cleanup EXIT
 trap 'exit 1' HUP INT TERM
 ul_store_open

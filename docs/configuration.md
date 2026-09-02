@@ -225,6 +225,7 @@ There is no shared learnings file by captain decision.
 `data/task-usage.jsonl` is a durable, home-private, append-only record of which harness, model, and workflow produced each task's outcome.
 It exists because a task's implementation axes live only in `state/<id>.meta`, which ordinary successful cleanup deletes, so a merged pull request could not afterwards be joined to the model that produced it.
 The ledger is gitignored like the rest of `data/`, is created at mode `0600`, and is never read by the orchestrator; nothing in the fleet's behavior depends on it, and a record that cannot be written warns rather than failing the lifecycle step it describes.
+That includes a `data/` directory the write can never take its lock in, such as a read-only or full device: a lifecycle record gives up after `FM_USAGE_LEDGER_LOCK_TIMEOUT` seconds (default 60) and warns, instead of holding the spawn or cleanup it is only observing.
 Records are written as a task is dispatched, registers a pull or merge request, lands, and is cleaned up; [architecture.md](architecture.md#task-attribution-outlives-cleanup) owns which script writes each one and why those points were chosen.
 
 [`bin/fm-usage-ledger.sh`](../bin/fm-usage-ledger.sh)'s header is the single owner of the record schema, the stored-field allowlist and its privacy boundary, the event-identity rules that make repeated calls idempotent, and the safety and retention mechanics.

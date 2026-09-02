@@ -1281,11 +1281,14 @@ families_for_changed_path() {
       # The same families as the dispatch-surface arm below, plus the ledger:
       # fm-spawn.sh is the one script in that group carrying ledger call sites
       # (the post-commit point and the remote-secondmate launch), whose only
-      # regression lives in the pr-forge family. Select that one script rather
-      # than the whole family.
+      # regression lives in the pr-forge family. The remote-secondmate task
+      # record is written on a path no portable family drives, and only the
+      # secondmate family's full remote launch proves what it records. Select
+      # those two scripts rather than either whole family.
       printf '%s\n' backend-dispatch
       printf '%s\n' pure-contract-unit
       printf '%s\n' "__script__:fm-usage-ledger.test.sh"
+      printf '%s\n' "__script__:fm-remote-secondmate-lifecycle-e2e.test.sh"
       ;;
     bin/fm-send.sh|bin/fm-harness.sh|\
     bin/fm-peek.sh|bin/fm-composer*)
