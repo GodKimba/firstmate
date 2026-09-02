@@ -48,6 +48,9 @@
 #   (l3) a remote secondmate whose launch is preserved after its record is
 #        published records that incarnation once, whether or not the steps after
 #        the publication succeed
+#   (l4) a forced retirement records every task it discards inside that home, at
+#        every nesting depth, into the home that survives the operation, because
+#        each discarded task's own ledger goes with the home holding it
 #   (m) a REFUSED teardown records no cleanup, because its task is still live
 #   (n) fm-pr-check records the canonical PR and the forge's head when it has one
 #   (o) fm-merge-local records the landing commit for an approved local landing
@@ -1385,7 +1388,7 @@ test_a_remote_secondmate_that_cannot_arm_its_reply_source_is_still_recorded() {
 test_a_retirement_records_the_axes_and_class_of_the_retired_mate() {
   local id home_path ctl out rec
   make_lifecycle_case nested-sm
-  id=nested-sm-x1
+  id="nested-sm-x1"
   # The retired mate's own home carries the overridden control state directory,
   # so removing that home takes BOTH its status log and its task record with
   # it. The class the mate ended on and the axes it ran on both have to be read
@@ -1449,6 +1452,145 @@ test_a_retirement_records_the_axes_and_class_of_the_retired_mate() {
     "the retired home's path reached the ledger"
   ledger "$CASE_HOME" verify >/dev/null || fail "the retirement left a malformed ledger"
   pass "a retirement that removes its own home records the axes and class it ran on"
+}
+
+test_a_forced_retirement_records_every_task_it_discards() {
+  local id home_path ctl nested out rec
+  make_lifecycle_case swept-sm
+  id="swept-sm-x1"
+  # A forced retirement does not only remove the mate: it sweeps every task
+  # still inside that home, at any nesting depth, and each of those tasks owns
+  # a ledger that is deleted with the home holding it. Without a row in the
+  # home that SURVIVES, the discarded work is attributable to nothing at all -
+  # the same gap the mate's own record above closes, one level down.
+  home_path="$TMP_ROOT/swept-sm/secondmate-home"
+  ctl="$home_path/control-state"
+  nested="$home_path/nested-home"
+  mkdir -p "$home_path/state" "$home_path/data" "$home_path/config" \
+    "$home_path/projects" "$ctl" \
+    "$nested/state" "$nested/data" "$nested/config" "$nested/projects"
+  printf '%s\n' "$id" > "$home_path/.fm-secondmate-home"
+  printf '%s\n' swept-child-sm > "$nested/.fm-secondmate-home"
+  touch "$ctl/.last-watcher-beat"
+  fm_write_meta "$ctl/$id.meta" \
+    "window=firstmate:fm-$id" \
+    "endpoint_task_id=$id" \
+    "worktree=$CASE_WT" \
+    "project=$CASE_PROJ" \
+    "harness=claude" \
+    "kind=secondmate" \
+    "mode=secondmate" \
+    "yolo=off" \
+    "model=opus" \
+    "effort=high" \
+    "home=$home_path" \
+    "spawn_gen=g-swept"
+  printf '%s\n' 'done: handed back' > "$ctl/$id.status"
+
+  # A ship task the mate was still running, on its own worktree and its own
+  # axes, which are deliberately different from the mate's so a row cannot pass
+  # by inheriting the retirement's values.
+  git -C "$CASE_PROJ" worktree add -q -b fm/swept-child "$TMP_ROOT/swept-sm/child-wt"
+  fm_write_meta "$home_path/state/swept-child.meta" \
+    "window=firstmate:fm-swept-child" \
+    "endpoint_task_id=swept-child" \
+    "worktree=$TMP_ROOT/swept-sm/child-wt" \
+    "project=$CASE_PROJ" \
+    "harness=codex" \
+    "kind=ship" \
+    "mode=no-mistakes" \
+    "yolo=off" \
+    "model=gpt-5" \
+    "effort=low" \
+    "spawn_gen=g-child"
+  printf '%s\n' 'working: mid-flight' 'blocked: waiting, captain notes were sensitive' \
+    > "$home_path/state/swept-child.status"
+
+  # A nested mate of its own, holding one more task. The sweep recurses, so the
+  # grandchild has to be recorded before the home it lives in is removed.
+  fm_write_meta "$home_path/state/swept-child-sm.meta" \
+    "window=firstmate:fm-swept-child-sm" \
+    "endpoint_task_id=swept-child-sm" \
+    "worktree=$nested" \
+    "project=$CASE_PROJ" \
+    "harness=pi" \
+    "kind=secondmate" \
+    "mode=secondmate" \
+    "yolo=off" \
+    "model=sonnet" \
+    "effort=medium" \
+    "home=$nested" \
+    "spawn_gen=g-child-sm"
+  git -C "$CASE_PROJ" worktree add -q -b fm/swept-grandchild "$TMP_ROOT/swept-sm/grandchild-wt"
+  fm_write_meta "$nested/state/swept-grandchild.meta" \
+    "window=firstmate:fm-swept-grandchild" \
+    "endpoint_task_id=swept-grandchild" \
+    "worktree=$TMP_ROOT/swept-sm/grandchild-wt" \
+    "project=$CASE_PROJ" \
+    "harness=cursor" \
+    "kind=scout" \
+    "model=composer" \
+    "effort=xhigh" \
+    "spawn_gen=g-grandchild"
+  printf '%s\n' 'done: reported' > "$nested/state/swept-grandchild.status"
+
+  out=$(FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$CASE_HOME" \
+    FM_STATE_OVERRIDE="$ctl" FM_DATA_OVERRIDE="$CASE_HOME/data" \
+    FM_PROJECTS_OVERRIDE="$CASE_HOME/projects" FM_CONFIG_OVERRIDE="$CASE_HOME/config" \
+    FM_TEARDOWN_GUARD_DONE=1 PATH="$CASE_FAKEBIN:$PATH" \
+    "$TEARDOWN" "$id" --force 2>&1) || fail "the forced retirement failed: $out"
+  assert_absent "$home_path" "the forced retirement left the retired home behind"
+
+  # The ship child: its own axes, its own incarnation, and the class it was
+  # actually stopped on - not the mate's, and not "unknown".
+  rec=$(record_for "$CASE_HOME" "cleanup:swept-child:g-child")
+  [ -n "$rec" ] || fail "the discarded child task wrote no usage record"
+  [ "$(field "$rec" harness)" = codex ] \
+    || fail "the discarded child's harness was not recorded: $rec"
+  [ "$(field "$rec" model)" = gpt-5 ] \
+    || fail "the discarded child's model was not recorded: $rec"
+  [ "$(field "$rec" effort)" = low ] \
+    || fail "the discarded child's effort was not recorded: $rec"
+  [ "$(field "$rec" kind)" = ship ] \
+    || fail "the discarded child's kind was not recorded: $rec"
+  [ "$(field "$rec" mode)" = no-mistakes ] \
+    || fail "the discarded child's delivery mode was not recorded: $rec"
+  [ "$(field "$rec" outcome)" = discarded ] \
+    || fail "the discarded child's terminal outcome was not recorded: $rec"
+  # The sweep retires the status log before it removes the record, so the class
+  # has to have been captured ahead of both.
+  [ "$(field "$rec" status_class)" = blocked ] \
+    || fail "the class the discarded child stopped on was not recorded: $rec"
+
+  # The nested mate and the task inside it, one level further down.
+  rec=$(record_for "$CASE_HOME" "cleanup:swept-child-sm:g-child-sm")
+  [ -n "$rec" ] || fail "the discarded nested mate wrote no usage record"
+  [ "$(field "$rec" harness)" = pi ] \
+    || fail "the discarded nested mate's harness was not recorded: $rec"
+  [ "$(field "$rec" kind)" = secondmate ] \
+    || fail "the discarded nested mate's kind was not recorded: $rec"
+  rec=$(record_for "$CASE_HOME" "cleanup:swept-grandchild:g-grandchild")
+  [ -n "$rec" ] || fail "the discarded grandchild task wrote no usage record"
+  [ "$(field "$rec" harness)" = cursor ] \
+    || fail "the discarded grandchild's harness was not recorded: $rec"
+  [ "$(field "$rec" model)" = composer ] \
+    || fail "the discarded grandchild's model was not recorded: $rec"
+  [ "$(field "$rec" kind)" = scout ] \
+    || fail "the discarded grandchild's kind was not recorded: $rec"
+  [ "$(field "$rec" status_class)" = "done" ] \
+    || fail "the class the discarded grandchild ended on was not recorded: $rec"
+
+  # The mate's own row is still there, so the sweep added to the retirement
+  # rather than replacing it.
+  [ -n "$(record_for "$CASE_HOME" "cleanup:$id:g-swept")" ] \
+    || fail "the sweep lost the retired mate's own record"
+  assert_no_grep "captain notes were sensitive" "$(store "$CASE_HOME")" \
+    "a discarded task's free-form status note reached the ledger"
+  assert_no_grep "$home_path" "$(store "$CASE_HOME")" \
+    "a discarded home's path reached the ledger"
+  ledger "$CASE_HOME" verify >/dev/null \
+    || fail "the forced retirement left a malformed ledger"
+  pass "a forced retirement records every task it discards, at every nesting depth"
 }
 
 # --- (m) refused cleanup ----------------------------------------------------
@@ -1718,6 +1860,7 @@ test_an_unpinned_spawn_records_the_default_axis_not_a_blank_one
 test_an_interrupted_but_preserved_spawn_is_still_recorded
 test_a_remote_secondmate_that_cannot_arm_its_reply_source_is_still_recorded
 test_a_retirement_records_the_axes_and_class_of_the_retired_mate
+test_a_forced_retirement_records_every_task_it_discards
 test_a_refused_teardown_records_no_cleanup
 test_pr_registration_records_the_canonical_pr_and_head
 test_an_approved_local_landing_records_its_commit

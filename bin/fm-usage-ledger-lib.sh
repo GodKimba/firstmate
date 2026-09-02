@@ -8,7 +8,11 @@
 #
 #   - The effective home is passed explicitly (home, state, and data), never
 #     inherited, so a secondmate home or an override-driven test home always
-#     records into its own ledger rather than resolving a different one.
+#     records into its own ledger rather than resolving a different one. The
+#     single exception is a caller sweeping homes its own operation deletes,
+#     which passes the surviving home because a row in a deleted one would go
+#     with it; bin/fm-teardown.sh's forced-retirement child sweep is that
+#     caller, and docs/architecture.md owns why.
 #   - Recording is INSTRUMENTATION, never a gate. A launch that already
 #     succeeded, a merge that already landed, and a cleanup whose safety checks
 #     already passed must not be turned into a failure because an observability

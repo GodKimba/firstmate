@@ -227,6 +227,7 @@ It exists because a task's implementation axes live only in `state/<id>.meta`, w
 The ledger is gitignored like the rest of `data/`, is created at mode `0600`, and is never read by the orchestrator; nothing in the fleet's behavior depends on it, and a record that cannot be written warns rather than failing the lifecycle step it describes.
 That includes a `data/` directory the write can never take its lock in, such as a read-only or full device: a lifecycle record gives up after `FM_USAGE_LEDGER_LOCK_TIMEOUT` seconds (default 60) and warns, instead of holding the spawn or cleanup it is only observing.
 Records are written as a task is dispatched, registers a pull or merge request, lands, and is cleaned up; [architecture.md](architecture.md#task-attribution-outlives-cleanup) owns which script writes each one and why those points were chosen.
+A forced secondmate retirement discards every task still inside that home along with the home's own ledger, so each discarded task, at any nesting depth, is recorded in the retiring home's ledger instead of the one being deleted.
 
 [`bin/fm-usage-ledger.sh`](../bin/fm-usage-ledger.sh)'s header is the single owner of the record schema, the stored-field allowlist and its privacy boundary, the event-identity rules that make repeated calls idempotent, and the safety and retention mechanics.
 Read it before parsing the file or reasoning about what the file may contain.
@@ -238,9 +239,8 @@ Run `verify` if you suspect the file was damaged by something other than Firstma
 History is bounded only by the explicit `bin/fm-usage-ledger.sh prune` command, whose horizon is `FM_USAGE_LEDGER_RETENTION_DAYS` (default 400 days, so 30-day, quarterly, and year-over-year comparisons all still resolve).
 No lifecycle step ever prunes, so recording one task cannot rewrite another task's history; at a few hundred bytes per record a busy home costs single-digit megabytes a year, which is why retention is an operator decision rather than an automatic one.
 
-Two limitations bound what the file can answer, beyond the coverage start and unproven-axis rules its owner documents.
+One limitation bounds what the file can answer, beyond the coverage start and unproven-axis rules its owner documents.
 Firstmate cannot currently prove which agent the no-mistakes pipeline ran, so a task's validator identity is never filled in from the worker that implemented it.
-A forced secondmate retirement deletes that home along with its own ledger, so the retired mate's child tasks remain visible only as the parent's single retirement record.
 
 ## Startup memory budget (config/startup-memory-budget)
 

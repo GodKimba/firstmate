@@ -2501,11 +2501,20 @@ preflight_firstmate_home_herdr_children() {  # <home>
 
 cleanup_firstmate_home_children() {
   local home=$1 sub_state child_meta child_id child_t child_wt child_proj child_kind child_home child_backend child_orca_worktree_id child_return_rc child_busy_gen
+  local child_status_class child_axes
   sub_state="$home/state"
   [ -d "$sub_state" ] || return 0
   for child_meta in "$sub_state"/*.meta; do
     [ -e "$child_meta" ] || continue
     child_id=$(basename "$child_meta" .meta)
+    # This frame retires the child's status log and removes its task record,
+    # and the home both live in is deleted right after, so the child's OWN
+    # ledger goes with them. Capture both before any removal below, exactly as
+    # the retirement of this home's own task does, and append the row further
+    # down to the home that survives the operation.
+    child_status_class=$(fm_usage_ledger_status_class "$FM_HOME" "$STATE" "$DATA" \
+      "$sub_state/$child_id.status")
+    child_axes=$(fm_usage_ledger_axes "$FM_HOME" "$STATE" "$DATA" "$child_meta")
     child_wt=$(meta_value "$child_meta" worktree)
     child_proj=$(meta_value "$child_meta" project)
     child_kind=$(meta_value "$child_meta" kind)
@@ -2584,6 +2593,16 @@ cleanup_firstmate_home_children() {
     fi
     retire_busy_state "$sub_state" "$child_id" "$child_busy_gen" || return 1
     status_retire_presentation_task "$sub_state" "$child_id" || return 1
+    # Past every refusal above, so a child whose cleanup was refused leaves no
+    # row, and the last read of its task record before it is removed. This path
+    # only runs under --force, so the outcome is a discard.
+    if [ -n "$child_axes" ]; then
+      fm_usage_ledger_record "$FM_HOME" "$STATE" "$DATA" cleanup "$child_id" \
+        --axes "$child_axes" --outcome discarded --status-class "$child_status_class"
+    else
+      fm_usage_ledger_record "$FM_HOME" "$STATE" "$DATA" cleanup "$child_id" \
+        --meta "$child_meta" --outcome discarded --status-class "$child_status_class"
+    fi
     fm_backlog_atomic_transition remove "$sub_state/$child_id.meta" "task record" "$sub_state" || return 1
     rm -f "$sub_state/$child_id.turn-ended" \
       "$sub_state/$child_id.pi-ext.ts" \
