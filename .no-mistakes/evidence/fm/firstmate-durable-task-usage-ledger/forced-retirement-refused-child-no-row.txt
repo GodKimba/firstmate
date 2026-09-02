@@ -1,0 +1,14 @@
+
+=== RUN: fm-teardown.sh refuse-demo-x1 --force (child worktree is unsafe to remove) ===
+  REFUSED: unsafe child worktree removal target /tmp/fm-usage-ledger.6UpDod/refuse-demo/not-a-worktree is not a git worktree for /tmp/fm-usage-ledger.6UpDod/refuse-demo/project
+  exit=1
+
+=== The refused child is still live: its task record and home survive ===
+  still present  /tmp/fm-usage-ledger.6UpDod/refuse-demo/secondmate-home
+  still present  /tmp/fm-usage-ledger.6UpDod/refuse-demo/secondmate-home/state/refused-child.meta
+  still present  /tmp/fm-usage-ledger.6UpDod/refuse-demo/secondmate-home/state/refused-child.status
+
+=== Surviving parent ledger: no cleanup row for a task that is still live ===
+  the ledger was never even created
+
+  rows mentioning refused-child: 0 (expected 0)

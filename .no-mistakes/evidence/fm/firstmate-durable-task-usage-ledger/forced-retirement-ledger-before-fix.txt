@@ -1,0 +1,34 @@
+
+=== BEFORE: the mate's home holds live work at two nesting depths ===
+retiring mate      swept-demo-x1      harness=claude  model=opus     effort=high   kind=secondmate
+  child task       swept-child        harness=codex   model=gpt-5    effort=low    kind=ship        (blocked)
+  nested mate      swept-child-sm     harness=pi      model=sonnet   effort=medium kind=secondmate
+    grandchild     swept-grandchild   harness=cursor  model=composer effort=xhigh  kind=scout       (done)
+
+each of those three tasks owns a ledger INSIDE a home this retirement deletes:
+  /tmp/fm-usage-ledger.yBEnYr/swept-demo/secondmate-home/data/task-usage.jsonl
+  /tmp/fm-usage-ledger.yBEnYr/swept-demo/secondmate-home/nested-home/data/task-usage.jsonl
+the surviving parent ledger is: /tmp/fm-usage-ledger.yBEnYr/swept-demo/home/data/task-usage.jsonl
+
+=== RUN: fm-teardown.sh swept-demo-x1 --force ===
+  teardown swept-demo-x1 complete (window firstmate:fm-swept-demo-x1, worktree /tmp/fm-usage-ledger.yBEnYr/swept-demo/wt)
+  exit=0
+
+=== AFTER: every home the sweep walked is gone, with its own ledger ===
+  removed        /tmp/fm-usage-ledger.yBEnYr/swept-demo/secondmate-home
+  removed        /tmp/fm-usage-ledger.yBEnYr/swept-demo/secondmate-home/nested-home
+  removed        /tmp/fm-usage-ledger.yBEnYr/swept-demo/secondmate-home/data/task-usage.jsonl
+  removed        /tmp/fm-usage-ledger.yBEnYr/swept-demo/secondmate-home/nested-home/data/task-usage.jsonl
+
+=== OPERATOR READ SURFACE: fm-usage-ledger.sh list (surviving parent home) ===
+{"v":1,"seq":1,"at":1788365052,"event":"ledger-open","id":"ledger-open","task":"","gen":"","kind":"","harness":"","model":"","effort":"","project":"","mode":"","yolo":"","backend":"","pr":"","pr_head":"","landing":"","outcome":"","status_class":"","validator_harness":"","validator_model":""}
+{"v":1,"seq":2,"at":1788365052,"event":"cleanup","id":"cleanup:swept-demo-x1:g-mate","task":"swept-demo-x1","gen":"g-mate","kind":"secondmate","harness":"claude","model":"opus","effort":"high","project":"project","mode":"secondmate","yolo":"off","backend":"tmux","pr":"","pr_head":"","landing":"","outcome":"discarded","status_class":"done","validator_harness":"unknown","validator_model":"unknown"}
+
+=== The question the audit could not answer, answered per discarded task ===
+  task=swept-demo-x1 kind=secondmate harness=claude model=opus effort=high outcome=discarded last_status=done
+
+=== PRIVACY + INTEGRITY of the surviving store ===
+  no free-form status text reached the ledger
+  no discarded home path reached the ledger
+  mode: -rw-------
+  verify: ok records=2 first_observed=1788365052
