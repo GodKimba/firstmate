@@ -671,6 +671,7 @@ spawn_remote_secondmate() {
     echo "tasktmp="
     echo "model=${recorded_model:-default}"
     echo "effort=${recorded_effort:-default}"
+    echo "spawn_gen=$remote_generation"
     echo "home=$home"
     echo "projects=$(secondmate_registry_field "$DATA/secondmates.md" "$id" projects)"
     echo "remote_host=$host"
@@ -704,8 +705,8 @@ spawn_remote_secondmate() {
     return 1
   fi
   # A remote secondmate's task record is owned by this home, so its usage row
-  # belongs in this home's ledger too. That record carries no spawn_gen, so its
-  # incarnation reads as unknown (bin/fm-usage-ledger.sh's IDENTITY limitation).
+  # belongs in this home's ledger too. Its incarnation is the inheritance
+  # generation this launch minted, so relaunching the same id is its own row.
   fm_usage_ledger_record "$FM_HOME" "$STATE" "$DATA" spawn "$id" --meta "$meta"
   echo "spawned $id harness=$harness kind=secondmate mode=secondmate yolo=off window=remote:$id worktree=$home remote=$host backend=$remote_backend"
   return 0

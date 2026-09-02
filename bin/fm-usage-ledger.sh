@@ -132,10 +132,10 @@
 # head say, into one false duplicate. The probe compares whole parsed ids
 # across the WHOLE store, so a retried spawn, a re-armed PR poll, an
 # at-least-once merge notification, and a rerun teardown dedupe no matter how
-# much history sits between them. LIMITATION: a task record with no
-# spawn_gen= - today only a remote secondmate launch - has gen "unknown", so
-# repeated launches of that one id collapse into a single spawn row rather than
-# being invented as separate incarnations.
+# much history sits between them. A task record with no spawn_gen= at all has
+# gen "unknown", so repeated launches of that one id would collapse into a
+# single spawn row; every writer that publishes a task record today mints one,
+# so that is a legacy record's shape rather than any current launch path.
 #
 # FIRST OBSERVED. The store's first record is `ledger-open`, whose `at` is the
 # instant this home started recording. NOTHING before it is backfilled, and no
