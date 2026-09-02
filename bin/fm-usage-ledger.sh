@@ -9,8 +9,9 @@
 # state/<id>.meta, and bin/fm-teardown.sh removes that record as part of
 # ordinary successful cleanup. Nothing durable then remained to join a merged
 # PR back to the model that produced it. This ledger is that durable join: it
-# is written at the lifecycle points below, under $FM_HOME/data/, which
-# teardown never touches.
+# is written under $FM_HOME/data/, which teardown never touches, at the
+# lifecycle points docs/architecture.md owns and this header does not
+# restate.
 #
 # STORE. $FM_HOME/data/task-usage.jsonl (FM_DATA_OVERRIDE wins), strictly
 # APPEND-ONLY outside the explicit `prune` verb, mode 0600, one JSON object per
