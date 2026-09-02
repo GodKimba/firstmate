@@ -1,0 +1,191 @@
+FM_TEST_BEGIN 2026-09-02T05:07:50Z tests/fm-backend-orca.test.sh family=orca expected_gate_skip=optional-binary
+ok - fm_backend_orca_capture: parses result.terminal.tail and calls terminal read
+ok - fm_backend_orca_capture: falls back to result text fields
+ok - fm_backend_orca_capture: fails closed on Orca read error JSON
+ok - fm_backend_orca_runtime_check: accepts reachable ready runtime
+ok - fm_backend_orca_runtime_check: fails closed when runtime is not ready
+ok - fm_backend_orca_send_text_submit: verifies empty composer after Enter with one bounded read
+ok - fm_backend_orca_send_text_submit: a borderless claude composer confirms delivery (the missing #2029 shape)
+ok - fm_backend_orca_composer_state: a stale startup banner cannot outrank the live composer row
+ok - fm_backend_orca_send_text_submit: retries Enter while composer remains pending
+ok - fm_backend_orca_composer_state: a slash-command popup's argument-hint placeholder still reads pending
+ok - fm_backend_orca_composer_state: a bare dead-shell prompt reads unknown (unsafe-for-injection), never empty
+ok - fm_backend_orca_send_text_submit: a slash-command popup's placeholder fill on Enter #1 does not short-circuit as submitted; Enter #2 is retried and lands it
+ok - fm_backend_orca_send_literal: sends text without submitting
+ok - fm_backend_orca_send_text_submit: reports send-failed when Orca send fails
+ok - Orca send helpers: fail closed on ok:false JSON
+ok - fm_backend_orca_send_key: Enter maps to empty enter, C-c maps to interrupt
+ok - fm_backend_orca_send_key: refuses unsupported keys loudly
+ok - fm_backend_orca_send_key: refuses Escape instead of mapping it to interrupt
+ok - fm_backend_orca_kill: calls terminal close and stays best-effort
+ok - fm_backend_orca_remove_worktree: refuses empty worktree ids
+ok - fm_backend_orca_remove_worktree: fails closed on ok:false JSON
+ok - fm_backend_orca_worktree_path: resolves an Orca worktree id to its path
+ok - fm-backend dispatcher: accepts orca and routes capture through bin/backends/orca.sh
+ok - fm_backend_orca_json_get: ignores undocumented terminal id shapes
+ok - Orca lifecycle helpers: register repo, create worktree, create terminal, parse stable ids
+ok - fm_backend_orca_worktree_create: removes created worktree when path is missing
+ok - fm-spawn.sh --backend orca: preserves metadata when pathless cleanup fails
+ok - fm-spawn.sh --backend orca: reuses implicit terminal, records metadata, launches harness
+ok - fm-spawn.sh --backend orca --secondmate: refuses before secondmate-home mutation
+ok - fm-spawn.sh --backend orca: refuses before mutation when Orca runtime is not ready
+ok - fm-spawn.sh --backend orca: refuses non-isolated worktrees and closes implicit terminals
+ok - fm-spawn.sh --backend orca: removes worktree when terminal creation fails
+ok - fm-spawn.sh --backend orca: preserves metadata when abort cleanup fails
+ok - fm-spawn.sh --backend orca: a reused cleanup-recovery id keeps its incarnations apart
+ok - fm-spawn.sh --backend orca: releases terminal and worktree on later aborts
+ok - fm-peek/fm-send/fm-crew-state route through backend=orca metadata and its durable inbox
+ok - fm-peek/fm-crew-state: Orca read error JSON fails closed
+ok - fm_backend_target_exists: Orca ok:false read JSON is not live
+ok - fm-teardown.sh backend=orca: scout report gate then helper-backed worktree removal
+ok - fm-teardown.sh backend=orca: scout teardown refuses id/path mismatches
+ok - fm-teardown.sh backend=orca: releases terminal/worktree when path is absent
+ok - fm-teardown.sh backend=orca: preserves metadata on remove ok:false JSON
+ok - fm-teardown.sh backend=orca: scout report gate precedes pathless helper cleanup
+ok - fm-teardown.sh backend=orca: ship teardown fails closed when worktree path is missing
+ok - fm-teardown.sh backend=orca: ship teardown requires a matching Orca id path
+ok - fm-teardown.sh backend=orca: ship teardown fails closed when id resolution fails
+ok - fm-teardown.sh backend=orca: ship teardown refuses id/path mismatches
+ok - fm-teardown.sh backend=orca: refuses missing worktree ids before cleanup
+ok - fm-teardown.sh backend=orca: refuses incomplete worktree-only endpoint metadata before runtime dispatch
+ok - fm-teardown.sh --force: removes Orca secondmate children through Orca
+ok - fm-teardown.sh --force: refuses Orca child id/path mismatches
+ok - fm-teardown.sh --force: refuses partial Orca secondmate children before runtime dispatch
+FM_TEST_END 2026-09-02T05:08:05Z tests/fm-backend-orca.test.sh exit=0 duration_ms=14332 gate_skip=false
+FM_TEST_BEGIN 2026-09-02T05:08:05Z tests/fm-pr-merge.test.sh family=pr-forge expected_gate_skip=none
+ok - fm-pr-merge reports exact queue retry flags after a zero-exit false success
+ok - fm-pr-merge omits merge-queue retry guidance for a closed GitHub PR
+ok - fm-pr-merge aggregates agreeing merge-queue rules
+ok - fm-pr-merge reports ambiguity for conflicting merge-queue rules
+ok - fm-pr-merge records pr= and pr_head= for a verified GitHub merge
+ok - fm-pr-merge records pr= before the forge call can land the merge
+ok - fm-pr-merge propagates a real merge failure without silently succeeding
+ok - fm-pr-merge refuses a GitHub merge call that leaves the PR open and unqueued
+ok - fm-pr-merge keeps PR bookkeeping when it cannot read a successful merge call's outcome
+ok - fm-pr-merge refuses with the forge's own output quoted apart from its verdict
+ok - fm-pr-merge quotes the forge output when it cannot read the outcome either
+ok - fm-pr-merge does not echo back queue flags the caller already used
+ok - fm-pr-merge still names retry flags when the caller used a different method
+ok - fm-pr-merge names the queue requirement even when its method is unrecognised
+ok - fm-pr-merge distinguishes unreadable branch rules from a base with no merge queue
+ok - fm-pr-merge says nothing about a merge queue when the base branch has no queue rule
+ok - fm-pr-merge says the merge queue was unobservable when only the gh-axi view answered
+ok - fm-pr-merge explains an armed auto-merge that landed nothing on a queue-less base
+ok - fm-pr-merge never reports auto-merge as armed when the merge command failed
+ok - fm-pr-merge claims no acceptance for a failed merge command carrying queue flags
+ok - fm-pr-merge falls back to the gh-axi view when gh's read fails
+ok - fm-pr-merge names a landed state hiding behind a failed GitHub merge command
+ok - fm-pr-merge reaches and verifies the gh-axi merge path without gh
+ok - fm-pr-merge preserves bookkeeping when gh is absent and the fallback read fails
+ok - fm-pr-merge verifies a genuinely merged GitHub pull request
+ok - fm-pr-merge refuses to claim a merge when poll recording fails
+ok - fm-pr-merge accepts and accurately reports a GitHub merge-queue entry
+ok - fm-pr-merge explains how to retry with the required GitHub merge queue method
+ok - fm-pr-merge forwards extra flags to gh-axi pr merge after the -- separator
+ok - fm-pr-merge refuses before merging when task meta is missing
+ok - fm-pr-merge refuses malformed PR URLs before calling gh-axi
+ok - fm-pr-merge refuses unsafe PR URL segments before recording state
+ok - fm-pr-merge refuses repo override args before recording state
+ok - fm-pr-merge refuses a bundled short-option repo override and forwards other short flags
+ok - fm-pr-merge does not add default --squash when the caller passes an explicit merge method
+ok - fm-pr-merge respects --method=<value> as an explicit merge method
+ok - fm-pr-merge parses a GitHub PR URL into gh-axi number and --repo arguments
+ok - fm-pr-merge leaves GitHub extra-arg handling unchanged, including --sha
+ok - fm-pr-merge merges a GitLab merge request through glab instead of refusing it
+ok - fm-pr-merge takes the GitLab instance from the URL rather than assuming one
+ok - fm-pr-merge imposes no merge method on GitLab, leaving the project's own one
+ok - fm-pr-merge forwards extra flags to glab mr merge after the -- separator
+ok - fm-pr-merge propagates a real glab merge failure without silently succeeding
+ok - fm-pr-merge refuses on each GitLab pre-merge condition independently
+ok - fm-pr-merge reports every failing GitLab condition, not only the first
+ok - fm-pr-merge reports a stale recorded head and verifies the live one
+ok - fm-pr-merge refuses an unreadable GitLab merge request state rather than merging blind
+ok - fm-pr-merge refuses a GitLab head commit it cannot validate
+ok - fm-pr-merge refuses before recording anything when glab or jq is absent
+ok - fm-pr-merge refuses a GitLab head override before recording state
+ok - a merge a secondmate home performs itself is reported upward exactly once
+ok - a locally routed secondmate home reports the landed PR into its parent's own channel
+ok - a landed GitLab merge request is reported upward on the same channel
+ok - a queued GitLab merge stays silent and leaves confirmation to the armed poll
+ok - a refused or failed merge reports no outcome
+ok - a GitLab merge refused before the forge call reports no outcome
+ok - a merge a main home performs itself leaves one durable wake naming the PR
+ok - a confirmed merge records the landed PR and the task's axes in the usage ledger
+ok - a queued GitHub merge stays silent and leaves confirmation to the armed poll
+ok - distinct merged PRs for one task retain distinct captain-facing wakes
+ok - an uncommitted marker retry preserves at least one durable outcome
+ok - a secondmate home that cannot report upward says so instead of merging in silence
+FM_TEST_END 2026-09-02T05:08:36Z tests/fm-pr-merge.test.sh exit=0 duration_ms=31307 gate_skip=false
+FM_TEST_BEGIN 2026-09-02T05:08:36Z tests/fm-gotmp.test.sh family=session-bootstrap expected_gate_skip=none
+ok - fm-teardown removes the dir pointed to by tasktmp= in meta
+ok - fm-teardown skips gracefully when tasktmp= is absent (backward compat)
+ok - fm-teardown skips gracefully when tasktmp= points to a nonexistent dir
+FM_TEST_END 2026-09-02T05:08:37Z tests/fm-gotmp.test.sh exit=0 duration_ms=1055 gate_skip=false
+FM_TEST_BEGIN 2026-09-02T05:08:37Z tests/fm-teardown.test.sh family=pr-forge expected_gate_skip=none
+ok - local-only worktree with HEAD on a fork remote is torn down and the home summary is refreshed
+ok - teardown closes its own backlog item before reporting success
+ok - teardown honors config/backlog-backend=manual and still finishes cleanly
+ok - local-only worktree with truly unpushed work is refused (safety preserved)
+ok - local-only worktree with work merged into local main is torn down (no regression)
+ok - no-mistakes worktree with HEAD on origin is torn down (no regression)
+ok - no-mistakes worktree with genuinely unlanded work is refused (safety preserved)
+ok - local-only worktree with unpushed work is torn down under --force (escape hatch)
+ok - teardown completes when an exact busy-state sidecar is already absent
+ok - herdr teardown removes pane-owned escalation dedupe state
+ok - herdr flat teardown refuses before returning the isolated copy under lock contention and the retry completes cleanly
+ok - herdr flat teardown never erases records when pane presence is unparseable
+ok - herdr flat teardown preflight refuses before every destructive change
+ok - forced secondmate teardown preflights every Herdr child before cleanup mutation
+ok - forced secondmate teardown holds every descendant lifecycle and metadata lock
+ok - forced secondmate teardown retains Herdr child identity until exact pane disappearance
+ok - forced teardown retains a nested secondmate home and its grandchild's Herdr identity when the grandchild close is unconfirmed
+ok - herdr projection teardown retires its journal only after confirming the exact recorded pane is gone
+ok - herdr projection teardown retains every record when post-close presence is unknown
+ok - herdr projection teardown surfaces failed focus restoration without turning confirmed cleanup into a hard failure
+ok - squash-merged + deleted-branch worktree (PR merged) is torn down (the fix)
+ok - squash-merged PR accepts a local HEAD that is an ancestor of the final PR head
+ok - teardown discovers a merged PR by branch name and tears down when no pr= was ever recorded
+ok - squash-merged PR accepts replayed unpushed local patches contained in the PR head
+ok - merged PR does not allow teardown after a later local commit
+ok - fm-pr-check does not refresh PR head after HEAD moves
+ok - fm-pr-check records the remote PR head when the local worktree lags
+ok - worktree whose content already landed in the default branch is torn down (content fallback)
+ok - content fallback refreshes origin default before comparing trees
+ok - dirty worktree is refused even when its committed work has landed (dirty always wins)
+ok - gh lookup error with content not in default refuses (fail-safe)
+ok - provably-stale worktree index.lock (old, no live holder) is cleared and teardown succeeds
+ok - live-held worktree index.lock is never removed and teardown refuses
+ok - lsof errors leave worktree index.lock in place and refuse teardown
+ok - stale lock cleanup rechecks and refuses dirty worktree before return
+ok - normal repo index.lock is resolved from the worktree and cleared when stale
+ok - lock mtime read failures leave worktree index.lock in place and refuse teardown
+ok - transient index.lock cleared after first failed return is retried successfully without force-remove
+ok - persistent index.lock exhausts retries and refuses without force-removing the lock
+ok - empty retry wait overrides use the default without aborting teardown
+ok - fractional legacy retry wait remains supported without arithmetic
+ok - a task's own parked no-mistakes run is aborted, not orphaned, before the worker is removed
+ok - teardown refuses before reap or removal when a task-owned run remains parked
+ok - a different run cannot confirm the targeted abort
+ok - empty post-abort status is not accepted as confirmation
+ok - the CLI's exact run-not-found signal confirms completion
+ok - a parked run on another branch is never aborted by this task's teardown (ownership is precise)
+ok - a task-owned autonomous running step is left alone rather than aborted
+ok - a leaked descendant process rooted under the task's worktree is reaped by teardown, not left surviving
+ok - a leaked descendant process rooted under the task's per-task tasktmp is reaped by teardown too
+ok - missing lsof falls back to reaping the tmux pane process group
+ok - an erroring lsof scan refuses teardown and preserves the task
+ok - a reused pid with a different start time is never force-killed
+ok - an exec change preserves birth identity and the process is reaped
+ok - a process spawned during grace is reaped on a later pass
+ok - persistent leaked processes refuse teardown after bounded retries
+ok - a process exiting during identity lookup does not block teardown
+ok - the run abort and the leaked-process reap both complete before the destructive worktree return
+FM_TEST_END 2026-09-02T05:09:34Z tests/fm-teardown.test.sh exit=0 duration_ms=56399 gate_skip=false
+FM_TEST_SUMMARY total=4 failed=0 skipped_gate=0 duration_ms=103165
+FM_TEST_SUMMARY_FAMILY family=orca count=1 duration_ms=14332 failed=0
+FM_TEST_SUMMARY_FAMILY family=pr-forge count=2 duration_ms=87706 failed=0
+FM_TEST_SUMMARY_FAMILY family=session-bootstrap count=1 duration_ms=1055 failed=0
+FM_TEST_SLOWEST rank=1 script=tests/fm-teardown.test.sh duration_ms=56399
+FM_TEST_SLOWEST rank=2 script=tests/fm-pr-merge.test.sh duration_ms=31307
+FM_TEST_SLOWEST rank=3 script=tests/fm-backend-orca.test.sh duration_ms=14332
+FM_TEST_SLOWEST rank=4 script=tests/fm-gotmp.test.sh duration_ms=1055

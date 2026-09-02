@@ -1,0 +1,41 @@
+FM_TEST_BEGIN 2026-09-02T05:07:27Z tests/fm-usage-ledger.test.sh family=pr-forge expected_gate_skip=none
+ok - a new ledger opens with an explicit first-observed record and no backfill
+ok - a spawn record preserves every implementation axis and no private value
+ok - an absent backend field resolves through the documented tmux default
+ok - a remote endpoint's backend is read from its own writer, never defaulted
+ok - only the final status verb is stored, and its absence is stated honestly
+ok - a status class captured before its log is retired is the class recorded
+ok - a home's renamed status verb is recorded in its own spelling
+ok - captured axes record exactly what the task record held, empty fields included
+ok - a status log that cannot be read records unknown, not none
+ok - repeated spawn, PR, merge, and cleanup calls are idempotent by event identity
+ok - a new incarnation, a new PR head, and a new PR each append their own record
+ok - a long PR URL never truncates two distinct events into one false duplicate
+ok - a nested self-hosted merge request past the label bound keeps its ledger row
+ok - a PR URL past the bound is refused, never truncated into a different one
+ok - unreadable axes read unknown, absent ones read empty, and nothing is inferred
+ok - concurrent writers lose no record and never reuse a sequence number
+ok - symlinked, hardlinked, non-regular, and wrong-mode targets refuse without writing
+ok - the ledger is created private regardless of the caller's umask
+ok - no ledger verb recreates a home a retirement already removed
+ok - a malformed ledger stops every verb safely and keeps its bytes
+ok - an append reads only the records it needs and verify is what proves the rest
+ok - a newer schema version is preserved rather than declared malformed
+ok - retention keeps the first-observed marker plus its horizon, atomically and privately
+ok - retention never lets a later append re-issue a pruned sequence number
+ok - recording one task never applies retention to another task's history
+ok - invalid events, ids, outcomes, URLs, and hashes refuse before anything is written
+ok - a real spawn and teardown leave the task attributable after its record is gone
+ok - an unpinned spawn records the default axis rather than a not-applicable blank
+ok - a retirement that removes its own home records the axes and class it ran on
+ok - a refused teardown records no cleanup, because its task is still live
+ok - PR registration records the canonical PR, the forge's head, and the task's axes
+ok - an approved local landing records its commit and the implementer's axes
+ok - a refused ledger write warns loudly and never fails the lifecycle step
+ok - a lock that can never be taken refuses at its bound instead of blocking
+ok - an unreadable status class is reported loudly rather than silently substituted
+FM_TEST_END 2026-09-02T05:07:46Z tests/fm-usage-ledger.test.sh exit=0 duration_ms=18761 gate_skip=false
+FM_TEST_SUMMARY total=1 failed=0 skipped_gate=0 duration_ms=18787
+FM_TEST_SUMMARY_FAMILY family=pr-forge count=1 duration_ms=18761 failed=0
+FM_TEST_SLOWEST rank=1 script=tests/fm-usage-ledger.test.sh duration_ms=18761
+EXIT=0

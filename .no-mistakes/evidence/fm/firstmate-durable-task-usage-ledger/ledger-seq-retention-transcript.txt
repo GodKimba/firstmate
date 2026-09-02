@@ -1,0 +1,48 @@
+
+[1mA. MONOTONIC CLOCK - the guarantee as stated: a total prune must not let the next append reuse a pruned number.[0m
+$ seqs
+  seq=1 at=1788325865 event=ledger-open
+  seq=2 at=1788325865 event=spawn
+  seq=3 at=1788325865 event=spawn
+
+(the whole store now ages past the 400-day horizon - a dormant home)
+$ L prune --days 400
+pruned 2 kept 1
+$ seqs
+  seq=3 at=1745125865 event=ledger-open
+
+(the coverage marker is the one record retention keeps; it carries the high-water mark)
+$ seqs
+  seq=3 at=1745125865 event=ledger-open
+  seq=4 at=1788325865 event=spawn
+
+-> next append is seq 4: neither 2 nor 3, the numbers the pruned records used.
+
+[1mB. REGRESSED CLOCK - the condition the header now names.[0m
+(the host clock jumps backwards, so the LAST appended record carries the OLDEST time)
+$ seqs
+  seq=1 at=1788325865 event=ledger-open
+  seq=2 at=1788325865 event=spawn
+  seq=3 at=1745125865 event=spawn
+$ L prune --days 400
+pruned 1 kept 2
+$ seqs
+  seq=1 at=1788325865 event=ledger-open
+  seq=2 at=1788325865 event=spawn
+$ seqs
+  seq=1 at=1788325865 event=ledger-open
+  seq=2 at=1788325865 event=spawn
+  seq=3 at=1788325865 event=spawn
+
+-> seq 3 is issued a second time, to a different event. Retention kept two
+   dated records, so the marker carried nothing, and the last record kept
+   was no longer the high-water mark. `id` stays unique either way:
+$ sed -n 's/.*"seq":\([0-9]*\).*"id":"\([^"]*\)".*/  seq=\1 id=\2/p' "$(L path)"
+  seq=1 id=ledger-open
+  seq=2 id=spawn:gamma-x1:g1
+  seq=3 id=spawn:delta-x1:g4
+
+   This is precisely what the header now admits and previously claimed could
+   not happen; `id`, the documented cross-export join key, is unaffected.
+$ L verify
+ok records=3 first_observed=1788325865

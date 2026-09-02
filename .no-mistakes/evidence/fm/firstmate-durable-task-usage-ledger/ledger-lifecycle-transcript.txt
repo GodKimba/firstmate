@@ -1,124 +1,82 @@
-Firstmate durable task-usage ledger - end-to-end operator transcript
-Every command below is a real bin/fm-*.sh run against a sandbox home
-($DEMO/home). The forge and the terminal backend are stubbed; the spawn,
-PR-check, merge, teardown and ledger code paths are the real ones.
 
-=== 0. The home before any task ran ===
+[1m0. A brand-new home has no ledger yet; the store lives under FM_HOME/data/, which teardown never touches.[0m
+$ L path
+/tmp/fm-ledger-demo.lwPcoW/demo/home/data/task-usage.jsonl
+$ ls -l "$(L path)" 2>&1 || true
+ls: cannot access '/tmp/fm-ledger-demo.lwPcoW/demo/home/data/task-usage.jsonl': No such file or directory
 
-$ ls -A '$DEMO/home/data'
+[1m1. Real fm-spawn.sh launches a ship task pinned to a model and effort.[0m
+spawned ledger-demo-x1 harness=claude kind=ship mode=no-mistakes yolo=off window=firstmate:fm-ledger-demo-x1 worktree=/tmp/fm-ledger-demo.lwPcoW/demo/wt
 
-# No ledger file yet. Nothing is backfilled: coverage starts at the first
-# lifecycle point that records.
+[1m2. The volatile task record - the ONLY place the axes used to live.[0m
+$ sed -n 's/^\(harness\|model\|effort\|kind\|mode\|yolo\|spawn_gen\)=/  &/p' '/tmp/fm-ledger-demo.lwPcoW/demo/home/state/ledger-demo-x1.meta'
+  harness=claude
+  kind=ship
+  mode=no-mistakes
+  yolo=off
+  model=opus
+  effort=high
+  spawn_gen=s1788325817.1624.273
 
-=== 1. A real spawn - bin/fm-spawn.sh ===
+[1m3. The durable ledger opened with an explicit first-observed marker, then the spawn row.[0m
+$ L list
+{"v":1,"seq":1,"at":1788325819,"event":"ledger-open","id":"ledger-open","task":"","gen":"","kind":"","harness":"","model":"","effort":"","project":"","mode":"","yolo":"","backend":"","pr":"","pr_head":"","landing":"","outcome":"","status_class":"","validator_harness":"","validator_model":""}
+{"v":1,"seq":2,"at":1788325819,"event":"spawn","id":"spawn:ledger-demo-x1:s1788325817.1624.273","task":"ledger-demo-x1","gen":"s1788325817.1624.273","kind":"ship","harness":"claude","model":"opus","effort":"high","project":"project","mode":"no-mistakes","yolo":"off","backend":"tmux","pr":"","pr_head":"","landing":"","outcome":"","status_class":"","validator_harness":"unknown","validator_model":"unknown"}
 
-$ bin/fm-spawn.sh 'ledger-demo-x1' '$DEMO/acme-api' --mode no-mistakes --yolo off --model opus --effort high
-spawned ledger-demo-x1 harness=claude kind=ship mode=no-mistakes yolo=off window=firstmate:fm-ledger-demo-x1 worktree=$DEMO/wt
-
-# The volatile task record that ordinary cleanup will later delete:
-$ grep -E '^(harness|model|effort|kind|mode|yolo|project|spawn_gen)=' '$DEMO/home/state/ledger-demo-x1.meta'
-project=$DEMO/acme-api
-harness=claude
-kind=ship
-mode=no-mistakes
-yolo=off
-model=opus
-effort=high
-spawn_gen=s1788293488.936716.30531
-
-
-=== 2. The PR is published - bin/fm-pr-check.sh ===
-
-$ bin/fm-pr-check.sh 'ledger-demo-x1' 'https://github.com/acme/acme-api/pull/138'
+[1m4. Real fm-pr-check.sh registers the PR the task pushed; the forge reports its head.[0m
 armed: state/ledger-demo-x1.check.sh
 
+[1m   A re-armed poll repeats the same call - it must not duplicate the row.[0m
+$ L list | grep -c '"event":"pr"'
+1
 
-=== 3. The PR is merged - bin/fm-pr-merge.sh ===
+[1m5. The task ends on a status log whose free-form note must NEVER be stored.[0m
+$ cat '/tmp/fm-ledger-demo.lwPcoW/demo/home/state/ledger-demo-x1.status'
+working: implementing
+done: landed; captain said the patient chart PHI stays out of this
 
-$ bin/fm-pr-merge.sh 'ledger-demo-x1' 'https://github.com/acme/acme-api/pull/138'
-armed: state/ledger-demo-x1.check.sh
-verified: https://github.com/acme/acme-api/pull/138 is merged (state=MERGED, merged=true, isInMergeQueue=false)
+[1m6. Real fm-teardown.sh performs ORDINARY SUCCESSFUL CLEANUP.[0m
+/tmp/fm-ledger-demo.lwPcoW/demo/project: already current
+teardown ledger-demo-x1 complete (window firstmate:fm-ledger-demo-x1, worktree /tmp/fm-ledger-demo.lwPcoW/demo/wt)
+Backlog: ledger-demo-x1 just finished (this home keeps no backlog at /tmp/fm-ledger-demo.lwPcoW/demo/home/data/backlog.md). Update /tmp/fm-ledger-demo.lwPcoW/demo/home/data/backlog.md - move ledger-demo-x1 to Done, keep Done to the 10 most recent, then re-scan Queued and dispatch only work whose blockers are gone and date is due.
 
+[1m7. The volatile task record and status log are GONE - the old attribution gap.[0m
+$ ls '/tmp/fm-ledger-demo.lwPcoW/demo/home/state/ledger-demo-x1.meta' '/tmp/fm-ledger-demo.lwPcoW/demo/home/state/ledger-demo-x1.status' 2>&1
+ls: cannot access '/tmp/fm-ledger-demo.lwPcoW/demo/home/state/ledger-demo-x1.meta': No such file or directory
+ls: cannot access '/tmp/fm-ledger-demo.lwPcoW/demo/home/state/ledger-demo-x1.status': No such file or directory
 
-=== 4. Replaying those calls is idempotent by event identity ===
+[1m8. The durable ledger outlived cleanup and still verifies.[0m
+$ L verify
+ok records=4 first_observed=1788325819
+$ L list
+{"v":1,"seq":1,"at":1788325819,"event":"ledger-open","id":"ledger-open","task":"","gen":"","kind":"","harness":"","model":"","effort":"","project":"","mode":"","yolo":"","backend":"","pr":"","pr_head":"","landing":"","outcome":"","status_class":"","validator_harness":"","validator_model":""}
+{"v":1,"seq":2,"at":1788325819,"event":"spawn","id":"spawn:ledger-demo-x1:s1788325817.1624.273","task":"ledger-demo-x1","gen":"s1788325817.1624.273","kind":"ship","harness":"claude","model":"opus","effort":"high","project":"project","mode":"no-mistakes","yolo":"off","backend":"tmux","pr":"","pr_head":"","landing":"","outcome":"","status_class":"","validator_harness":"unknown","validator_model":"unknown"}
+{"v":1,"seq":3,"at":1788325819,"event":"pr","id":"pr:ledger-demo-x1:s1788325817.1624.273:https://github.com/example/repo/pull/11:3333333333333333333333333333333333333333","task":"ledger-demo-x1","gen":"s1788325817.1624.273","kind":"ship","harness":"claude","model":"opus","effort":"high","project":"project","mode":"no-mistakes","yolo":"off","backend":"tmux","pr":"https://github.com/example/repo/pull/11","pr_head":"3333333333333333333333333333333333333333","landing":"","outcome":"","status_class":"","validator_harness":"unknown","validator_model":"unknown"}
+{"v":1,"seq":4,"at":1788325820,"event":"cleanup","id":"cleanup:ledger-demo-x1:s1788325817.1624.273","task":"ledger-demo-x1","gen":"s1788325817.1624.273","kind":"ship","harness":"claude","model":"opus","effort":"high","project":"project","mode":"no-mistakes","yolo":"off","backend":"tmux","pr":"","pr_head":"","landing":"","outcome":"landed","status_class":"done","validator_harness":"unknown","validator_model":"unknown"}
 
-$ bin/fm-pr-check.sh 'ledger-demo-x1' 'https://github.com/acme/acme-api/pull/138' >/dev/null 2>&1; bin/fm-pr-merge.sh 'ledger-demo-x1' 'https://github.com/acme/acme-api/pull/138' >/dev/null 2>&1; echo 'replayed the PR registration and the merge notification'
-replayed the PR registration and the merge notification
+[1m9. THE JOIN THE AUDIT COULD NOT MAKE: merged PR -> the model that produced it.[0m
+  PR https://github.com/example/repo/pull/11
+    head     3333333333333333333333333333333333333333
+    harness  claude
+    model    opus
+    effort   high
+    outcome  landed (final status class: done)
+    delivery no-mistakes, yolo off
 
-  ledger rows before the replay: 4
-  ledger rows after  the replay: 4
+[1m10. Privacy boundary: no status note, no path, no token in the store; mode 0600.[0m
+$ grep -c 'PHI\|patient chart\|/tmp/fm-ledger-demo.lwPcoW/demo/wt\|/tmp/fm-ledger-demo.lwPcoW/demo/home/state' '/tmp/fm-ledger-demo.lwPcoW/demo/home/data/task-usage.jsonl' || echo '  0 private values found'
+0
+  0 private values found
+$ stat -c '%a %n' '/tmp/fm-ledger-demo.lwPcoW/demo/home/data/task-usage.jsonl'
+600 /tmp/fm-ledger-demo.lwPcoW/demo/home/data/task-usage.jsonl
 
+[1m11. Retention is explicit-only and never rewrites history behind a task.[0m
+$ L prune --days 400
+pruned 0 kept 4
+$ L verify
+ok records=4 first_observed=1788325819
 
-=== 5. The task ends and is cleaned up - bin/fm-teardown.sh ===
-
-# The final status log, whose free-form note must never reach the ledger:
-$ cat '$DEMO/home/state/ledger-demo-x1.status'
-working: implementing the importer
-done: landed; captain said the client roster is confidential
-
-$ bin/fm-teardown.sh 'ledger-demo-x1'
-$DEMO/acme-api: already current
-teardown ledger-demo-x1 complete (window firstmate:fm-ledger-demo-x1, worktree $DEMO/wt)
-Backlog: ledger-demo-x1 just finished (this home keeps no backlog at $DEMO/home/data/backlog.md). Update $DEMO/home/data/backlog.md - move ledger-demo-x1 to Done, keep Done to the 10 most recent, then re-scan Queued and dispatch only work whose blockers are gone and date is due.
-
-
-=== 6. Ordinary cleanup deleted the task's volatile record ===
-
-$ ls '$DEMO/home/state/ledger-demo-x1.meta' '$DEMO/home/state/ledger-demo-x1.status'
-ls: cannot access '$DEMO/home/state/ledger-demo-x1.meta': No such file or directory
-ls: cannot access '$DEMO/home/state/ledger-demo-x1.status': No such file or directory
-
-# This was the instrumentation gap: nothing else held the harness, model or
-# effort, so the merged PR above could not be joined back to a model.
-
-=== 7. The durable ledger outlived it - bin/fm-usage-ledger.sh ===
-
-$ bin/fm-usage-ledger.sh path
-$DEMO/home/data/task-usage.jsonl
-
-$ bin/fm-usage-ledger.sh verify
-ok records=5 first_observed=1788293489
-
-$ ls -l '$DEMO/home/data/task-usage.jsonl'
--rw------- 1 rafaelfadel users 2199 Sep  1 17:11 $DEMO/home/data/task-usage.jsonl
-
-# The store, one JSON object per line, oldest first:
-$ bin/fm-usage-ledger.sh list
-{"v":1,"seq":1,"at":1788293489,"event":"ledger-open","id":"ledger-open","task":"","gen":"","kind":"","harness":"","model":"","effort":"","project":"","mode":"","yolo":"","backend":"","pr":"","pr_head":"","landing":"","outcome":"","status_class":"","validator_harness":"","validator_model":""}
-{"v":1,"seq":2,"at":1788293489,"event":"spawn","id":"spawn:ledger-demo-x1:s1788293488.936716.30531","task":"ledger-demo-x1","gen":"s1788293488.936716.30531","kind":"ship","harness":"claude","model":"opus","effort":"high","project":"acme-api","mode":"no-mistakes","yolo":"off","backend":"tmux","pr":"","pr_head":"","landing":"","outcome":"","status_class":"","validator_harness":"unknown","validator_model":"unknown"}
-{"v":1,"seq":3,"at":1788293489,"event":"pr","id":"pr:ledger-demo-x1:s1788293488.936716.30531:https://github.com/acme/acme-api/pull/138:3f1c0aa9d2b4e6f8901122334455667788990011","task":"ledger-demo-x1","gen":"s1788293488.936716.30531","kind":"ship","harness":"claude","model":"opus","effort":"high","project":"acme-api","mode":"no-mistakes","yolo":"off","backend":"tmux","pr":"https://github.com/acme/acme-api/pull/138","pr_head":"3f1c0aa9d2b4e6f8901122334455667788990011","landing":"","outcome":"","status_class":"","validator_harness":"unknown","validator_model":"unknown"}
-{"v":1,"seq":4,"at":1788293489,"event":"merge","id":"merge:ledger-demo-x1:https://github.com/acme/acme-api/pull/138:-","task":"ledger-demo-x1","gen":"s1788293488.936716.30531","kind":"ship","harness":"claude","model":"opus","effort":"high","project":"acme-api","mode":"no-mistakes","yolo":"off","backend":"tmux","pr":"https://github.com/acme/acme-api/pull/138","pr_head":"","landing":"","outcome":"merged","status_class":"","validator_harness":"unknown","validator_model":"unknown"}
-{"v":1,"seq":5,"at":1788293491,"event":"cleanup","id":"cleanup:ledger-demo-x1:s1788293488.936716.30531","task":"ledger-demo-x1","gen":"s1788293488.936716.30531","kind":"ship","harness":"claude","model":"opus","effort":"high","project":"acme-api","mode":"no-mistakes","yolo":"off","backend":"tmux","pr":"","pr_head":"","landing":"","outcome":"landed","status_class":"done","validator_harness":"unknown","validator_model":"unknown"}
-
-
-=== 8. The forensic question the audit could not answer ===
-
-$ which model produced merged PR https://github.com/acme/acme-api/pull/138 ?
-  event=pr     task=ledger-demo-x1 project=acme-api harness=claude model=opus effort=high
-  event=merge  task=ledger-demo-x1 project=acme-api harness=claude model=opus effort=high
-
-$ how did that task end, and who validated it ?
-  task=ledger-demo-x1 outcome=landed status_class=done validator_harness=unknown validator_model=unknown
-# The validator identity is the literal "unknown": Firstmate cannot prove
-# which agent the no-mistakes pipeline ran, so it says so instead of guessing.
-
-
-=== 9. Privacy boundary: what never reaches the store ===
-
-  absent : confidential
-  absent : client roster
-  absent : $DEMO/wt
-  absent : $DEMO/home
-  absent : brief.md
-
-# The free-form status note, the worktree path, the home path and the brief
-# have no field to land in; only the allowlisted axes are ever read.
-
-=== 10. Retention is an explicit operator verb, never a lifecycle side effect ===
-
-$ bin/fm-usage-ledger.sh prune --days 400
-pruned 0 kept 5
-
-$ bin/fm-usage-ledger.sh verify
-ok records=5 first_observed=1788293489
-
+[1m12. A local-only landing records the commit it landed, through the real fm-merge-local.sh.[0m
+merged fm/ledger-demo-x2 into local main (e390a04 -> 116ad53) in /tmp/fm-ledger-demo.lwPcoW/demo/project2
+$ L list --recent 1
+{"v":1,"seq":5,"at":1788325821,"event":"merge","id":"merge:ledger-demo-x2:-:116ad53ee9dfb001eb3fcd4ca066a4d98a9cd10d","task":"ledger-demo-x2","gen":"g-land","kind":"ship","harness":"codex","model":"gpt-5","effort":"medium","project":"project2","mode":"local-only","yolo":"off","backend":"tmux","pr":"","pr_head":"","landing":"116ad53ee9dfb001eb3fcd4ca066a4d98a9cd10d","outcome":"merged","status_class":"","validator_harness":"unknown","validator_model":"unknown"}

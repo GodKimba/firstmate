@@ -1,0 +1,17 @@
+# Changed-path selection reaches the ledger regression from every file that can break it.
+# Each block: touch the file in the working tree, ask the real runner what it would select.
+
+$ printf "\n# scratch\n" >> bin/fm-wake-lib.sh && bin/fm-test-run.sh --list --changed --base HEAD | grep fm-usage-ledger
+  tests/fm-usage-ledger.test.sh
+
+$ printf "\n# scratch\n" >> bin/fm-spawn.sh && bin/fm-test-run.sh --list --changed --base HEAD | grep fm-usage-ledger
+  tests/fm-usage-ledger.test.sh
+
+$ printf "\n# scratch\n" >> bin/fm-usage-ledger.sh && bin/fm-test-run.sh --list --changed --base HEAD | grep fm-usage-ledger
+  tests/fm-usage-ledger.test.sh
+
+$ printf "\n# scratch\n" >> bin/fm-teardown.sh && bin/fm-test-run.sh --list --changed --base HEAD | grep fm-usage-ledger
+  tests/fm-usage-ledger.test.sh
+
+$ bin/fm-test-run.sh --check-coverage
+  FM_TEST_COVERAGE ok total=176 parallel=24 serial=140 serial_shards=4 herdr=12

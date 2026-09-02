@@ -1,0 +1,23 @@
+FM_TEST_BEGIN 2026-09-02T05:09:44Z tests/fm-secondmate-reconcile.test.sh family=secondmate expected_gate_skip=none
+ok - a home in mismatch is asked once, and later recaps stay silent
+ok - a mismatch outliving the cooldown earns one re-nudge, then goes quiet again
+ok - the cooldown begins when delivery finishes
+ok - the cooldown window is four hours
+ok - the cooldown is per home, not fleet-wide
+ok - the reconcile ask expects no reply and stays out of a ladder that still rings ordinary steers
+ok - only a backlog-vs-metadata mismatch produces an ask
+ok - the parent asks and changes nothing inside the mate's home
+ok - a failed ask starts no cooldown, so the next run retries it
+ok - busy reconcile lifecycle locks never block the digest or start cooldown
+ok - simultaneous recaps still ask the mate only once
+ok - a delayed snapshot asks for a current check instead of prescribing a stale repair
+ok - a stale snapshot cannot ask or silence a replacement mate
+ok - teardown retires the cooldown before a replacement can inherit it
+ok - a legitimately markerless persistent remote secondmate is nudged once per window
+ok - a stale remote-route snapshot cannot ask or silence a replacement mate
+ok - a route replacement between reconcile and fm-send cannot receive a stale ask
+ok - a row with neither a spawn generation nor a host fails loudly instead of vanishing
+FM_TEST_END 2026-09-02T05:10:05Z tests/fm-secondmate-reconcile.test.sh exit=0 duration_ms=20699 gate_skip=false
+FM_TEST_SUMMARY total=1 failed=0 skipped_gate=0 duration_ms=20729
+FM_TEST_SUMMARY_FAMILY family=secondmate count=1 duration_ms=20699 failed=0
+FM_TEST_SLOWEST rank=1 script=tests/fm-secondmate-reconcile.test.sh duration_ms=20699
