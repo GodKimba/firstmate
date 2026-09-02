@@ -433,9 +433,9 @@ cmd_notify() {
   # other invalidity is either unreadable state or nothing to reconcile.
   # spawn_gen is empty only for a persistent remote secondmate route seeded
   # before its parent metadata carried one; host is its substitute identity
-  # there and is otherwise unused. Both are
-  # still character-restricted so a malformed sample cannot masquerade as
-  # either a live incarnation token or a live host.
+  # there and is otherwise unused. Both are still character-restricted so a
+  # malformed sample cannot masquerade as either a live incarnation token or
+  # a live host.
   #
   # Rows join on ASCII unit separator (0x1F), not @tsv: bash's IFS-whitespace
   # `read` collapses consecutive tabs, which would silently drop a
