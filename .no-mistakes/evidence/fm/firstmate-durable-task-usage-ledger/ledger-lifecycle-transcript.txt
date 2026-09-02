@@ -1,82 +1,116 @@
+firstmate 7bdbfee
+FM_HOME    /tmp/fm-ledger-demo.o9sfvq/home
 
-[1m0. A brand-new home has no ledger yet; the store lives under FM_HOME/data/, which teardown never touches.[0m
-$ L path
-/tmp/fm-ledger-demo.lwPcoW/demo/home/data/task-usage.jsonl
-$ ls -l "$(L path)" 2>&1 || true
-ls: cannot access '/tmp/fm-ledger-demo.lwPcoW/demo/home/data/task-usage.jsonl': No such file or directory
+== 1. A brand new home has NO ledger and no fabricated history
+$ fm-usage-ledger.sh path
+/tmp/fm-ledger-demo.o9sfvq/home/data/task-usage.jsonl
+$ fm-usage-ledger.sh verify
+ok records=0 first_observed=none
 
-[1m1. Real fm-spawn.sh launches a ship task pinned to a model and effort.[0m
-spawned ledger-demo-x1 harness=claude kind=ship mode=no-mistakes yolo=off window=firstmate:fm-ledger-demo-x1 worktree=/tmp/fm-ledger-demo.lwPcoW/demo/wt
+== 2. Launch a real ship task: claude / opus / high, delivered through no-mistakes
+$ fm-spawn.sh nutricheck-import-x1 <project> --mode no-mistakes --yolo off --model opus --effort high
+spawned nutricheck-import-x1 harness=claude kind=ship mode=no-mistakes yolo=off window=firstmate:fm-nutricheck-import-x1 worktree=/tmp/fm-ledger-demo.o9sfvq/wt-ship
 
-[1m2. The volatile task record - the ONLY place the axes used to live.[0m
-$ sed -n 's/^\(harness\|model\|effort\|kind\|mode\|yolo\|spawn_gen\)=/  &/p' '/tmp/fm-ledger-demo.lwPcoW/demo/home/state/ledger-demo-x1.meta'
+==    the volatile task record - this is what ordinary cleanup deletes
+$ cat state/nutricheck-import-x1.meta
+  window=firstmate:fm-nutricheck-import-x1
+  worktree=/tmp/fm-ledger-demo.o9sfvq/wt-ship
+  project=/tmp/fm-ledger-demo.o9sfvq/nutricheck
   harness=claude
   kind=ship
   mode=no-mistakes
   yolo=off
+  tasktmp=/tmp/fm-nutricheck-import-x1
   model=opus
   effort=high
-  spawn_gen=s1788325817.1624.273
+  spawn_gen=s1788332352.1541680.16159
 
-[1m3. The durable ledger opened with an explicit first-observed marker, then the spawn row.[0m
-$ L list
-{"v":1,"seq":1,"at":1788325819,"event":"ledger-open","id":"ledger-open","task":"","gen":"","kind":"","harness":"","model":"","effort":"","project":"","mode":"","yolo":"","backend":"","pr":"","pr_head":"","landing":"","outcome":"","status_class":"","validator_harness":"","validator_model":""}
-{"v":1,"seq":2,"at":1788325819,"event":"spawn","id":"spawn:ledger-demo-x1:s1788325817.1624.273","task":"ledger-demo-x1","gen":"s1788325817.1624.273","kind":"ship","harness":"claude","model":"opus","effort":"high","project":"project","mode":"no-mistakes","yolo":"off","backend":"tmux","pr":"","pr_head":"","landing":"","outcome":"","status_class":"","validator_harness":"unknown","validator_model":"unknown"}
+==    the ledger already carries the spawn axes (record 1 is the coverage marker)
+$ fm-usage-ledger.sh list | jq -c .
+{"v":1,"seq":1,"at":1788332354,"event":"ledger-open","id":"ledger-open","task":"","gen":"","kind":"","harness":"","model":"","effort":"","project":"","mode":"","yolo":"","backend":"","pr":"","pr_head":"","landing":"","outcome":"","status_class":"","validator_harness":"","validator_model":""}
+{"v":1,"seq":2,"at":1788332354,"event":"spawn","id":"spawn:nutricheck-import-x1:s1788332352.1541680.16159","task":"nutricheck-import-x1","gen":"s1788332352.1541680.16159","kind":"ship","harness":"claude","model":"opus","effort":"high","project":"nutricheck","mode":"no-mistakes","yolo":"off","backend":"tmux","pr":"","pr_head":"","landing":"","outcome":"","status_class":"","validator_harness":"unknown","validator_model":"unknown"}
 
-[1m4. Real fm-pr-check.sh registers the PR the task pushed; the forge reports its head.[0m
-armed: state/ledger-demo-x1.check.sh
+== 3. The task opens its PR - fm-pr-check registers it and the forge's head
+$ fm-pr-check.sh nutricheck-import-x1 https://github.com/kunchenguid/nutricheck/pull/138
+  armed: state/nutricheck-import-x1.check.sh
+  -> exit 0
+$ fm-usage-ledger.sh list --recent 1 | jq -c .
+{"v":1,"seq":3,"at":1788332354,"event":"pr","id":"pr:nutricheck-import-x1:s1788332352.1541680.16159:https://github.com/kunchenguid/nutricheck/pull/138:3d1f9b0a77c4e5661b2d8f0a9c3e4d5f60718293","task":"nutricheck-import-x1","gen":"s1788332352.1541680.16159","kind":"ship","harness":"claude","model":"opus","effort":"high","project":"nutricheck","mode":"no-mistakes","yolo":"off","backend":"tmux","pr":"https://github.com/kunchenguid/nutricheck/pull/138","pr_head":"3d1f9b0a77c4e5661b2d8f0a9c3e4d5f60718293","landing":"","outcome":"","status_class":"","validator_harness":"unknown","validator_model":"unknown"}
 
-[1m   A re-armed poll repeats the same call - it must not duplicate the row.[0m
-$ L list | grep -c '"event":"pr"'
-1
+==    the armed poll calls it again - the repeat must not duplicate the row
+$ fm-pr-check.sh nutricheck-import-x1 https://github.com/kunchenguid/nutricheck/pull/138
+  armed: state/nutricheck-import-x1.check.sh
+  -> exit 0
+  pr rows in the store: 1
 
-[1m5. The task ends on a status log whose free-form note must NEVER be stored.[0m
-$ cat '/tmp/fm-ledger-demo.lwPcoW/demo/home/state/ledger-demo-x1.status'
-working: implementing
-done: landed; captain said the patient chart PHI stays out of this
+== 4. The task ends. Ordinary successful cleanup DELETES its state records
+$ ls state/ | grep nutricheck-import-x1
+  nutricheck-import-x1.busy-gen
+  nutricheck-import-x1.busy-state
+  nutricheck-import-x1.check.sh
+  nutricheck-import-x1.meta
+  nutricheck-import-x1.pr-poll
+  nutricheck-import-x1.pr-poll-registration
+  nutricheck-import-x1.status
+$ fm-teardown.sh nutricheck-import-x1
+  /tmp/fm-ledger-demo.o9sfvq/nutricheck: already current
+  teardown nutricheck-import-x1 complete (window firstmate:fm-nutricheck-import-x1, worktree /tmp/fm-ledger-demo.o9sfvq/wt-ship)
+  Backlog: nutricheck-import-x1 just finished (this home keeps no backlog at /tmp/fm-ledger-demo.o9sfvq/home/data/backlog.md). Update /tmp/fm-ledger-demo.o9sfvq/home/data/backlog.md - move nutricheck-import-x1 to Done, keep Done to the 10 most recent, then re-scan Queued and dispatch only work whose blockers are gone and date is due.
+$ ls state/ | grep nutricheck-import-x1
 
-[1m6. Real fm-teardown.sh performs ORDINARY SUCCESSFUL CLEANUP.[0m
-/tmp/fm-ledger-demo.lwPcoW/demo/project: already current
-teardown ledger-demo-x1 complete (window firstmate:fm-ledger-demo-x1, worktree /tmp/fm-ledger-demo.lwPcoW/demo/wt)
-Backlog: ledger-demo-x1 just finished (this home keeps no backlog at /tmp/fm-ledger-demo.lwPcoW/demo/home/data/backlog.md). Update /tmp/fm-ledger-demo.lwPcoW/demo/home/data/backlog.md - move ledger-demo-x1 to Done, keep Done to the 10 most recent, then re-scan Queued and dispatch only work whose blockers are gone and date is due.
+== 5. A second task on a different harness and model, landed locally
+$ fm-spawn.sh nutricheck-pdf-x1 <project> --mode local-only --yolo on --model gpt-5 --effort medium
+notice: nutricheck-pdf-x1 ships mode=local-only while the standing posture for nutricheck is no-mistakes - less rigor than the captain's standing posture; proceed only on a current explicit captain instruction or an intake judgment you can state
+spawned nutricheck-pdf-x1 harness=claude kind=ship mode=local-only yolo=on window=firstmate:fm-nutricheck-pdf-x1 worktree=/tmp/fm-ledger-demo.o9sfvq/wt-land
+$ fm-merge-local.sh nutricheck-pdf-x1
+  merged fm/nutricheck-pdf-x1 into local main (3fcb089 -> 555287e) in /tmp/fm-ledger-demo.o9sfvq/nutricheck
+  -> exit 0
+$ fm-teardown.sh nutricheck-pdf-x1
+  teardown nutricheck-pdf-x1 complete (window firstmate:fm-nutricheck-pdf-x1, worktree /tmp/fm-ledger-demo.o9sfvq/wt-land)
+  Backlog: nutricheck-pdf-x1 just finished (this home keeps no backlog at /tmp/fm-ledger-demo.o9sfvq/home/data/backlog.md). Update /tmp/fm-ledger-demo.o9sfvq/home/data/backlog.md - move nutricheck-pdf-x1 to Done, keep Done to the 10 most recent, then re-scan Queued and dispatch only work whose blockers are gone and date is due.
 
-[1m7. The volatile task record and status log are GONE - the old attribution gap.[0m
-$ ls '/tmp/fm-ledger-demo.lwPcoW/demo/home/state/ledger-demo-x1.meta' '/tmp/fm-ledger-demo.lwPcoW/demo/home/state/ledger-demo-x1.status' 2>&1
-ls: cannot access '/tmp/fm-ledger-demo.lwPcoW/demo/home/state/ledger-demo-x1.meta': No such file or directory
-ls: cannot access '/tmp/fm-ledger-demo.lwPcoW/demo/home/state/ledger-demo-x1.status': No such file or directory
+== 6. THE DURABLE LEDGER - everything those deleted task records used to hold
+$ fm-usage-ledger.sh verify
+ok records=7 first_observed=1788332354
+$ stat -c '%n mode=%a' $(fm-usage-ledger.sh path)
+  /tmp/fm-ledger-demo.o9sfvq/home/data/task-usage.jsonl mode=600 owner=rafaelfadel
+$ fm-usage-ledger.sh list | jq -c .
+{"v":1,"seq":1,"at":1788332354,"event":"ledger-open","id":"ledger-open","task":"","gen":"","kind":"","harness":"","model":"","effort":"","project":"","mode":"","yolo":"","backend":"","pr":"","pr_head":"","landing":"","outcome":"","status_class":"","validator_harness":"","validator_model":""}
+{"v":1,"seq":2,"at":1788332354,"event":"spawn","id":"spawn:nutricheck-import-x1:s1788332352.1541680.16159","task":"nutricheck-import-x1","gen":"s1788332352.1541680.16159","kind":"ship","harness":"claude","model":"opus","effort":"high","project":"nutricheck","mode":"no-mistakes","yolo":"off","backend":"tmux","pr":"","pr_head":"","landing":"","outcome":"","status_class":"","validator_harness":"unknown","validator_model":"unknown"}
+{"v":1,"seq":3,"at":1788332354,"event":"pr","id":"pr:nutricheck-import-x1:s1788332352.1541680.16159:https://github.com/kunchenguid/nutricheck/pull/138:3d1f9b0a77c4e5661b2d8f0a9c3e4d5f60718293","task":"nutricheck-import-x1","gen":"s1788332352.1541680.16159","kind":"ship","harness":"claude","model":"opus","effort":"high","project":"nutricheck","mode":"no-mistakes","yolo":"off","backend":"tmux","pr":"https://github.com/kunchenguid/nutricheck/pull/138","pr_head":"3d1f9b0a77c4e5661b2d8f0a9c3e4d5f60718293","landing":"","outcome":"","status_class":"","validator_harness":"unknown","validator_model":"unknown"}
+{"v":1,"seq":4,"at":1788332355,"event":"cleanup","id":"cleanup:nutricheck-import-x1:s1788332352.1541680.16159","task":"nutricheck-import-x1","gen":"s1788332352.1541680.16159","kind":"ship","harness":"claude","model":"opus","effort":"high","project":"nutricheck","mode":"no-mistakes","yolo":"off","backend":"tmux","pr":"","pr_head":"","landing":"","outcome":"landed","status_class":"done","validator_harness":"unknown","validator_model":"unknown"}
+{"v":1,"seq":5,"at":1788332357,"event":"spawn","id":"spawn:nutricheck-pdf-x1:s1788332355.1548352.7879","task":"nutricheck-pdf-x1","gen":"s1788332355.1548352.7879","kind":"ship","harness":"claude","model":"gpt-5","effort":"medium","project":"nutricheck","mode":"local-only","yolo":"on","backend":"tmux","pr":"","pr_head":"","landing":"","outcome":"","status_class":"","validator_harness":"unknown","validator_model":"unknown"}
+{"v":1,"seq":6,"at":1788332358,"event":"merge","id":"merge:nutricheck-pdf-x1:-:555287e0426bc66bf8c6793c68f544315bffa2ca","task":"nutricheck-pdf-x1","gen":"s1788332355.1548352.7879","kind":"ship","harness":"claude","model":"gpt-5","effort":"medium","project":"nutricheck","mode":"local-only","yolo":"on","backend":"tmux","pr":"","pr_head":"","landing":"555287e0426bc66bf8c6793c68f544315bffa2ca","outcome":"merged","status_class":"","validator_harness":"unknown","validator_model":"unknown"}
+{"v":1,"seq":7,"at":1788332358,"event":"cleanup","id":"cleanup:nutricheck-pdf-x1:s1788332355.1548352.7879","task":"nutricheck-pdf-x1","gen":"s1788332355.1548352.7879","kind":"ship","harness":"claude","model":"gpt-5","effort":"medium","project":"nutricheck","mode":"local-only","yolo":"on","backend":"tmux","pr":"","pr_head":"","landing":"","outcome":"landed","status_class":"done","validator_harness":"unknown","validator_model":"unknown"}
 
-[1m8. The durable ledger outlived cleanup and still verifies.[0m
-$ L verify
-ok records=4 first_observed=1788325819
-$ L list
-{"v":1,"seq":1,"at":1788325819,"event":"ledger-open","id":"ledger-open","task":"","gen":"","kind":"","harness":"","model":"","effort":"","project":"","mode":"","yolo":"","backend":"","pr":"","pr_head":"","landing":"","outcome":"","status_class":"","validator_harness":"","validator_model":""}
-{"v":1,"seq":2,"at":1788325819,"event":"spawn","id":"spawn:ledger-demo-x1:s1788325817.1624.273","task":"ledger-demo-x1","gen":"s1788325817.1624.273","kind":"ship","harness":"claude","model":"opus","effort":"high","project":"project","mode":"no-mistakes","yolo":"off","backend":"tmux","pr":"","pr_head":"","landing":"","outcome":"","status_class":"","validator_harness":"unknown","validator_model":"unknown"}
-{"v":1,"seq":3,"at":1788325819,"event":"pr","id":"pr:ledger-demo-x1:s1788325817.1624.273:https://github.com/example/repo/pull/11:3333333333333333333333333333333333333333","task":"ledger-demo-x1","gen":"s1788325817.1624.273","kind":"ship","harness":"claude","model":"opus","effort":"high","project":"project","mode":"no-mistakes","yolo":"off","backend":"tmux","pr":"https://github.com/example/repo/pull/11","pr_head":"3333333333333333333333333333333333333333","landing":"","outcome":"","status_class":"","validator_harness":"unknown","validator_model":"unknown"}
-{"v":1,"seq":4,"at":1788325820,"event":"cleanup","id":"cleanup:ledger-demo-x1:s1788325817.1624.273","task":"ledger-demo-x1","gen":"s1788325817.1624.273","kind":"ship","harness":"claude","model":"opus","effort":"high","project":"project","mode":"no-mistakes","yolo":"off","backend":"tmux","pr":"","pr_head":"","landing":"","outcome":"landed","status_class":"done","validator_harness":"unknown","validator_model":"unknown"}
+== 7. THE AUDIT QUESTION: join a delivered change back to the model that produced it
 
-[1m9. THE JOIN THE AUDIT COULD NOT MAKE: merged PR -> the model that produced it.[0m
-  PR https://github.com/example/repo/pull/11
-    head     3333333333333333333333333333333333333333
-    harness  claude
-    model    opus
-    effort   high
-    outcome  landed (final status class: done)
-    delivery no-mistakes, yolo off
+  DELIVERED                                           TASK                  HARNESS  MODEL  EFFORT  PROJECT     MODE         YOLO  OUTCOME  STATUS
+  ---------                                           ----                  -------  -----  ------  -------     ----         ----  -------  ------
+  https://github.com/kunchenguid/nutricheck/pull/138  nutricheck-import-x1  claude   opus   high    nutricheck  no-mistakes  off   landed   done
+  local commit 555287e0426b                           nutricheck-pdf-x1     claude   gpt-5  medium  nutricheck  local-only   on    landed   done
 
-[1m10. Privacy boundary: no status note, no path, no token in the store; mode 0600.[0m
-$ grep -c 'PHI\|patient chart\|/tmp/fm-ledger-demo.lwPcoW/demo/wt\|/tmp/fm-ledger-demo.lwPcoW/demo/home/state' '/tmp/fm-ledger-demo.lwPcoW/demo/home/data/task-usage.jsonl' || echo '  0 private values found'
-0
-  0 private values found
-$ stat -c '%a %n' '/tmp/fm-ledger-demo.lwPcoW/demo/home/data/task-usage.jsonl'
-600 /tmp/fm-ledger-demo.lwPcoW/demo/home/data/task-usage.jsonl
+== 8. PRIVACY BOUNDARY: nothing private ever reached the store
+  absent from the ledger: /tmp/fm-ledger-demo.o9sfvq/wt-ship
+  absent from the ledger: /tmp/fm-ledger-demo.o9sfvq/wt-land
+  absent from the ledger: /tmp/fm-nutricheck-import-x1
+  absent from the ledger: captain notes were sensitive
+  absent from the ledger: /tmp/fm-ledger-demo.o9sfvq/nutricheck
+  absent from the ledger: /tmp/fm-ledger-demo.o9sfvq/home
 
-[1m11. Retention is explicit-only and never rewrites history behind a task.[0m
-$ L prune --days 400
-pruned 0 kept 4
-$ L verify
-ok records=4 first_observed=1788325819
+== 9. RETENTION is explicit, bounded, and never re-issues a sequence number
+$ fm-usage-ledger.sh prune            # nothing is past the 400-day horizon yet
+  pruned 0 kept 7
+$ # ... 500 days pass ...
+$ fm-usage-ledger.sh prune
+  pruned 6 kept 1
+$ fm-usage-ledger.sh list | jq -c '{seq,event,id}'
+  {"seq":7,"event":"ledger-open","id":"ledger-open"}
+$ fm-usage-ledger.sh record --event spawn --task next-x1 --gen g-next
+  recorded 8
+$ fm-usage-ledger.sh list --recent 1 | jq -c '{seq,event,id}'   # continues past every pruned seq
+  {"seq":8,"event":"spawn","id":"spawn:next-x1:g-next"}
+$ fm-usage-ledger.sh verify
+ok records=2 first_observed=1745132358
 
-[1m12. A local-only landing records the commit it landed, through the real fm-merge-local.sh.[0m
-merged fm/ledger-demo-x2 into local main (e390a04 -> 116ad53) in /tmp/fm-ledger-demo.lwPcoW/demo/project2
-$ L list --recent 1
-{"v":1,"seq":5,"at":1788325821,"event":"merge","id":"merge:ledger-demo-x2:-:116ad53ee9dfb001eb3fcd4ca066a4d98a9cd10d","task":"ledger-demo-x2","gen":"g-land","kind":"ship","harness":"codex","model":"gpt-5","effort":"medium","project":"project2","mode":"local-only","yolo":"off","backend":"tmux","pr":"","pr_head":"","landing":"116ad53ee9dfb001eb3fcd4ca066a4d98a9cd10d","outcome":"merged","status_class":"","validator_harness":"unknown","validator_model":"unknown"}
+store copied to /home/rafaelfadel/.no-mistakes/evidence/01M1GDHSP48G5PFRNY7BT2NWCA/task-usage.jsonl
