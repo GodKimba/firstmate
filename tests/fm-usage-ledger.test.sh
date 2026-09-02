@@ -1341,7 +1341,7 @@ remote_spawn_row_count() {  # <home> <event-id>
 
 test_a_remote_secondmate_that_cannot_arm_its_reply_source_is_still_recorded() {
   local id out rc=0 gen rec
-  id=remote-arm-x1
+  id="remote-arm-x1"
   make_remote_secondmate_case remote-arm "$id"
 
   out=$(FM_TEST_ARM_FAILS=1 run_remote_secondmate_spawn "$id" --secondmate \
@@ -1368,7 +1368,7 @@ test_a_remote_secondmate_that_cannot_arm_its_reply_source_is_still_recorded() {
 
   # A launch whose reply source does arm still records exactly one row, so the
   # relocated append did not start double-recording the ordinary path.
-  id=remote-armed-x1
+  id="remote-armed-x1"
   make_remote_secondmate_case remote-armed "$id"
   rc=0
   out=$(run_remote_secondmate_spawn "$id" --secondmate \
