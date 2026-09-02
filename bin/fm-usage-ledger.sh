@@ -28,13 +28,19 @@
 #    "validator_harness":"VH","validator_model":"VM"}
 #
 #   v      schema version, 1 today.
-#   seq    assigned under the lock, strictly increasing, and never re-issued in
-#          a store's lifetime. It starts at 1 and appends leave no gap; `prune`
-#          removes records, so gaps after a retention run are expected, and when
-#          retention leaves the coverage marker as the only record that marker
-#          carries the highest sequence the store had reached, so the next
-#          append still continues past every number a pruned record used. `id`
-#          is the stable key for joining exports taken at different times.
+#   seq    assigned under the lock, strictly increasing, and not re-issued in a
+#          store's lifetime as long as the record clock does not regress. It
+#          starts at 1 and appends leave no gap; `prune` removes records, so
+#          gaps after a retention run are expected, and when retention leaves
+#          the coverage marker as the only record that marker carries the
+#          highest sequence the store had reached, so the next append still
+#          continues past every number a pruned record used. A prune that keeps
+#          dated records instead continues from the last record it kept, which
+#          is the store's high-water mark only because appends land in
+#          increasing time order; a clock that jumps backwards can leave a
+#          lower-numbered record behind the horizon of a higher-numbered one it
+#          drops. `id` is the stable key for joining exports taken at different
+#          times.
 #   at     epoch seconds when the record was appended, never a time inferred
 #          from somewhere else. Because each record is written at its own
 #          lifecycle point, a spawn record's `at` IS that incarnation's spawn
