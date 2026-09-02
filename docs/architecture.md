@@ -308,7 +308,7 @@ A task's implementation axes - harness, model, effort, kind, project, delivery m
 That made the axes unrecoverable the moment a task finished, so a merged PR could not be joined back to the model that produced it.
 A durable, home-private, append-only ledger under `data/` closes that gap; [`bin/fm-usage-ledger.sh`](../bin/fm-usage-ledger.sh)'s header is the one owner of its schema, event identity, safety rules, and retention, and [configuration.md](configuration.md#task-usage-ledger-datatask-usagejsonl) is the operator-facing reference.
 
-The mechanism boundary is deliberately narrow, and its extension points are the four call sites rather than the record format.
+The mechanism boundary is deliberately narrow, and its extension points are the lifecycle call sites rather than the record format.
 `bin/fm-usage-ledger.sh` is the only thing that serializes a record, validates a target, or applies retention.
 [`bin/fm-usage-ledger-lib.sh`](../bin/fm-usage-ledger-lib.sh) owns only how a lifecycle script calls it: the effective home is passed explicitly so a secondmate records into its own ledger, and the helper always returns success so a failed observability write can never fail a launch that already happened, a merge that already landed, or a cleanup whose safety checks already passed.
 Every axis it stores comes from a strict allowlist read out of the task record through `fm-backend.sh`'s existing `fm_meta_get`, resolving the backend through the contract of whichever writer produced that record, and the final status class comes from `fm-classify-lib.sh`'s existing verb reader, so this feature restates no contract it does not own.
