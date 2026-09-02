@@ -229,7 +229,7 @@ That includes a `data/` directory the write can never take its lock in, such as 
 Records are written as a task is dispatched, registers a pull or merge request, lands, and is cleaned up; [architecture.md](architecture.md#task-attribution-outlives-cleanup) owns which script writes each one and why those points were chosen.
 A forced secondmate retirement discards every task still inside that home along with the home's own ledger, so each discarded task, at any nesting depth, is recorded in the retiring home's ledger instead of the one being deleted.
 That holds wherever the retiring home outlives the operation, which is every local retirement.
-On the remote-host leg of a forced retirement of a REMOTE secondmate the retiring home is itself the home being deleted, so the rows that leg writes - including the retired mate's own cleanup record, which reaches the same store and behaved that way before this ledger existed - go with it.
+On the remote-host leg of a forced retirement of a REMOTE secondmate the retiring home is itself the home being deleted, so nothing that leg records outlives it: its child rows go with the home, and the retired mate's own cleanup record - which targets that same store, as it did before this sweep recorded anything - is only reached after the home is gone, so it warns instead of writing.
 
 [`bin/fm-usage-ledger.sh`](../bin/fm-usage-ledger.sh)'s header is the single owner of the record schema, the stored-field allowlist and its privacy boundary, the event-identity rules that make repeated calls idempotent, and the safety and retention mechanics.
 Read it before parsing the file or reasoning about what the file may contain.
