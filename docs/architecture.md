@@ -314,8 +314,9 @@ The mechanism boundary is deliberately narrow, and its extension points are the 
 Every axis it stores comes from a strict allowlist read out of the task record through `fm-backend.sh`'s existing `fm_meta_get`, resolving the backend through the contract of whichever writer produced that record, and the final status class comes from `fm-classify-lib.sh`'s existing verb reader, so this feature restates no contract it does not own.
 
 Each call site sits at the single point where every supported primary harness and every spawn-capable runtime backend converges, rather than inside a per-harness or per-backend branch.
-`bin/fm-spawn.sh` records past its own commit point: a batch re-execs that single-task path once per pair, and a relaunch reaches it carrying a fresh `spawn_gen`, so a replacement worker becomes its own record rather than overwriting one.
-Its remote-secondmate launch returns earlier and carries its own record at that return.
+`bin/fm-spawn.sh` writes its record as the statement immediately after each point that leaves a launch's task record committed beyond rollback - a fresh spawn's fused In-flight transition, a relaunch's replacement publication, and a remote-secondmate launch's endpoint publication - so no span of code sits between a commit and its record for a later early return, signal exit, or error path to fall into.
+Recording twice is a no-op, so one incarnation yields exactly one record however many of those points it crosses, while a batch re-execs that single-task path once per pair and a relaunch mints a fresh `spawn_gen`, so a replacement worker becomes its own record rather than overwriting one.
+The task record an aborted Orca launch leaves behind is the deliberate exception and gets no spawn record, because a record there would assert a worker that never ran.
 `bin/fm-pr-check.sh` records after the poll is published, for GitHub and GitLab alike.
 `bin/fm-merge-outcome-lib.sh` records inside the one emitter both a self-performed merge and a poll-detected merge already share, and `bin/fm-merge-local.sh` records an approved local-only landing's commit.
 `bin/fm-teardown.sh` records immediately before the task record is removed, on the ordinary and remote-secondmate paths, so a refused teardown deliberately leaves no cleanup record for a task that is still live.
