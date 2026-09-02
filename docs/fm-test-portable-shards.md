@@ -84,8 +84,8 @@ Refresh the hints whenever the serial lane gains scripts, rather than waiting fo
 | `portable-serial-5of5` | 29 | 770981 ms (~12.85 min) |
 | imbalance | | 16 ms |
 
-Replaying the previous partition against each of the three source runs' real per-script durations, for the 139 scripts those runs measured, put its worst shard at 12.65 min against a 12.80 min hinted estimate, 63% of the 20-minute job cap.
-This table repacks that partition with one further 15182 ms script folded in, which leaves every shard ~0.05 min heavier and the headroom against the cap unchanged.
+Replaying this partition against each of the three source runs' real per-script durations, counting the two scripts those runs never measured at their hints, puts the worst shard at 12.69 min, 63% of the 20-minute job cap.
+Those two sit in different shards, and in none of the three runs is either of those the worst shard, so that headroom rests on measurement rather than on their hints.
 
 The single longest script, `tests/fm-watch-triage.test.sh` at 262626 ms, is the floor for any shard count.
 
