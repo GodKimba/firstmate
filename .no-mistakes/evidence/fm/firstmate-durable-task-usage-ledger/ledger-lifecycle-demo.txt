@@ -1,0 +1,142 @@
+
+== 0. a home that has never recorded anything has no ledger at all
+$ ls -A /tmp/fm-ledger-demo.zWas10/home/data
+
+== 1. a real ship task is spawned, pinned to a model and an effort
+$ spawn demoship-x1 /tmp/fm-ledger-demo.zWas10/demoship --mode no-mistakes --yolo off --model opus --effort high
+spawned demoship-x1 harness=claude kind=ship mode=no-mistakes yolo=off window=firstmate:fm-demoship-x1 worktree=/tmp/fm-ledger-demo.zWas10/demoship-wt
+
+== 1a. the volatile task record firstmate has always had
+$ cat /tmp/fm-ledger-demo.zWas10/home/state/demoship-x1.meta
+window=firstmate:fm-demoship-x1
+endpoint_task_id=demoship-x1
+worktree=/tmp/fm-ledger-demo.zWas10/demoship-wt
+project=/tmp/fm-ledger-demo.zWas10/demoship
+harness=claude
+kind=ship
+mode=no-mistakes
+yolo=off
+tasktmp=/tmp/fm-demoship-x1
+model=opus
+effort=high
+busy_gen=g1788352367.85456.6748
+spawn_gen=s1788352365.85256.3505
+
+== 1b. and now, durably, the ledger's first two records
+$ ledger list
+{"v":1,"seq":1,"at":1788352367,"event":"ledger-open","id":"ledger-open","task":"","gen":"","kind":"","harness":"","model":"","effort":"","project":"","mode":"","yolo":"","backend":"","pr":"","pr_head":"","landing":"","outcome":"","status_class":"","validator_harness":"","validator_model":""}
+{"v":1,"seq":2,"at":1788352367,"event":"spawn","id":"spawn:demoship-x1:s1788352365.85256.3505","task":"demoship-x1","gen":"s1788352365.85256.3505","kind":"ship","harness":"claude","model":"opus","effort":"high","project":"demoship","mode":"no-mistakes","yolo":"off","backend":"tmux","pr":"","pr_head":"","landing":"","outcome":"","status_class":"","validator_harness":"unknown","validator_model":"unknown"}
+
+this incarnation is s1788352365.85256.3505
+
+== 2. the task's PR is registered (real bin/fm-pr-check.sh)
+$ pr_check demoship-x1 https://github.com/example/repo/pull/4242
+armed: state/demoship-x1.check.sh
+$ ledger list --recent 1
+{"v":1,"seq":3,"at":1788352368,"event":"pr","id":"pr:demoship-x1:s1788352365.85256.3505:https://github.com/example/repo/pull/4242:8f2c1d4e6b7a90c3d5e2f14b6a8c0d9e3f5a7b12","task":"demoship-x1","gen":"s1788352365.85256.3505","kind":"ship","harness":"claude","model":"opus","effort":"high","project":"demoship","mode":"no-mistakes","yolo":"off","backend":"tmux","pr":"https://github.com/example/repo/pull/4242","pr_head":"8f2c1d4e6b7a90c3d5e2f14b6a8c0d9e3f5a7b12","landing":"","outcome":"","status_class":"","validator_harness":"unknown","validator_model":"unknown"}
+
+== 2a. the poll re-arms more than once - a repeat is idempotent, not a second row
+$ pr_check demoship-x1 https://github.com/example/repo/pull/4242
+armed: state/demoship-x1.check.sh
+pr rows in the store: 1
+
+== 3. the task ends and ordinary SUCCESSFUL cleanup runs (real bin/fm-teardown.sh)
+the status log cleanup is about to delete:
+  working: implementing the change
+  done: landed; captain said the client PHI export was wrong
+$ teardown demoship-x1
+/tmp/fm-ledger-demo.zWas10/demoship: already current
+teardown demoship-x1 complete (window firstmate:fm-demoship-x1, worktree /tmp/fm-ledger-demo.zWas10/demoship-wt)
+Backlog: demoship-x1 just finished (this home keeps no backlog at /tmp/fm-ledger-demo.zWas10/home/data/backlog.md). Update /tmp/fm-ledger-demo.zWas10/home/data/backlog.md - move demoship-x1 to Done, keep Done to the 10 most recent, then re-scan Queued and dispatch only work whose blockers are gone and date is due.
+
+== 3a. every volatile trace of the task is gone - this is the forensic gap
+  /tmp/fm-ledger-demo.zWas10/home/state/demoship-x1.meta: deleted by cleanup
+  /tmp/fm-ledger-demo.zWas10/home/state/demoship-x1.status: deleted by cleanup
+
+== 4. a local-only task lands through the real merge gate-action
+$ spawn demolocal-x1 /tmp/fm-ledger-demo.zWas10/demolocal --mode local-only --yolo on --harness codex --model gpt-5 --effort medium
+notice: demolocal-x1 ships mode=local-only while the standing posture for demolocal is no-mistakes - less rigor than the captain's standing posture; proceed only on a current explicit captain instruction or an intake judgment you can state
+spawned demolocal-x1 harness=codex kind=ship mode=local-only yolo=on window=firstmate:fm-demolocal-x1 worktree=/tmp/fm-ledger-demo.zWas10/demolocal-wt
+$ merge_local demolocal-x1
+merged fm/demolocal-x1 into local main (6cba08e -> bb5b242) in /tmp/fm-ledger-demo.zWas10/demolocal
+$ ledger list --recent 1
+{"v":1,"seq":6,"at":1788352371,"event":"merge","id":"merge:demolocal-x1:-:bb5b242b23e0afefb6fe59427dc5b604f0e46a47","task":"demolocal-x1","gen":"s1788352369.88052.14855","kind":"ship","harness":"codex","model":"gpt-5","effort":"medium","project":"demolocal","mode":"local-only","yolo":"on","backend":"tmux","pr":"","pr_head":"","landing":"bb5b242b23e0afefb6fe59427dc5b604f0e46a47","outcome":"merged","status_class":"","validator_harness":"unknown","validator_model":"unknown"}
+
+== 5. THE POINT: after cleanup deleted the task record, the outcome still joins to its model
+TASK [EVENT]                 HARNESS  MODEL    EFFORT  MODE         OUTCOME  PR / LANDING
+demoship-x1 [spawn]          claude   opus     high    no-mistakes           -
+demoship-x1 [pr]             claude   opus     high    no-mistakes           https://github.com/example/repo/pull/4242
+demoship-x1 [cleanup]        claude   opus     high    no-mistakes  landed   -
+demolocal-x1 [spawn]         codex    gpt-5    medium  local-only            -
+demolocal-x1 [merge]         codex    gpt-5    medium  local-only   merged   bb5b242b23e0afefb6fe59427dc5b604f0e46a47
+
+== 5a. one whole cleanup record, exactly as stored
+{"v":1,"seq":4,"at":1788352369,"event":"cleanup",
+     "id":"cleanup:demoship-x1:s1788352365.85256.3505",
+     "task":"demoship-x1",
+     "gen":"s1788352365.85256.3505",
+     "kind":"ship",
+     "harness":"claude",
+     "model":"opus",
+     "effort":"high",
+     "project":"demoship",
+     "mode":"no-mistakes",
+     "yolo":"off",
+     "backend":"tmux",
+     "pr":"",
+     "pr_head":"",
+     "landing":"",
+     "outcome":"landed",
+     "status_class":"done",
+     "validator_harness":"unknown",
+     "validator_model":"unknown"}
+
+== 6. the privacy boundary
+  absent: the captain's free-form status note is nowhere in the ledger
+  only the closed status class was kept: status_class=done
+  worktree / home / tasktmp paths in the store: 0
+  project recorded as its joinable directory name, never its path: demoship demolocal 
+
+== 7. the store is private, verifiable, and honest about when coverage began
+$ ledger path
+/tmp/fm-ledger-demo.zWas10/home/data/task-usage.jsonl
+$ stat -c %A %U %n /tmp/fm-ledger-demo.zWas10/home/data/task-usage.jsonl
+-rw------- rafaelfadel /tmp/fm-ledger-demo.zWas10/home/data/task-usage.jsonl
+$ ledger verify
+ok records=6 first_observed=1788352367
+the first-observed marker - nothing before it is backfilled:
+{"v":1,"seq":1,"at":1788352367,"event":"ledger-open",
+     "id":"ledger-open",
+     "task":"",
+     "gen":"",
+     "kind":"",
+     "harness":"",
+     "model":"",
+     "effort":"",
+     "project":"",
+     "mode":"",
+     "yolo":"",
+     "backend":"",
+     "pr":"",
+     "pr_head":"",
+     "landing":"",
+     "outcome":"",
+     "status_class":"",
+     "validator_harness":"",
+     "validator_model":""}
+
+== 8. retention is an explicit operator command, never an automatic rewrite
+ageing the two demoship rows to 500 days ago, past the 400-day default horizon...
+$ ledger prune
+pruned 2 kept 4
+$ ledger list
+{"v":1,"seq":1,"at":1788352367,"event":"ledger-open","id":"ledger-open","task":"","gen":"","kind":"","harness":"","model":"","effort":"","project":"","mode":"","yolo":"","backend":"","pr":"","pr_head":"","landing":"","outcome":"","status_class":"","validator_harness":"","validator_model":""}
+{"v":1,"seq":4,"at":1788352369,"event":"cleanup","id":"cleanup:demoship-x1:s1788352365.85256.3505","task":"demoship-x1","gen":"s1788352365.85256.3505","kind":"ship","harness":"claude","model":"opus","effort":"high","project":"demoship","mode":"no-mistakes","yolo":"off","backend":"tmux","pr":"","pr_head":"","landing":"","outcome":"landed","status_class":"done","validator_harness":"unknown","validator_model":"unknown"}
+{"v":1,"seq":5,"at":1788352371,"event":"spawn","id":"spawn:demolocal-x1:s1788352369.88052.14855","task":"demolocal-x1","gen":"s1788352369.88052.14855","kind":"ship","harness":"codex","model":"gpt-5","effort":"medium","project":"demolocal","mode":"local-only","yolo":"on","backend":"tmux","pr":"","pr_head":"","landing":"","outcome":"","status_class":"","validator_harness":"unknown","validator_model":"unknown"}
+{"v":1,"seq":6,"at":1788352371,"event":"merge","id":"merge:demolocal-x1:-:bb5b242b23e0afefb6fe59427dc5b604f0e46a47","task":"demolocal-x1","gen":"s1788352369.88052.14855","kind":"ship","harness":"codex","model":"gpt-5","effort":"medium","project":"demolocal","mode":"local-only","yolo":"on","backend":"tmux","pr":"","pr_head":"","landing":"bb5b242b23e0afefb6fe59427dc5b604f0e46a47","outcome":"merged","status_class":"","validator_harness":"unknown","validator_model":"unknown"}
+
+and the next append does not re-issue a sequence number a pruned record used:
+$ ledger list --recent 1
+{"v":1,"seq":7,"at":1788352371,"event":"spawn","id":"spawn:after-prune-x1:g-after","task":"after-prune-x1","gen":"g-after","kind":"","harness":"","model":"","effort":"","project":"","mode":"","yolo":"","backend":"","pr":"","pr_head":"","landing":"","outcome":"","status_class":"","validator_harness":"unknown","validator_model":"unknown"}
+
+== done
