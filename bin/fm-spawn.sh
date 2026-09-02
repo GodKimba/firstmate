@@ -3156,6 +3156,18 @@ if [ "$SPAWN_BACKLOG_COMMIT_STATUS" -ne 0 ]; then
 fi
 fm_lock_release "$SPAWN_META_LOCK"
 SPAWN_META_LOCK_HELD=0
+
+# The durable usage record for this incarnation. It is written here, past the
+# commit point and before the deferred-signal return below, so it describes a
+# worker that actually launched and an interruption that preserved a live worker
+# is recorded exactly like an uninterrupted spawn - a rolled-back or failed
+# dispatch has already exited above and still records nothing. It reaches every
+# harness and every spawn-capable backend because the single-task path below is
+# the one place all of them converge (a batch re-execs it per pair, and a
+# relaunch mints a new spawn_gen so its replacement worker is its own row).
+fm_usage_ledger_record "$FM_HOME" "$STATE" "$DATA" spawn "$ID" \
+  --meta "$STATE/$ID.meta"
+
 if [ -n "$SPAWN_DEFERRED_SIGNAL" ]; then
   case "$SPAWN_DEFERRED_SIGNAL" in
     HUP) SPAWN_DEFERRED_SIGNAL_STATUS=129 ;;
@@ -3165,14 +3177,6 @@ if [ -n "$SPAWN_DEFERRED_SIGNAL" ]; then
   echo "error: spawn of $ID was interrupted after launch delivery began; its paired task record and In-flight backlog state were preserved" >&2
   exit "$SPAWN_DEFERRED_SIGNAL_STATUS"
 fi
-
-# The durable usage record for this incarnation. It is written here, past the
-# commit point, so it describes a worker that actually launched, and it reaches
-# every harness and every spawn-capable backend because the single-task path
-# below is the one place all of them converge (a batch re-execs it per pair, and
-# a relaunch mints a new spawn_gen so its replacement worker is its own row).
-fm_usage_ledger_record "$FM_HOME" "$STATE" "$DATA" spawn "$ID" \
-  --meta "$STATE/$ID.meta"
 
 SPAWN_DELIVERY=
 [ -z "$MODE" ] || SPAWN_DELIVERY=" mode=$MODE yolo=$YOLO"

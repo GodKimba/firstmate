@@ -42,6 +42,9 @@
 #       retirement that removes the very home both of those lived in
 #   (l1) a spawn with no model or effort pinned records the writer's own
 #        "default" for both, never the blank that would claim no such axis
+#   (l2) a spawn interrupted after launch delivery began, which preserves both a
+#        live worker and its task record, records that incarnation exactly as an
+#        uninterrupted spawn does
 #   (m) a REFUSED teardown records no cleanup, because its task is still live
 #   (n) fm-pr-check records the canonical PR and the forge's head when it has one
 #   (o) fm-merge-local records the landing commit for an approved local landing
@@ -1156,6 +1159,75 @@ test_an_unpinned_spawn_records_the_default_axis_not_a_blank_one() {
   pass "an unpinned spawn records the default axis rather than a not-applicable blank"
 }
 
+# Shadow tasks-axi with a wrapper that delegates every verb to the real binary
+# and, the first time the fused In-flight transition runs, terminates the spawn
+# once that transition has committed. That is the one window where a spawn
+# returns non-zero having preserved a live worker and its published record.
+interrupt_lifecycle_spawn_after_backlog_commit() {  # <marker>
+  local marker=$1 real
+  real=$(command -v tasks-axi)
+  cat > "$CASE_FAKEBIN/tasks-axi" <<SH
+#!/usr/bin/env bash
+if [ "\${1:-}" = start ] && [ ! -f "$marker" ]; then
+  : > "$marker"
+  "$real" "\$@" || exit \$?
+  spawn_pid=\$(ps -o ppid= -p "\$PPID" | tr -d ' ')
+  case "\$spawn_pid" in ''|*[!0-9]*) exit 1 ;; esac
+  kill -TERM "\$spawn_pid"
+  exit 0
+fi
+exec "$real" "\$@"
+SH
+  chmod +x "$CASE_FAKEBIN/tasks-axi"
+}
+
+test_an_interrupted_but_preserved_spawn_is_still_recorded() {
+  local id out rc=0 gen rows rec
+  command -v tasks-axi >/dev/null 2>&1 || {
+    pass "skipped: tasks-axi is not installed, so the fused backlog transition is inert"
+    return 0
+  }
+  make_lifecycle_case interrupted
+  id=interrupted-x1
+  mkdir -p "$CASE_HOME/data/$id"
+  printf 'Delivery contract: mode=no-mistakes\nbrief\n' > "$CASE_HOME/data/$id/brief.md"
+  printf '%s\n' '# Backlog' '' '## In flight' '' '## Queued' '' '## Done' \
+    > "$CASE_HOME/data/backlog.md"
+  tasks-axi add "$id" "item for $id" --kind ship \
+    --file "$CASE_HOME/data/backlog.md" >/dev/null \
+    || fail "the backlog row this spawn transitions could not be seeded"
+  interrupt_lifecycle_spawn_after_backlog_commit "$TMP_ROOT/interrupted.start"
+
+  out=$(run_lifecycle_spawn "$id" "$CASE_PROJ" --mode no-mistakes --yolo off \
+    --model opus --effort high) || rc=$?
+  [ "$rc" -eq 143 ] \
+    || fail "an interrupted spawn did not exit on its deferred signal (rc=$rc): $out"
+  assert_contains "$out" "interrupted after launch delivery began" \
+    "an interrupted spawn stopped reporting its preserved outcome"
+  assert_present "$CASE_HOME/state/$id.meta" \
+    "the interrupted spawn removed the record its worker is paired with"
+  gen=$(sed -n 's/^spawn_gen=//p' "$CASE_HOME/state/$id.meta")
+  [ -n "$gen" ] || fail "the interrupted spawn recorded no incarnation token"
+
+  # The worker is live and may now be abandoned or preserved indefinitely, so
+  # this row is the only thing that can ever attribute it to a model.
+  rows=$(grep -c -F "\"id\":\"spawn:$id:$gen\"" "$(store "$CASE_HOME")" 2>/dev/null) || rows=0
+  [ "$rows" -eq 1 ] \
+    || fail "an interrupted spawn left $rows usage rows for one incarnation"
+  rec=$(record_for "$CASE_HOME" "spawn:$id:$gen")
+  [ "$(field "$rec" harness)" = claude ] || fail "the interrupted spawn row lost the harness: $rec"
+  [ "$(field "$rec" model)" = opus ] || fail "the interrupted spawn row lost the model: $rec"
+  [ "$(field "$rec" effort)" = high ] || fail "the interrupted spawn row lost the effort: $rec"
+  [ "$(field "$rec" kind)" = ship ] || fail "the interrupted spawn row lost the kind: $rec"
+  [ "$(field "$rec" mode)" = no-mistakes ] \
+    || fail "the interrupted spawn row lost the delivery mode: $rec"
+  [ "$(field "$rec" yolo)" = off ] \
+    || fail "the interrupted spawn row lost the autonomy posture: $rec"
+  ledger "$CASE_HOME" verify >/dev/null \
+    || fail "the interrupted spawn left a malformed ledger"
+  pass "a spawn interrupted after launch delivery still records its incarnation"
+}
+
 test_a_retirement_records_the_axes_and_class_of_the_retired_mate() {
   local id home_path ctl out rec
   make_lifecycle_case nested-sm
@@ -1489,6 +1561,7 @@ test_recording_never_rewrites_history
 test_invalid_requests_refuse_before_writing
 test_a_real_spawn_and_teardown_leave_the_task_attributable
 test_an_unpinned_spawn_records_the_default_axis_not_a_blank_one
+test_an_interrupted_but_preserved_spawn_is_still_recorded
 test_a_retirement_records_the_axes_and_class_of_the_retired_mate
 test_a_refused_teardown_records_no_cleanup
 test_pr_registration_records_the_canonical_pr_and_head
