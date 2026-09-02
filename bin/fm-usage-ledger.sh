@@ -28,9 +28,13 @@
 #    "validator_harness":"VH","validator_model":"VM"}
 #
 #   v      schema version, 1 today.
-#   seq    1-based position, assigned under the lock and strictly increasing.
-#          Appends never leave a gap; `prune` removes records, so gaps after a
-#          retention run are expected.
+#   seq    assigned under the lock, strictly increasing, and never re-issued in
+#          a store's lifetime. It starts at 1 and appends leave no gap; `prune`
+#          removes records, so gaps after a retention run are expected, and when
+#          retention leaves the coverage marker as the only record that marker
+#          carries the highest sequence the store had reached, so the next
+#          append still continues past every number a pruned record used. `id`
+#          is the stable key for joining exports taken at different times.
 #   at     epoch seconds when the record was appended, never a time inferred
 #          from somewhere else. Because each record is written at its own
 #          lifecycle point, a spawn record's `at` IS that incarnation's spawn
@@ -134,8 +138,10 @@
 # at-least-once merge notification, and a rerun teardown dedupe no matter how
 # much history sits between them. A task record with no spawn_gen= at all has
 # gen "unknown", so repeated launches of that one id would collapse into a
-# single spawn row; every writer that publishes a task record today mints one,
-# so that is a legacy record's shape rather than any current launch path.
+# single row; every path that CREATES a task record today mints one - the local
+# launch, the remote secondmate launch, and the Orca cleanup-recovery record an
+# aborted launch leaves behind - and every path that rewrites an existing record
+# preserves it, so that is a legacy record's shape rather than any current one.
 #
 # FIRST OBSERVED. The store's first record is `ledger-open`, whose `at` is the
 # instant this home started recording. NOTHING before it is backfilled, and no
@@ -415,6 +421,22 @@ ul_emit() {  # <seq> <at> <event> <id>
     "$F_PROJECT" "$F_MODE" "$F_YOLO" "$F_BACKEND" "$F_PR" "$F_PR_HEAD" \
     "$F_LANDING" "$F_OUTCOME" "$F_STATUS_CLASS" \
     "$F_VALIDATOR_HARNESS" "$F_VALIDATOR_MODEL"
+}
+
+# Retention removed every dated record, so the coverage marker is the only one
+# left and nothing in the file remembers how far the sequence had run. Carry
+# that high-water mark onto the marker instead, so no later append re-issues a
+# number a pruned record already used. Only the seq field is rewritten, so a
+# record some newer writer produced keeps the rest of its own shape.
+ul_prune_carry_sequence() {  # <staging-file> <high-water>
+  local file=$1 high=$2 line prefix rest
+  IFS= read -r line < "$file" || return 1
+  ul_record_parse "$line" || return 1
+  [ "$UL_REC_SEQ" -lt "$high" ] || return 0
+  prefix="{\"v\":$UL_REC_V,\"seq\":$UL_REC_SEQ,"
+  rest=${line#"$prefix"}
+  [ "$rest" != "$line" ] || return 1
+  printf '{"v":%s,"seq":%s,%s\n' "$UL_REC_V" "$high" "$rest" > "$file" || return 1
 }
 
 PRUNE_TMP=
@@ -709,6 +731,10 @@ if [ "$CMD" = prune ]; then
     printf '%s\n' "$line" || die "task-usage ledger retention could not be staged"
     KEPT=$((KEPT + 1))
   done < "$STORE" >> "$PRUNE_TMP"
+  if [ "$DROPPED" -gt 0 ] && [ "$KEPT" -eq 1 ]; then
+    ul_prune_carry_sequence "$PRUNE_TMP" "$UL_LAST_SEQ" \
+      || die "task-usage ledger retention could not carry the sequence forward at $STORE"
+  fi
   if [ "$DROPPED" -eq 0 ]; then
     rm -f -- "$PRUNE_TMP"
     PRUNE_TMP=

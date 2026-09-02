@@ -431,9 +431,9 @@ cmd_notify() {
 
   # Only a real inventory mismatch is a books problem the mate can fix; every
   # other invalidity is either unreadable state or nothing to reconcile.
-  # spawn_gen is empty only for a persistent remote secondmate, whose parent
-  # metadata never carries one (bin/fm-spawn.sh's spawn_remote_secondmate());
-  # host is its substitute identity there and is otherwise unused. Both are
+  # spawn_gen is empty only for a persistent remote secondmate route seeded
+  # before its parent metadata carried one; host is its substitute identity
+  # there and is otherwise unused. Both are
   # still character-restricted so a malformed sample cannot masquerade as
   # either a live incarnation token or a live host.
   #

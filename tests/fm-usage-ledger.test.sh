@@ -31,7 +31,8 @@
 #   (h) a malformed store refuses every verb and keeps its bytes, and an append
 #       reads only the records it needs, so `verify` is what finds the rest
 #   (i) a future schema version is preserved rather than declared malformed
-#   (j) retention keeps first-observed plus the horizon, atomically and at 0600
+#   (j) retention keeps first-observed plus the horizon, atomically and at 0600,
+#       and never lets a later append re-issue a sequence a pruned record used
 #   (k) invalid events, task ids, outcomes, URLs, and hashes refuse before writing
 #
 # Lifecycle instrumentation, driven through the real scripts:
@@ -923,6 +924,41 @@ test_retention_keeps_first_observed_and_the_horizon() {
   pass "retention keeps the first-observed marker plus its horizon, atomically and privately"
 }
 
+test_retention_never_reissues_a_pruned_sequence_number() {
+  local home path out old marker_seq rec new_seq
+  home=$(make_home retention-sequence)
+  write_task_meta "$home" alpha-x1
+  ledger "$home" record --event spawn --task a-x1 --gen g1 \
+    --meta "$home/state/alpha-x1.meta" >/dev/null
+  ledger "$home" record --event spawn --task a-x2 --gen g2 \
+    --meta "$home/state/alpha-x1.meta" >/dev/null
+  path=$(store "$home")
+
+  # A dormant home reaches the horizon on every dated record it has, so
+  # retention leaves nothing but the coverage marker and the file stops
+  # remembering how far the sequence had run.
+  old=$(( $(date +%s) - 500 * 86400 ))
+  sed -i.bak "s/^\({\"v\":1,\"seq\":[23],\)\"at\":[0-9]*/\1\"at\":$old/" "$path"
+  rm -f "$path.bak"
+  out=$(ledger "$home" prune) || fail "prune failed"
+  assert_contains "$out" "pruned 2 kept 1" "retention did not drop every dated record"
+  [ "$(field "$(head -1 "$path")" event)" = ledger-open ] \
+    || fail "retention discarded the first-observed marker"
+  marker_seq=$(sed -n 's/^{"v":1,"seq":\([0-9]*\),.*/\1/p' "$path")
+  [ "$marker_seq" -eq 3 ] \
+    || fail "the surviving marker did not carry the highest sequence the store reached: $marker_seq"
+  ledger "$home" verify >/dev/null || fail "carrying the sequence left a malformed store"
+
+  ledger "$home" record --event spawn --task b-x1 --gen g3 >/dev/null \
+    || fail "an append after a full prune failed"
+  rec=$(record_for "$home" "spawn:b-x1:g3")
+  new_seq=$(printf '%s' "$rec" | sed -n 's/^{"v":1,"seq":\([0-9]*\),.*/\1/p')
+  [ "$new_seq" -gt 3 ] \
+    || fail "an append after retention re-issued sequence $new_seq, which a pruned record already used"
+  ledger "$home" verify >/dev/null || fail "the append after retention left a malformed store"
+  pass "retention never lets a later append re-issue a pruned sequence number"
+}
+
 test_recording_never_rewrites_history() {
   local home path before
   home=$(make_home no-opportunistic-rewrite)
@@ -1448,6 +1484,7 @@ test_a_malformed_store_refuses_every_verb_and_keeps_its_bytes
 test_an_append_reads_only_the_records_it_needs
 test_a_future_schema_record_is_preserved_not_rejected
 test_retention_keeps_first_observed_and_the_horizon
+test_retention_never_reissues_a_pruned_sequence_number
 test_recording_never_rewrites_history
 test_invalid_requests_refuse_before_writing
 test_a_real_spawn_and_teardown_leave_the_task_attributable

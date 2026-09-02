@@ -1283,12 +1283,14 @@ families_for_changed_path() {
       # (the post-commit point and the remote-secondmate launch), whose only
       # regression lives in the pr-forge family. The remote-secondmate task
       # record is written on a path no portable family drives, and only the
-      # secondmate family's full remote launch proves what it records. Select
-      # those two scripts rather than either whole family.
+      # secondmate family's full remote launch proves what it records; the same
+      # holds for the Orca abort path's own task record and the orca family.
+      # Select those three scripts rather than any of those whole families.
       printf '%s\n' backend-dispatch
       printf '%s\n' pure-contract-unit
       printf '%s\n' "__script__:fm-usage-ledger.test.sh"
       printf '%s\n' "__script__:fm-remote-secondmate-lifecycle-e2e.test.sh"
+      printf '%s\n' "__script__:fm-backend-orca.test.sh"
       ;;
     bin/fm-send.sh|bin/fm-harness.sh|\
     bin/fm-peek.sh|bin/fm-composer*)
