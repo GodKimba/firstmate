@@ -1,0 +1,3 @@
+promoted live-promoted to ship mode=direct-PR yolo=off (teardown protection restored)
+wrote ship instructions for mode=direct-PR: /home/rafaelfadel/.no-mistakes/evidence/01M2S9JGV91NYZ9Q1H87D8A38P/live-home/data/live-promoted/ship-instructions.md
+next: FM_HOME=/home/rafaelfadel/.no-mistakes/evidence/01M2S9JGV91NYZ9Q1H87D8A38P/live-home bin/fm-send.sh fm-live-promoted "$(cat /home/rafaelfadel/.no-mistakes/evidence/01M2S9JGV91NYZ9Q1H87D8A38P/live-home/data/live-promoted/ship-instructions.md)"
