@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Single owner of a ship task's mode-specific "Definition of done" block.
+# Single owner of a ship task's mode-specific "Definition of done" block and
+# the destination contribution guidance shared by PR delivery modes.
 # Sourced by bin/fm-brief.sh, which renders it into a generated ship brief, and by
 # bin/fm-promote.sh, which renders it into the ship instructions a promoted scout
 # receives. Both paths must hand the worker the same contract: a promoted
