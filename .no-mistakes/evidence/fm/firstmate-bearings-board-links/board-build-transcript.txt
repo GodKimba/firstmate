@@ -1,0 +1,7 @@
+board: /home/rafaelfadel/.no-mistakes/worktrees/843750e572ff/01M494DJF02YJEG6N4J8AXFPCH/.test-live-board/.lavish/bearings-board.html
+session:
+  status: opened
+session: live
+served: /home/rafaelfadel/.no-mistakes/worktrees/843750e572ff/01M494DJF02YJEG6N4J8AXFPCH/.test-live-board/.lavish/bearings-board.html
+bound: lavish-6c83a5edd26ff2e4
+armed: lavish-6c83a5edd26ff2e4
