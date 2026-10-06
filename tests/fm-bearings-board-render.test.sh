@@ -116,8 +116,29 @@ render() {  # <home> <charted-json> [charted_more] [charted_warning_more]
   render_board "$1" '[]' "$2" "${3:-0}" "${4:-0}"
 }
 
+find_chrome() {
+  local candidate
+  if [ -n "${FM_CHROME_BIN:-}" ] && [ -x "$FM_CHROME_BIN" ]; then
+    printf '%s\n' "$FM_CHROME_BIN"
+    return 0
+  fi
+  for candidate in \
+    google-chrome \
+    google-chrome-stable \
+    chromium \
+    chromium-browser \
+    "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+  do
+    if command -v "$candidate" >/dev/null 2>&1; then
+      command -v "$candidate"
+      return 0
+    fi
+  done
+  return 1
+}
+
 test_card_text_addresses_render_as_safe_links() {
-  local home out url='HTTPS://workstation.example.ts.net:4387/session/16d4e6c54da3f5e6/Function_(mathematics)'
+  local home out chrome url='HTTPS://workstation.example.ts.net:4387/session/16d4e6c54da3f5e6/Function_(mathematics)'
   home=$(make_home card-links)
   out=$(render_board "$home" '[]' '[]' 0 0 "$(jq -n --arg url "$url" '[
     {key:"sample-links", type:"decision", repo:"sample", title:("Before and after " + $url),
@@ -146,8 +167,11 @@ test_card_text_addresses_render_as_safe_links() {
       and (field("bb-opt__label")[0].text == ("Yes " + $url))
   ' >/dev/null || fail "card text addresses did not render as safe links: $out"
   pass "card text addresses render as new-tab links and other text stays plain"
-  command -v google-chrome >/dev/null 2>&1 || fail "google-chrome is required to verify card wrapping"
-  out=$(node "$HARNESS" "$home/.lavish/bearings-board.html" --layout) \
+  if ! chrome=$(find_chrome); then
+    printf '%s\n' 'skip: card wrapping layout check requires Chrome or Chromium; set FM_CHROME_BIN'
+    return 0
+  fi
+  out=$(node "$HARNESS" "$home/.lavish/bearings-board.html" --layout "$chrome") \
     || fail "the browser could not measure card text wrapping"
   printf '%s' "$out" | jq -e '
     length == 5 and all(.wrap == "anywhere" and .width > 0 and .scroll <= .width)

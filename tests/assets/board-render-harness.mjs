@@ -34,7 +34,7 @@ if (process.argv[3] === "--layout") {
     </script>`;
     const file = join(dir, "board.html");
     writeFileSync(file, html.replace("</body>", probe + "</body>"));
-    const browser = spawnSync("google-chrome", ["--headless", "--no-sandbox", "--disable-gpu",
+    const browser = spawnSync(process.argv[4], ["--headless", "--no-sandbox", "--disable-gpu",
       "--no-first-run", "--user-data-dir=" + join(dir, "profile"), "--dump-dom", "file://" + file],
       { encoding: "utf8", timeout: 30000, maxBuffer: 5 * 1024 * 1024 });
     const result = browser.stdout?.match(/<pre id="layout-result">([^<]+)<\/pre>/);
