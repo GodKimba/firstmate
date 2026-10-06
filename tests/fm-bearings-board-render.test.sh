@@ -117,14 +117,14 @@ render() {  # <home> <charted-json> [charted_more] [charted_warning_more]
 }
 
 test_card_text_addresses_render_as_safe_links() {
-  local home out url='https://workstation.example.ts.net:4387/session/16d4e6c54da3f5e6'
+  local home out url='HTTPS://workstation.example.ts.net:4387/session/16d4e6c54da3f5e6/Function_(mathematics)'
   home=$(make_home card-links)
   out=$(render_board "$home" '[]' '[]' 0 0 "$(jq -n --arg url "$url" '[
-    {key:"sample-links", type:"decision", repo:"sample", title:"Before and after",
+    {key:"sample-links", type:"decision", repo:"sample", title:("Before and after " + $url),
      about:("Compare at " + $url + ". Then pick."),
      decide:"Keep it? <b>raw</b> javascript:alert(1) ftp://example.com/x",
-     options:[{value:"yes", label:"Yes", hint:("see (" + $url + ")")}]},
-    {key:"merge.sample-task", type:"merge", repo:"sample", title:"Merge it",
+     options:[{value:"yes", label:("Yes " + $url), hint:("see (" + $url + ").")}]},
+    {key:"merge.sample-task", type:"merge", repo:"sample", title:("Merge " + $url),
      detail:("preview " + $url), task_id:"sample-task",
      pr_url:"https://github.com/example/sample/pull/1", checks:"green", risk:"low",
      options:[{value:"merge", label:"Merge now"}]}
@@ -139,10 +139,22 @@ test_card_text_addresses_render_as_safe_links() {
       and (field("bb-ctx__v")[1] | .links == [] and (.tags | all(. == "#text"))
         and .text == "Keep it? <b>raw</b> javascript:alert(1) ftp://example.com/x")
       and (field("bb-opt__hint") | map(select(.links != [])) | length == 1
-        and (.[0] | onelink and .text == ("see (" + $url + ")")))
+        and (.[0] | onelink and .text == ("see (" + $url + ").")))
       and (field("bb-decision__detail") | length == 1 and (.[0] | onelink))
+      and (field("bb-decision__title") | length == 2 and all(onelink))
+      and (field("bb-opt__label") | length == 3 and all(.links == []))
+      and (field("bb-opt__label")[0].text == ("Yes " + $url))
   ' >/dev/null || fail "card text addresses did not render as safe links: $out"
   pass "card text addresses render as new-tab links and other text stays plain"
+  command -v google-chrome >/dev/null 2>&1 || fail "google-chrome is required to verify card wrapping"
+  out=$(node "$HARNESS" "$home/.lavish/bearings-board.html" --layout) \
+    || fail "the browser could not measure card text wrapping"
+  printf '%s' "$out" | jq -e '
+    length == 5 and all(.wrap == "anywhere" and .width > 0 and .scroll <= .width)
+      and ([.[] | select(.cls == "bb-decision__title")] | all(.links == 1))
+      and ([.[] | select(.cls == "bb-opt__label")] | all(.links == 0))
+  ' >/dev/null || fail "titles or option labels overflowed or had incorrect links: $out"
+  pass "long titles and plain option labels wrap inside narrow cards"
 }
 
 charted_next_count() {  # <render-json>
